@@ -3,3 +3,4 @@ python-telegram-bot
 ta_py
 requests
 websocket-client
+openai
