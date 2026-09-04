@@ -1,600 +1,819 @@
+```python
 import os
-import time
 import threading
+import time
 import requests
 import pandas as pd
-
 from flask import Flask
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
-
-from ta.trend import EMAIndicator, MACD, ADXIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.volatility import BollingerBands
+from telegram.ext import Application, CommandHandler, ContextTypes
+import ta
 
 
-app = Flask(__name__)
-
-# =========================================================
+# ============================================================
 # ENVIRONMENT
-# =========================================================
+# ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ACCESS_CODE = os.getenv("ACCESS_CODE", "")
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+
+# Yahoo Finance is used for external 1-minute market data.
+# No Alpha Vantage API key is required.
+
+
+# ============================================================
+# GLOBALS
+# ============================================================
 
 authorized_users = set()
 
+app = Flask(__name__)
 
-# =========================================================
-# WEB
-# =========================================================
+
+# ============================================================
+# FLASK HEALTH CHECK
+# ============================================================
 
 @app.route("/")
 def home():
     return "Priyanithan Indicator Signal Bot is running"
 
 
-# =========================================================
-# MARKET DATA
-# =========================================================
+@app.route("/health")
+def health():
+    return "OK"
+
+
+# ============================================================
+# PAIRS
+# ============================================================
+
+pairs = {
+    "EURUSD": ("EUR", "USD", "EURUSD=X"),
+    "GBPUSD": ("GBP", "USD", "GBPUSD=X"),
+}
+
+
+# ============================================================
+# YAHOO FINANCE - 1 MINUTE DATA
+# ============================================================
 
 def get_fx_data(from_symbol="EUR", to_symbol="USD", interval="1min"):
-    if not ALPHA_VANTAGE_API_KEY:
-        raise RuntimeError("ALPHA_VANTAGE_API_KEY is missing")
+    """
+    Fetch external 1-minute FX candles from Yahoo Finance.
 
-    url = "https://www.alphavantage.co/query"
+    EUR/USD -> EURUSD=X
+    GBP/USD -> GBPUSD=X
+
+    Returns a pandas DataFrame with:
+    open, high, low, close, volume
+    """
+
+    symbol = f"{from_symbol}{to_symbol}=X"
+
+    # Yahoo chart API supports interval=1m with recent data.
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
     params = {
-        "function": "FX_INTRADAY",
-        "from_symbol": from_symbol,
-        "to_symbol": to_symbol,
-        "interval": interval,
-        "outputsize": "full",
-        "apikey": ALPHA_VANTAGE_API_KEY,
+        "interval": "1m",
+        "range": "1d",
+        "includePrePost": "false",
+        "events": "div,splits"
     }
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=20
-    )
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
 
-    response.raise_for_status()
-
-    data = response.json()
-
-    if "Error Message" in data:
-        raise RuntimeError(data["Error Message"])
-
-    if "Note" in data:
-        raise RuntimeError(data["Note"])
-
-    if "Information" in data:
-        raise RuntimeError(data["Information"])
-
-    series_key = next(
-        (
-            key for key in data.keys()
-            if key.startswith("Time Series FX")
-        ),
-        None
-    )
-
-    if not series_key:
-        raise RuntimeError(
-            "No FX intraday data returned by provider"
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=15
         )
 
-    rows = []
+        response.raise_for_status()
 
-    for timestamp, values in data[series_key].items():
-        rows.append({
-            "time": timestamp,
-            "open": float(values["1. open"]),
-            "high": float(values["2. high"]),
-            "low": float(values["3. low"]),
-            "close": float(values["4. close"]),
-        })
+        data = response.json()
 
-    df = pd.DataFrame(rows)
+        if "chart" not in data:
+            raise Exception("Invalid Yahoo Finance response")
 
-    if df.empty:
-        raise RuntimeError("Market data is empty")
+        chart = data["chart"]
 
-    df["time"] = pd.to_datetime(df["time"])
-    df = df.sort_values("time").reset_index(drop=True)
+        if chart.get("error"):
+            raise Exception(str(chart["error"]))
 
-    return df
+        results = chart.get("result")
+
+        if not results:
+            raise Exception("No market data returned")
+
+        result = results[0]
+
+        timestamps = result.get("timestamp")
+
+        if not timestamps:
+            raise Exception("No candle timestamps returned")
+
+        indicators = result.get("indicators", {})
+        quote_list = indicators.get("quote", [])
+
+        if not quote_list:
+            raise Exception("No quote data returned")
+
+        quote = quote_list[0]
+
+        opens = quote.get("open", [])
+        highs = quote.get("high", [])
+        lows = quote.get("low", [])
+        closes = quote.get("close", [])
+        volumes = quote.get("volume", [])
+
+        length = min(
+            len(timestamps),
+            len(opens),
+            len(highs),
+            len(lows),
+            len(closes)
+        )
+
+        rows = []
+
+        for i in range(length):
+
+            if (
+                opens[i] is None
+                or highs[i] is None
+                or lows[i] is None
+                or closes[i] is None
+            ):
+                continue
+
+            volume = 0
+
+            if i < len(volumes) and volumes[i] is not None:
+                volume = volumes[i]
+
+            rows.append({
+                "timestamp": pd.to_datetime(
+                    timestamps[i],
+                    unit="s",
+                    utc=True
+                ),
+                "open": float(opens[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "close": float(closes[i]),
+                "volume": float(volume)
+            })
+
+        if not rows:
+            raise Exception("No valid candles returned")
+
+        df = pd.DataFrame(rows)
+
+        df = df.drop_duplicates(
+            subset=["timestamp"]
+        )
+
+        df = df.sort_values(
+            "timestamp"
+        )
+
+        df = df.set_index("timestamp")
+
+        # Remove candles with invalid prices
+        df = df[
+            (df["close"] > 0) &
+            (df["high"] > 0) &
+            (df["low"] > 0)
+        ]
+
+        # Need enough candles for EMA 200
+        if len(df) < 220:
+            raise Exception(
+                f"Not enough 1-minute candles: {len(df)}"
+            )
+
+        return df
 
 
-# =========================================================
+# ============================================================
 # INDICATOR ANALYSIS
-# =========================================================
+# ============================================================
 
 def analyze_indicators(df):
 
-    if len(df) < 200:
+    if df is None or len(df) < 220:
         return {
             "signal": "NO SIGNAL",
-            "reason": f"Need 200 candles, received {len(df)}"
+            "confidence": 0,
+            "reason": "Not enough candle data"
         }
 
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
+    data = df.copy()
 
-    # -----------------------------------------------------
+    close = data["close"]
+    high = data["high"]
+    low = data["low"]
+
+    # --------------------------------------------------------
     # EMA
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
-    df["ema9"] = EMAIndicator(
-        close=close,
+    data["ema9"] = ta.trend.ema_indicator(
+        close,
         window=9
-    ).ema_indicator()
+    )
 
-    df["ema21"] = EMAIndicator(
-        close=close,
+    data["ema21"] = ta.trend.ema_indicator(
+        close,
         window=21
-    ).ema_indicator()
+    )
 
-    df["ema50"] = EMAIndicator(
-        close=close,
+    data["ema50"] = ta.trend.ema_indicator(
+        close,
         window=50
-    ).ema_indicator()
+    )
 
-    df["ema200"] = EMAIndicator(
-        close=close,
+    data["ema200"] = ta.trend.ema_indicator(
+        close,
         window=200
-    ).ema_indicator()
+    )
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # RSI
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
-    df["rsi"] = RSIIndicator(
-        close=close,
+    data["rsi"] = ta.momentum.rsi(
+        close,
         window=14
-    ).rsi()
+    )
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # MACD
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
-    macd = MACD(
-        close=close,
-        window_fast=12,
+    macd = ta.trend.MACD(
+        close,
         window_slow=26,
+        window_fast=12,
         window_sign=9
     )
 
-    df["macd"] = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["macd_hist"] = macd.macd_diff()
+    data["macd"] = macd.macd()
+    data["macd_signal"] = macd.macd_signal()
+    data["macd_hist"] = macd.macd_diff()
 
-    # -----------------------------------------------------
-    # BOLLINGER
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # BOLLINGER BANDS
+    # --------------------------------------------------------
 
-    bb = BollingerBands(
-        close=close,
+    bb = ta.volatility.BollingerBands(
+        close,
         window=20,
         window_dev=2
     )
 
-    df["bb_upper"] = bb.bollinger_hband()
-    df["bb_middle"] = bb.bollinger_mavg()
-    df["bb_lower"] = bb.bollinger_lband()
+    data["bb_upper"] = bb.bollinger_hband()
+    data["bb_middle"] = bb.bollinger_mavg()
+    data["bb_lower"] = bb.bollinger_lband()
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # STOCHASTIC
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
-    stoch = StochasticOscillator(
-        high=high,
-        low=low,
-        close=close,
+    stoch = ta.momentum.StochasticOscillator(
+        high,
+        low,
+        close,
         window=14,
         smooth_window=3
     )
 
-    df["stoch_k"] = stoch.stoch()
-    df["stoch_d"] = stoch.stoch_signal()
+    data["stoch_k"] = stoch.stoch()
+    data["stoch_d"] = stoch.stoch_signal()
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # ADX
-    # -----------------------------------------------------
+    # --------------------------------------------------------
 
-    adx = ADXIndicator(
-        high=high,
-        low=low,
-        close=close,
+    adx = ta.trend.ADXIndicator(
+        high,
+        low,
+        close,
         window=14
     )
 
-    df["adx"] = adx.adx()
-    df["plus_di"] = adx.adx_pos()
-    df["minus_di"] = adx.adx_neg()
+    data["adx"] = adx.adx()
+    data["plus_di"] = adx.adx_pos()
+    data["minus_di"] = adx.adx_neg()
 
-    # -----------------------------------------------------
-    # LAST CANDLE
-    # -----------------------------------------------------
+    # Remove incomplete indicator rows
+    data = data.dropna()
 
-    last = df.iloc[-1]
+    if len(data) < 10:
+        return {
+            "signal": "NO SIGNAL",
+            "confidence": 0,
+            "reason": "Indicator calculation failed"
+        }
 
-    call = 0
-    put = 0
+    # --------------------------------------------------------
+    # USE LAST CLOSED CANDLE
+    # --------------------------------------------------------
 
-    call_reasons = []
-    put_reasons = []
+    # Yahoo's latest candle can still be forming.
+    # Use the previous candle as the closed candle.
+    if len(data) < 2:
+        return {
+            "signal": "NO SIGNAL",
+            "confidence": 0,
+            "reason": "No closed candle available"
+        }
 
-    # -----------------------------------------------------
-    # EMA TREND
-    # -----------------------------------------------------
+    current = data.iloc[-2]
+
+    candle_time = data.index[-2]
+
+    price = float(current["close"])
+
+    # --------------------------------------------------------
+    # CONFIRMATIONS
+    # --------------------------------------------------------
+
+    call_confirmations = []
+    put_confirmations = []
+
+    # ========================================================
+    # 1. EMA TREND
+    # ========================================================
 
     if (
-        last.ema9 >
-        last.ema21 >
-        last.ema50 >
-        last.ema200
+        current["ema9"] >
+        current["ema21"] >
+        current["ema50"] >
+        current["ema200"]
     ):
-        call += 1
-        call_reasons.append("EMA bullish trend")
-
-    elif (
-        last.ema9 <
-        last.ema21 <
-        last.ema50 <
-        last.ema200
-    ):
-        put += 1
-        put_reasons.append("EMA bearish trend")
-
-    # -----------------------------------------------------
-    # RSI
-    # -----------------------------------------------------
-
-    if 50 < last.rsi < 70:
-        call += 1
-        call_reasons.append(
-            f"RSI bullish ({last.rsi:.1f})"
+        call_confirmations.append(
+            "EMA bullish trend"
         )
 
-    elif 30 < last.rsi < 50:
-        put += 1
-        put_reasons.append(
-            f"RSI bearish ({last.rsi:.1f})"
+    elif (
+        current["ema9"] <
+        current["ema21"] <
+        current["ema50"] <
+        current["ema200"]
+    ):
+        put_confirmations.append(
+            "EMA bearish trend"
         )
 
-    # -----------------------------------------------------
-    # MACD
-    # -----------------------------------------------------
+    # ========================================================
+    # 2. RSI
+    # ========================================================
+
+    rsi_value = float(current["rsi"])
+
+    if 50 < rsi_value < 70:
+        call_confirmations.append(
+            "RSI bullish"
+        )
+
+    elif 30 < rsi_value < 50:
+        put_confirmations.append(
+            "RSI bearish"
+        )
+
+    # ========================================================
+    # 3. MACD
+    # ========================================================
+
+    macd_value = float(current["macd"])
+    macd_signal = float(current["macd_signal"])
+    macd_hist = float(current["macd_hist"])
 
     if (
-        last.macd > last.macd_signal
-        and last.macd_hist > 0
+        macd_value > macd_signal
+        and macd_hist > 0
     ):
-        call += 1
-        call_reasons.append("MACD bullish")
+        call_confirmations.append(
+            "MACD bullish"
+        )
 
     elif (
-        last.macd < last.macd_signal
-        and last.macd_hist < 0
+        macd_value < macd_signal
+        and macd_hist < 0
     ):
-        put += 1
-        put_reasons.append("MACD bearish")
+        put_confirmations.append(
+            "MACD bearish"
+        )
 
-    # -----------------------------------------------------
-    # BOLLINGER
-    # -----------------------------------------------------
+    # ========================================================
+    # 4. BOLLINGER BAND
+    # ========================================================
 
-    if last.close > last.bb_middle:
-        call += 1
-        call_reasons.append("Bollinger bullish")
+    bb_middle = float(current["bb_middle"])
 
-    elif last.close < last.bb_middle:
-        put += 1
-        put_reasons.append("Bollinger bearish")
+    if price > bb_middle:
+        call_confirmations.append(
+            "Bollinger bullish"
+        )
 
-    # -----------------------------------------------------
-    # STOCHASTIC
-    # -----------------------------------------------------
+    elif price < bb_middle:
+        put_confirmations.append(
+            "Bollinger bearish"
+        )
+
+    # ========================================================
+    # 5. STOCHASTIC
+    # ========================================================
+
+    stoch_k = float(current["stoch_k"])
+    stoch_d = float(current["stoch_d"])
 
     if (
-        last.stoch_k > last.stoch_d
-        and last.stoch_k < 80
+        stoch_k > stoch_d
+        and stoch_k < 80
     ):
-        call += 1
-        call_reasons.append("Stochastic bullish")
+        call_confirmations.append(
+            "Stochastic bullish"
+        )
 
     elif (
-        last.stoch_k < last.stoch_d
-        and last.stoch_k > 20
+        stoch_k < stoch_d
+        and stoch_k > 20
     ):
-        put += 1
-        put_reasons.append("Stochastic bearish")
+        put_confirmations.append(
+            "Stochastic bearish"
+        )
 
-    # -----------------------------------------------------
-    # ADX + DI
-    # -----------------------------------------------------
+    # ========================================================
+    # 6. ADX + DI
+    # ========================================================
 
-    if last.adx >= 20:
+    adx_value = float(current["adx"])
+    plus_di = float(current["plus_di"])
+    minus_di = float(current["minus_di"])
 
-        if last.plus_di > last.minus_di:
-            call += 1
-            call_reasons.append(
-                f"ADX bullish ({last.adx:.1f})"
-            )
+    if (
+        adx_value >= 20
+        and plus_di > minus_di
+    ):
+        call_confirmations.append(
+            "ADX bullish"
+        )
 
-        elif last.minus_di > last.plus_di:
-            put += 1
-            put_reasons.append(
-                f"ADX bearish ({last.adx:.1f})"
-            )
+    elif (
+        adx_value >= 20
+        and minus_di > plus_di
+    ):
+        put_confirmations.append(
+            "ADX bearish"
+        )
 
-    # -----------------------------------------------------
-    # FINAL SIGNAL
-    # -----------------------------------------------------
+    # ========================================================
+    # FINAL DECISION
+    # ========================================================
 
-    total = 6
+    call_count = len(call_confirmations)
+    put_count = len(put_confirmations)
 
-    if call >= 4 and call > put:
+    total_indicators = 6
+
+    signal = "NO SIGNAL"
+    confidence = 0
+
+    if (
+        call_count >= 4
+        and call_count > put_count
+    ):
         signal = "CALL"
-        confirmations = call
         confidence = round(
-            (call / total) * 100
+            (call_count / total_indicators) * 100,
+            1
         )
 
-    elif put >= 4 and put > call:
+    elif (
+        put_count >= 4
+        and put_count > call_count
+    ):
         signal = "PUT"
-        confirmations = put
         confidence = round(
-            (put / total) * 100
+            (put_count / total_indicators) * 100,
+            1
         )
-
-    else:
-        signal = "NO SIGNAL"
-        confirmations = max(call, put)
-        confidence = 0
 
     return {
         "signal": signal,
-        "confirmations": confirmations,
         "confidence": confidence,
-
-        "price": float(last.close),
-
-        "ema9": float(last.ema9),
-        "ema21": float(last.ema21),
-        "ema50": float(last.ema50),
-        "ema200": float(last.ema200),
-
-        "rsi": float(last.rsi),
-
-        "macd": float(last.macd),
-        "macd_signal": float(last.macd_signal),
-        "macd_hist": float(last.macd_hist),
-
-        "bb_upper": float(last.bb_upper),
-        "bb_middle": float(last.bb_middle),
-        "bb_lower": float(last.bb_lower),
-
-        "stoch_k": float(last.stoch_k),
-        "stoch_d": float(last.stoch_d),
-
-        "adx": float(last.adx),
-        "plus_di": float(last.plus_di),
-        "minus_di": float(last.minus_di),
-
-        "call_reasons": call_reasons,
-        "put_reasons": put_reasons,
-
-        "timestamp": str(last["time"]),
+        "price": price,
+        "candle_time": candle_time,
+        "rsi": rsi_value,
+        "macd": macd_value,
+        "macd_signal": macd_signal,
+        "macd_hist": macd_hist,
+        "ema9": float(current["ema9"]),
+        "ema21": float(current["ema21"]),
+        "ema50": float(current["ema50"]),
+        "ema200": float(current["ema200"]),
+        "bb_upper": float(current["bb_upper"]),
+        "bb_middle": bb_middle,
+        "bb_lower": float(current["bb_lower"]),
+        "stoch_k": stoch_k,
+        "stoch_d": stoch_d,
+        "adx": adx_value,
+        "plus_di": plus_di,
+        "minus_di": minus_di,
+        "call_count": call_count,
+        "put_count": put_count,
+        "call_confirmations": call_confirmations,
+        "put_confirmations": put_confirmations
     }
 
 
-# =========================================================
-# FORMAT SIGNAL
-# =========================================================
+# ============================================================
+# TELEGRAM AUTHORIZATION
+# ============================================================
 
-def format_signal(result, market):
+def is_authorized(user_id):
 
-    call_reasons = result.get(
-        "call_reasons",
-        []
-    )
-
-    put_reasons = result.get(
-        "put_reasons",
-        []
-    )
-
-    call_text = "\n".join(
-        f"• {x}" for x in call_reasons
-    ) or "• None"
-
-    put_text = "\n".join(
-        f"• {x}" for x in put_reasons
-    ) or "• None"
-
-    signal = result["signal"]
-
-    if signal == "CALL":
-        signal_icon = "🟢"
-    elif signal == "PUT":
-        signal_icon = "🔴"
-    else:
-        signal_icon = "⚪"
-
-    return (
-        "📊 INDICATOR ANALYSIS\n\n"
-
-        f"💱 Market: {market}\n"
-        f"💰 Price: {result['price']:.5f}\n"
-        "⏱ Timeframe: 1 minute\n"
-        f"🕐 Data: {result['timestamp']} UTC\n\n"
-
-        "📈 EMA\n"
-        f"EMA9: {result['ema9']:.5f}\n"
-        f"EMA21: {result['ema21']:.5f}\n"
-        f"EMA50: {result['ema50']:.5f}\n"
-        f"EMA200: {result['ema200']:.5f}\n\n"
-
-        f"📊 RSI: {result['rsi']:.2f}\n\n"
-
-        "📉 MACD\n"
-        f"MACD: {result['macd']:.5f}\n"
-        f"Signal: {result['macd_signal']:.5f}\n"
-        f"Histogram: {result['macd_hist']:.5f}\n\n"
-
-        "〰️ Bollinger\n"
-        f"Upper: {result['bb_upper']:.5f}\n"
-        f"Middle: {result['bb_middle']:.5f}\n"
-        f"Lower: {result['bb_lower']:.5f}\n\n"
-
-        "📐 Stochastic\n"
-        f"%K: {result['stoch_k']:.2f}\n"
-        f"%D: {result['stoch_d']:.2f}\n\n"
-
-        "💪 ADX\n"
-        f"ADX: {result['adx']:.2f}\n"
-        f"+DI: {result['plus_di']:.2f}\n"
-        f"-DI: {result['minus_di']:.2f}\n\n"
-
-        f"🟢 CALL confirmations: "
-        f"{len(call_reasons)}\n"
-        f"{call_text}\n\n"
-
-        f"🔴 PUT confirmations: "
-        f"{len(put_reasons)}\n"
-        f"{put_text}\n\n"
-
-        f"{signal_icon} SIGNAL: {signal}\n"
-        f"Confirmations: {result['confirmations']}\n"
-        f"Confidence: {result['confidence']}/100\n\n"
-
-        "⚡ Auto-trade: OFF\n"
-        "🛑 Martingale: OFF\n\n"
-
-        "⚠️ Indicator signal only. "
-        "Not a guaranteed prediction."
-    )
+    return user_id in authorized_users
 
 
-# =========================================================
+# ============================================================
 # /START
-# =========================================================
+# ============================================================
 
-async def start(
+async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user_id = update.effective_user.id
+    user = update.effective_user
 
-    if user_id in authorized_users:
+    if not user:
+        return
 
-        await update.message.reply_text(
-            "🔓 Access authorized\n\n"
-            "🤖 Priyanithan Indicator Bot\n"
-            "📊 Live Indicator Analysis: READY\n"
-            "📈 EMA: READY\n"
-            "📊 RSI: READY\n"
-            "📉 MACD: READY\n"
-            "〰️ Bollinger: READY\n"
-            "📐 Stochastic: READY\n"
-            "💪 ADX: READY\n"
-            "⚡ Auto-trade: OFF\n"
-            "🛑 Martingale: OFF\n\n"
-            "Use /signal EURUSD"
-        )
-
-    else:
-
-        await update.message.reply_text(
-            "🔐 Private Access\n\n"
-            "/access YOUR_CODE"
-        )
+    await update.message.reply_text(
+        "🤖 Priyanithan Indicator Signal Bot\n\n"
+        "📊 1-Minute Indicator Engine\n"
+        "💱 EURUSD / GBPUSD\n"
+        "📈 EMA • RSI • MACD • BB • Stochastic • ADX\n\n"
+        "🔐 Use /access YOUR_CODE to authorize."
+    )
 
 
-# =========================================================
+# ============================================================
 # /ACCESS
-# =========================================================
+# ============================================================
 
-async def access(
+async def access_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user_id = update.effective_user.id
+    user = update.effective_user
+
+    if not user:
+        return
+
+    user_id = user.id
 
     if not ACCESS_CODE:
-
         await update.message.reply_text(
-            "⚠️ ACCESS_CODE is not configured."
+            "❌ ACCESS_CODE is not configured on the server."
         )
         return
 
     if not context.args:
 
         await update.message.reply_text(
-            "Usage:\n/access YOUR_CODE"
+            "🔐 Usage:\n"
+            "/access YOUR_CODE"
         )
+
         return
 
-    if context.args[0] == ACCESS_CODE:
+    supplied_code = context.args[0]
+
+    if supplied_code == ACCESS_CODE:
 
         authorized_users.add(user_id)
 
         await update.message.reply_text(
-            "✅ ACCESS GRANTED\n\n"
-            "📊 Indicator Engine: READY\n"
+            "✅ Access authorized.\n\n"
+            "📊 Indicator engine: READY\n"
+            "📡 Market data: Yahoo Finance 1-minute\n"
             "⚡ Auto-trade: OFF\n"
-            "🛑 Martingale: OFF\n\n"
-            "Use /signal EURUSD"
+            "🛑 Martingale: OFF"
         )
 
     else:
 
         await update.message.reply_text(
-            "❌ ACCESS DENIED"
+            "❌ Invalid access code."
         )
 
 
-# =========================================================
-# /SIGNAL
-# =========================================================
+# ============================================================
+# /STATUS
+# ============================================================
 
-async def signal(
+async def status_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user_id = update.effective_user.id
+    user = update.effective_user
 
-    if user_id not in authorized_users:
+    if not user:
+        return
+
+    if not is_authorized(user.id):
 
         await update.message.reply_text(
-            "🔒 Access denied."
+            "🔐 Authorization required.\n\n"
+            "Use /access YOUR_CODE"
         )
+
+        return
+
+    await update.message.reply_text(
+        "🟢 BOT STATUS: ONLINE\n\n"
+        "🔐 Access: AUTHORIZED\n"
+        "📊 Indicator Engine: READY\n"
+        "📈 EMA 9/21/50/200: READY\n"
+        "📊 RSI 14: READY\n"
+        "📉 MACD: READY\n"
+        "〽️ Bollinger Bands: READY\n"
+        "📊 Stochastic: READY\n"
+        "📈 ADX: READY\n"
+        "📡 Market Data: Yahoo Finance 1-minute\n"
+        "💱 EURUSD: READY\n"
+        "💷 GBPUSD: READY\n"
+        "⚡ Auto-trade: OFF\n"
+        "🛑 Martingale: OFF"
+    )
+
+
+# ============================================================
+# FORMAT SIGNAL
+# ============================================================
+
+def format_signal(
+    market,
+    analysis
+):
+
+    signal = analysis.get("signal", "NO SIGNAL")
+
+    confidence = analysis.get(
+        "confidence",
+        0
+    )
+
+    price = analysis.get(
+        "price",
+        0
+    )
+
+    candle_time = analysis.get(
+        "candle_time",
+        "-"
+    )
+
+    call_count = analysis.get(
+        "call_count",
+        0
+    )
+
+    put_count = analysis.get(
+        "put_count",
+        0
+    )
+
+    call_confirmations = analysis.get(
+        "call_confirmations",
+        []
+    )
+
+    put_confirmations = analysis.get(
+        "put_confirmations",
+        []
+    )
+
+    if signal == "CALL":
+
+        direction = "🟢 CALL"
+
+        confirmation_text = "\n".join(
+            f"  ✅ {item}"
+            for item in call_confirmations
+        )
+
+    elif signal == "PUT":
+
+        direction = "🔴 PUT"
+
+        confirmation_text = "\n".join(
+            f"  ✅ {item}"
+            for item in put_confirmations
+        )
+
+    else:
+
+        direction = "⚪ NO SIGNAL"
+
+        confirmation_text = (
+            "  CALL confirmations: "
+            f"{call_count}\n"
+            "  PUT confirmations: "
+            f"{put_count}"
+        )
+
+    return (
+        "📊 INDICATOR ANALYSIS\n\n"
+        f"💱 Market: {market}\n"
+        f"💰 Price: {price:.5f}\n"
+        "⏱ Timeframe: 1 minute\n"
+        f"🕐 Closed candle: {candle_time}\n\n"
+
+        f"EMA9: {analysis.get('ema9', 0):.5f}\n"
+        f"EMA21: {analysis.get('ema21', 0):.5f}\n"
+        f"EMA50: {analysis.get('ema50', 0):.5f}\n"
+        f"EMA200: {analysis.get('ema200', 0):.5f}\n\n"
+
+        f"RSI: {analysis.get('rsi', 0):.2f}\n"
+        f"MACD: {analysis.get('macd', 0):.5f}\n"
+        f"Signal: {analysis.get('macd_signal', 0):.5f}\n"
+        f"Histogram: {analysis.get('macd_hist', 0):.5f}\n\n"
+
+        f"Bollinger Upper: "
+        f"{analysis.get('bb_upper', 0):.5f}\n"
+        f"Bollinger Middle: "
+        f"{analysis.get('bb_middle', 0):.5f}\n"
+        f"Bollinger Lower: "
+        f"{analysis.get('bb_lower', 0):.5f}\n\n"
+
+        f"Stoch K: {analysis.get('stoch_k', 0):.2f}\n"
+        f"Stoch D: {analysis.get('stoch_d', 0):.2f}\n\n"
+
+        f"ADX: {analysis.get('adx', 0):.2f}\n"
+        f"+DI: {analysis.get('plus_di', 0):.2f}\n"
+        f"-DI: {analysis.get('minus_di', 0):.2f}\n\n"
+
+        f"🟢 CALL confirmations: {call_count}\n"
+        f"🔴 PUT confirmations: {put_count}\n\n"
+
+        f"🎯 SIGNAL: {direction}\n"
+        f"📊 Indicator score: {confidence}%\n\n"
+
+        f"Confirmations:\n"
+        f"{confirmation_text}\n\n"
+
+        "📡 Data source: Yahoo Finance\n"
+        "⚠️ External market data — not Olymp Trade's official quote feed.\n"
+        "⚡ Auto-trade: OFF"
+    )
+
+
+# ============================================================
+# /SIGNAL
+# ============================================================
+
+async def signal_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    if not is_authorized(user.id):
+
+        await update.message.reply_text(
+            "🔐 Authorization required.\n\n"
+            "Use /access YOUR_CODE"
+        )
+
         return
 
     if not context.args:
 
-        market = "EURUSD"
+        await update.message.reply_text(
+            "📌 Usage:\n\n"
+            "/signal EURUSD\n"
+            "/signal GBPUSD"
+        )
 
-    else:
+        return
 
-        market = context.args[0].upper()
-
-    pairs = {
-        "EURUSD": ("EUR", "USD"),
-        "GBPUSD": ("GBP", "USD"),
-    }
+    market = context.args[0].upper()
 
     if market not in pairs:
 
@@ -604,15 +823,16 @@ async def signal(
             "/signal EURUSD\n"
             "/signal GBPUSD"
         )
+
         return
 
-    await update.message.reply_text(
+    from_symbol, to_symbol, yahoo_symbol = pairs[market]
+
+    loading_message = await update.message.reply_text(
         f"📡 Fetching live {market} 1-minute data..."
     )
 
     try:
-
-        from_symbol, to_symbol = pairs[market]
 
         df = get_fx_data(
             from_symbol,
@@ -620,77 +840,68 @@ async def signal(
             "1min"
         )
 
-        result = analyze_indicators(df)
+        analysis = analyze_indicators(df)
 
-        text = format_signal(
-            result,
-            market
-        )
+        if analysis.get("signal") == "NO SIGNAL":
 
-        await update.message.reply_text(
-            text
+            await loading_message.edit_text(
+                format_signal(
+                    market,
+                    analysis
+                )
+            )
+
+            return
+
+        await loading_message.edit_text(
+            format_signal(
+                market,
+                analysis
+            )
         )
 
     except Exception as e:
 
-        print("Signal error:", e)
+        error_message = str(e)
 
-        await update.message.reply_text(
+        # Avoid sending excessively long server errors to Telegram.
+        if len(error_message) > 500:
+            error_message = error_message[:500] + "..."
+
+        await loading_message.edit_text(
             "❌ LIVE MARKET DATA FAILED\n\n"
-            f"Market: {market}\n"
-            f"Reason: {str(e)}\n\n"
+            f"Market: {market}\n\n"
+            f"Reason: {error_message}\n\n"
             "No signal generated."
         )
 
 
-# =========================================================
-# /STATUS
-# =========================================================
+# ============================================================
+# ERROR HANDLER
+# ============================================================
 
-async def status(
-    update: Update,
+async def error_handler(
+    update: object,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user_id = update.effective_user.id
-
-    if user_id not in authorized_users:
-
-        await update.message.reply_text(
-            "🔒 Access denied."
-        )
-        return
-
-    market_status = (
-        "CONFIGURED"
-        if ALPHA_VANTAGE_API_KEY
-        else "NOT CONFIGURED"
-    )
-
-    await update.message.reply_text(
-        "🟢 Bot Status: ONLINE\n"
-        "🔐 Access: AUTHORIZED\n"
-        f"📡 Market API: {market_status}\n"
-        "📊 Indicator Engine: READY\n"
-        "📈 EMA 9/21/50/200: READY\n"
-        "📊 RSI: READY\n"
-        "📉 MACD: READY\n"
-        "〰️ Bollinger: READY\n"
-        "📐 Stochastic: READY\n"
-        "💪 ADX: READY\n"
-        "⚡ Auto-trade: OFF\n"
-        "🛑 Martingale: OFF"
+    print(
+        "Telegram error:",
+        context.error
     )
 
 
-# =========================================================
-# WEB SERVER
-# =========================================================
+# ============================================================
+# START FLASK SERVER
+# ============================================================
 
-def run_web():
+def run_flask():
 
     port = int(
-        os.getenv("PORT", "10000")
+        os.getenv(
+            "PORT",
+            "10000"
+        )
     )
 
     app.run(
@@ -699,50 +910,120 @@ def run_web():
     )
 
 
-# =========================================================
+# ============================================================
 # MAIN
-# =========================================================
+# ============================================================
 
 def main():
 
     if not TELEGRAM_BOT_TOKEN:
 
         print(
-            "TELEGRAM_BOT_TOKEN is not configured"
+            "❌ TELEGRAM_BOT_TOKEN is not configured"
         )
 
         return
 
+    print(
+        "======================================"
+    )
+
+    print(
+        "Priyanithan Indicator Signal Bot"
+    )
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "Market data: Yahoo Finance"
+    )
+
+    print(
+        "Timeframe: 1 minute"
+    )
+
+    print(
+        "Pairs: EURUSD / GBPUSD"
+    )
+
+    print(
+        "Auto-trade: OFF"
+    )
+
+    print(
+        "Martingale: OFF"
+    )
+
+    print(
+        "AI: OFF"
+    )
+
+    print(
+        "======================================"
+    )
+
+    # Flask web server
+    flask_thread = threading.Thread(
+        target=run_flask,
+        daemon=True
+    )
+
+    flask_thread.start()
+
+    # Telegram application
     telegram_app = (
-        Application
-        .builder()
+        Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .build()
     )
 
     telegram_app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start_command
+        )
     )
 
     telegram_app.add_handler(
-        CommandHandler("access", access)
+        CommandHandler(
+            "access",
+            access_command
+        )
     )
 
     telegram_app.add_handler(
-        CommandHandler("status", status)
+        CommandHandler(
+            "status",
+            status_command
+        )
     )
 
     telegram_app.add_handler(
-        CommandHandler("signal", signal)
+        CommandHandler(
+            "signal",
+            signal_command
+        )
     )
 
-    threading.Thread(
-        target=run_web,
-        daemon=True
-    ).start()
+    telegram_app.add_error_handler(
+        error_handler
+    )
 
-    telegram_app.run_polling()
+    print(
+        "🤖 Telegram polling started..."
+    )
 
+    telegram_app.run_polling(
+        drop_pending_updates=True
+    )
+
+
+# ============================================================
+# RUN
+# ============================================================
 
 if __name__ == "__main__":
     main()
+```
