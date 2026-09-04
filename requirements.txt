@@ -3,3 +3,4 @@ python-telegram-bot
 ta_py
 requests
 websocket-client
+git+https://github.com/ChipaDevTeam/OlympTradeAPI.git
