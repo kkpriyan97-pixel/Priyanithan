@@ -1,7 +1,7 @@
 import os
+import json
 import threading
 import requests
-import json
 import pandas as pd
 
 from flask import Flask
@@ -18,11 +18,11 @@ from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 
-# ============================================================
+# =========================================================
 
 # CONFIG
 
-# ============================================================
+# =========================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ACCESS_CODE = os.getenv("ACCESS_CODE")
@@ -39,25 +39,11 @@ authorized_users = set()
 
 app = Flask(**name**)
 
-# ============================================================
-
-# AIRFORCE CLIENT
-
-# ============================================================
-
-airforce_client = None
-
-if AIRFORCE_API_KEY:
-airforce_client = OpenAI(
-base_url=AIRFORCE_BASE_URL,
-api_key=AIRFORCE_API_KEY
-)
-
-# ============================================================
+# =========================================================
 
 # WEB SERVER
 
-# ============================================================
+# =========================================================
 
 @app.route("/")
 def home():
@@ -67,22 +53,22 @@ return "Priyanithan AI Indicator Bot is ONLINE"
 def health():
 return "OK"
 
-# ============================================================
+# =========================================================
 
 # MARKET PAIRS
 
-# ============================================================
+# =========================================================
 
 PAIRS = {
 "EURUSD": "EURUSD=X",
 "GBPUSD": "GBPUSD=X",
 }
 
-# ============================================================
+# =========================================================
 
 # GET MARKET DATA
 
-# ============================================================
+# =========================================================
 
 def get_fx_data(pair):
 
@@ -120,26 +106,21 @@ try:
     response.raise_for_status()
 
     chart = response.json().get("chart", {})
-    result_list = chart.get("result")
+    results = chart.get("result")
 
-    if not result_list:
+    if not results:
         return None, "No market data"
 
-    result = result_list[0]
+    result = results[0]
 
     timestamps = result.get("timestamp")
+    indicators = result.get("indicators", {})
+    quotes = indicators.get("quote", [])
 
-    indicators = result.get(
-        "indicators",
-        {}
-    )
-
-    quote_list = indicators.get("quote")
-
-    if not timestamps or not quote_list:
+    if not timestamps or not quotes:
         return None, "Incomplete market data"
 
-    quote = quote_list[0]
+    quote = quotes[0]
 
     df = pd.DataFrame({
         "timestamp": timestamps,
@@ -171,11 +152,11 @@ except Exception as e:
     return None, str(e)
 ```
 
-# ============================================================
+# =========================================================
 
 # INDICATOR ANALYSIS
 
-# ============================================================
+# =========================================================
 
 def analyze_indicators(data, pair):
 
@@ -186,10 +167,7 @@ try:
     high = data["high"]
     low = data["low"]
 
-    # ----------------------------------------------------
     # EMA
-    # ----------------------------------------------------
-
     ema9 = EMAIndicator(
         close=close,
         window=9
@@ -210,19 +188,13 @@ try:
         window=200
     ).ema_indicator()
 
-    # ----------------------------------------------------
     # RSI
-    # ----------------------------------------------------
-
     rsi = RSIIndicator(
         close=close,
         window=14
     ).rsi()
 
-    # ----------------------------------------------------
     # MACD
-    # ----------------------------------------------------
-
     macd_indicator = MACD(
         close=close,
         window_slow=26,
@@ -234,10 +206,7 @@ try:
     macd_signal = macd_indicator.macd_signal()
     macd_histogram = macd_indicator.macd_diff()
 
-    # ----------------------------------------------------
     # Bollinger Bands
-    # ----------------------------------------------------
-
     bb = BollingerBands(
         close=close,
         window=20,
@@ -248,10 +217,7 @@ try:
     bb_middle = bb.bollinger_mavg()
     bb_lower = bb.bollinger_lband()
 
-    # ----------------------------------------------------
     # Stochastic
-    # ----------------------------------------------------
-
     stoch = StochasticOscillator(
         high=high,
         low=low,
@@ -263,10 +229,7 @@ try:
     stoch_k = stoch.stoch()
     stoch_d = stoch.stoch_signal()
 
-    # ----------------------------------------------------
     # ADX
-    # ----------------------------------------------------
-
     adx_indicator = ADXIndicator(
         high=high,
         low=low,
@@ -278,12 +241,9 @@ try:
     plus_di = adx_indicator.adx_pos()
     minus_di = adx_indicator.adx_neg()
 
-    # ----------------------------------------------------
-    # LAST CLOSED CANDLE
-    # ----------------------------------------------------
-
-    candle = data.iloc[-2]
+    # Last CLOSED candle
     idx = len(data) - 2
+    candle = data.iloc[idx]
 
     price = float(candle["close"])
 
@@ -321,11 +281,9 @@ try:
         ),
 
         "adx": float(adx.iloc[idx]),
-
         "plus_di": float(
             plus_di.iloc[idx]
         ),
-
         "minus_di": float(
             minus_di.iloc[idx]
         ),
@@ -334,9 +292,9 @@ try:
     call_confirmations = []
     put_confirmations = []
 
-    # ====================================================
+    # =================================================
     # EMA TREND
-    # ====================================================
+    # =================================================
 
     if (
         values["ema9"] > values["ema21"]
@@ -358,9 +316,9 @@ try:
             "EMA bearish trend"
         )
 
-    # ====================================================
+    # =================================================
     # RSI
-    # ====================================================
+    # =================================================
 
     if values["rsi"] > 50:
 
@@ -374,13 +332,12 @@ try:
             "RSI bearish"
         )
 
-    # ====================================================
+    # =================================================
     # MACD
-    # ====================================================
+    # =================================================
 
     if (
-        values["macd"]
-        > values["macd_signal"]
+        values["macd"] > values["macd_signal"]
         and values["macd_histogram"] > 0
     ):
 
@@ -389,8 +346,7 @@ try:
         )
 
     elif (
-        values["macd"]
-        < values["macd_signal"]
+        values["macd"] < values["macd_signal"]
         and values["macd_histogram"] < 0
     ):
 
@@ -398,9 +354,9 @@ try:
             "MACD bearish"
         )
 
-    # ====================================================
+    # =================================================
     # BOLLINGER
-    # ====================================================
+    # =================================================
 
     if price > values["bb_middle"]:
 
@@ -414,9 +370,9 @@ try:
             "Bollinger bearish"
         )
 
-    # ====================================================
+    # =================================================
     # STOCHASTIC
-    # ====================================================
+    # =================================================
 
     if (
         values["stoch_k"]
@@ -436,9 +392,9 @@ try:
             "Stochastic bearish"
         )
 
-    # ====================================================
+    # =================================================
     # ADX + DI
-    # ====================================================
+    # =================================================
 
     if (
         values["adx"] >= 20
@@ -463,9 +419,9 @@ try:
     call_count = len(call_confirmations)
     put_count = len(put_confirmations)
 
-    # ====================================================
+    # =================================================
     # SIGNAL DECISION
-    # ====================================================
+    # =================================================
 
     if values["adx"] < 20:
 
@@ -478,7 +434,6 @@ try:
     ):
 
         signal = "CALL"
-
         confidence = round(
             (call_count / 6) * 100,
             1
@@ -490,7 +445,6 @@ try:
     ):
 
         signal = "PUT"
-
         confidence = round(
             (put_count / 6) * 100,
             1
@@ -504,21 +458,15 @@ try:
     return {
         "pair": pair,
         "price": price,
-
         "signal": signal,
         "confidence": confidence,
-
         "call_count": call_count,
         "put_count": put_count,
-
         "call_confirmations":
             call_confirmations,
-
         "put_confirmations":
             put_confirmations,
-
         "values": values,
-
         "candle_time":
             str(candle["timestamp"]),
     }, None
@@ -528,11 +476,11 @@ except Exception as e:
     return None, str(e)
 ```
 
-# ============================================================
+# =========================================================
 
-# AIRFORCE AI VALIDATION
+# AI VALIDATION - AIRFORCE
 
-# ============================================================
+# =========================================================
 
 def validate_with_ai(result):
 
@@ -540,13 +488,7 @@ def validate_with_ai(result):
 if not AIRFORCE_API_KEY:
 
     return None, (
-        "AIRFORCE_API_KEY is not configured"
-    )
-
-if airforce_client is None:
-
-    return None, (
-        "Airforce client is not initialized"
+        "AIRFORCE_API_KEY is not configured in Render."
     )
 
 if result["signal"] == "NO SIGNAL":
@@ -555,9 +497,8 @@ if result["signal"] == "NO SIGNAL":
         "decision": "REJECT",
         "direction": "NO SIGNAL",
         "confidence": 0,
-        "reason": (
+        "reason":
             "Indicator engine produced NO SIGNAL."
-        )
     }, None
 
 values = result["values"]
@@ -586,22 +527,15 @@ Rules:
 
 1. Direction must match the proposed signal to approve.
 2. Reject weak or contradictory evidence.
-3. Approve only when the indicator evidence reasonably
-   supports the proposed direction.
-4. Confidence is a validation score,
-   NOT a win probability.
-5. Never invent indicator values.
-6. If evidence is mixed, REJECT.
+3. Approve only when the indicator evidence reasonably supports
+   the proposed direction.
+4. Confidence is a validation score, NOT a win probability.
    """
 
    user_prompt = f"""
-   Validate this proposed signal.
+   Proposed signal: {result["signal"]}
 
-Proposed signal:
-{result["signal"]}
-
-Indicator score:
-{result["confidence"]}
+Indicator score: {result["confidence"]}
 
 CALL confirmations:
 {result["call_confirmations"]}
@@ -609,64 +543,43 @@ CALL confirmations:
 PUT confirmations:
 {result["put_confirmations"]}
 
-EMA9:
-{values["ema9"]}
+EMA9: {values["ema9"]}
+EMA21: {values["ema21"]}
+EMA50: {values["ema50"]}
+EMA200: {values["ema200"]}
 
-EMA21:
-{values["ema21"]}
+RSI: {values["rsi"]}
 
-EMA50:
-{values["ema50"]}
+MACD: {values["macd"]}
+MACD Signal: {values["macd_signal"]}
+MACD Histogram: {values["macd_histogram"]}
 
-EMA200:
-{values["ema200"]}
+BB Upper: {values["bb_upper"]}
+BB Middle: {values["bb_middle"]}
+BB Lower: {values["bb_lower"]}
 
-RSI:
-{values["rsi"]}
+Stochastic K: {values["stoch_k"]}
+Stochastic D: {values["stoch_d"]}
 
-MACD:
-{values["macd"]}
+ADX: {values["adx"]}
++DI: {values["plus_di"]}
+-DI: {values["minus_di"]}
 
-MACD Signal:
-{values["macd_signal"]}
-
-MACD Histogram:
-{values["macd_histogram"]}
-
-BB Upper:
-{values["bb_upper"]}
-
-BB Middle:
-{values["bb_middle"]}
-
-BB Lower:
-{values["bb_lower"]}
-
-Stochastic K:
-{values["stoch_k"]}
-
-Stochastic D:
-{values["stoch_d"]}
-
-ADX:
-{values["adx"]}
-
-+DI:
-{values["plus_di"]}
-
--DI:
-{values["minus_di"]}
-
-Return JSON only.
+Validate this proposed signal.
 """
 
 ````
 try:
 
-    response = airforce_client.chat.completions.create(
+    client = OpenAI(
+        base_url=AIRFORCE_BASE_URL,
+        api_key=AIRFORCE_API_KEY
+    )
 
+    response = client.chat.completions.create(
         model=AIRFORCE_MODEL,
-
+        temperature=0,
+        max_tokens=200,
         messages=[
             {
                 "role": "system",
@@ -676,11 +589,7 @@ try:
                 "role": "user",
                 "content": user_prompt
             }
-        ],
-
-        temperature=0,
-
-        max_tokens=200,
+        ]
     )
 
     content = (
@@ -690,17 +599,14 @@ try:
         .strip()
     )
 
-    # Remove markdown code fences if model adds them
-
     if content.startswith("```"):
 
-        content = content.replace(
-            "```json",
-            ""
-        ).replace(
-            "```",
-            ""
-        ).strip()
+        content = (
+            content
+            .replace("```json", "")
+            .replace("```", "")
+            .strip()
+        )
 
     ai_result = json.loads(content)
 
@@ -769,11 +675,11 @@ except Exception as e:
     return None, str(e)
 ````
 
-# ============================================================
+# =========================================================
 
-# START COMMAND
+# /START
 
-# ============================================================
+# =========================================================
 
 async def start_command(
 update: Update,
@@ -782,23 +688,11 @@ context: ContextTypes.DEFAULT_TYPE
 
 ```
 await update.message.reply_text(
-
     "🤖 Priyanithan AI Indicator Bot\n\n"
-
     "📊 Indicator engine: READY\n"
     "🤖 Airforce AI validation: ENABLED\n"
-    f"🧠 AI Model: {AIRFORCE_MODEL}\n\n"
-
-    "📈 EMA 9/21/50/200\n"
-    "📊 RSI 14\n"
-    "📉 MACD\n"
-    "〰️ Bollinger Bands\n"
-    "📐 Stochastic\n"
-    "💪 ADX\n\n"
-
     "⚡ Auto-trade: OFF\n"
     "🛑 Martingale: OFF\n\n"
-
     "Commands:\n"
     "/access YOUR_CODE\n"
     "/status\n"
@@ -808,11 +702,11 @@ await update.message.reply_text(
 )
 ```
 
-# ============================================================
+# =========================================================
 
-# ACCESS COMMAND
+# /ACCESS
 
-# ============================================================
+# =========================================================
 
 async def access_command(
 update: Update,
@@ -849,11 +743,11 @@ else:
     )
 ```
 
-# ============================================================
+# =========================================================
 
-# STATUS COMMAND
+# /STATUS
 
-# ============================================================
+# =========================================================
 
 async def status_command(
 update: Update,
@@ -881,34 +775,28 @@ else:
     ai_status = "NOT CONFIGURED"
 
 await update.message.reply_text(
-
     "🟢 Bot Status: ONLINE\n\n"
-
     "🔐 Access: AUTHORIZED\n\n"
-
     "📡 Market API: Yahoo Finance\n\n"
-
-    "📊 Indicator Engine: READY\n"
+    "📊 Indicator Engine: READY\n\n"
     "📈 EMA 9/21/50/200: READY\n"
     "📊 RSI 14: READY\n"
     "📉 MACD: READY\n"
     "〰️ Bollinger Bands: READY\n"
     "📐 Stochastic: READY\n"
     "💪 ADX: READY\n\n"
-
     f"🤖 Airforce AI: {ai_status}\n"
     f"🧠 AI Model: {AIRFORCE_MODEL}\n\n"
-
     "⚡ Auto-trade: OFF\n"
     "🛑 Martingale: OFF"
 )
 ```
 
-# ============================================================
+# =========================================================
 
-# AIRFORCE AI TEST
+# /AITEST
 
-# ============================================================
+# =========================================================
 
 async def aitest_command(
 update: Update,
@@ -930,41 +818,33 @@ if user_id not in authorized_users:
 if not AIRFORCE_API_KEY:
 
     await update.message.reply_text(
-
         "❌ AIRFORCE_API_KEY is not configured "
-        "in Render.\n\n"
-
-        "Add this Environment Variable:\n\n"
-
-        "AIRFORCE_API_KEY\n\n"
-
-        "Then redeploy."
+        "in Render Environment Variables."
     )
 
     return
 
 await update.message.reply_text(
-    "🤖 Testing Airforce AI..."
+    "🤖 Testing Airforce AI connection..."
 )
 
 try:
 
-    response = airforce_client.chat.completions.create(
+    client = OpenAI(
+        base_url=AIRFORCE_BASE_URL,
+        api_key=AIRFORCE_API_KEY
+    )
 
+    response = client.chat.completions.create(
         model=AIRFORCE_MODEL,
-
+        temperature=0,
+        max_tokens=50,
         messages=[
             {
                 "role": "user",
-                "content": (
-                    "Reply with exactly: AI READY"
-                )
+                "content": "Reply with exactly: AI READY"
             }
-        ],
-
-        temperature=0,
-
-        max_tokens=20,
+        ]
     )
 
     reply = (
@@ -975,9 +855,7 @@ try:
     )
 
     await update.message.reply_text(
-
         "🤖 AI TEST\n\n"
-
         "🟢 Airforce: CONNECTED\n"
         f"🧠 Model: {AIRFORCE_MODEL}\n"
         f"💬 Response: {reply}"
@@ -986,17 +864,16 @@ try:
 except Exception as e:
 
     await update.message.reply_text(
-
         "❌ AI CONNECTION FAILED\n\n"
         f"Reason: {str(e)}"
     )
 ```
 
-# ============================================================
+# =========================================================
 
 # FORMAT SIGNAL
 
-# ============================================================
+# =========================================================
 
 def format_signal(
 result,
@@ -1007,9 +884,7 @@ ai_result=None
 values = result["values"]
 
 message = (
-
     "📊 INDICATOR ANALYSIS\n\n"
-
     f"💱 Market: {result['pair']}\n"
     f"💰 Price: {result['price']:.5f}\n"
     "⏱ Timeframe: 1 minute\n"
@@ -1047,13 +922,11 @@ message = (
 
     f"🟢 CALL confirmations: "
     f"{result['call_count']}\n"
-
     f"🔴 PUT confirmations: "
     f"{result['put_count']}\n\n"
 
     f"🎯 INDICATOR SIGNAL: "
     f"{result['signal']}\n"
-
     f"📈 Indicator score: "
     f"{result['confidence']}%\n"
 )
@@ -1061,9 +934,7 @@ message = (
 if result["call_confirmations"]:
 
     message += (
-
         "\n🟢 CALL:\n- "
-
         + "\n- ".join(
             result["call_confirmations"]
         )
@@ -1072,9 +943,7 @@ if result["call_confirmations"]:
 if result["put_confirmations"]:
 
     message += (
-
         "\n\n🔴 PUT:\n- "
-
         + "\n- ".join(
             result["put_confirmations"]
         )
@@ -1083,35 +952,25 @@ if result["put_confirmations"]:
 if ai_result:
 
     message += (
-
-        "\n\n🤖 AIRFORCE AI VALIDATION\n\n"
-
+        "\n\n🤖 AI VALIDATION\n\n"
         f"Decision: "
         f"{ai_result['decision']}\n"
-
         f"Direction: "
         f"{ai_result['direction']}\n"
-
         f"AI validation score: "
         f"{ai_result['confidence']}%\n"
-
         f"Reason: "
         f"{ai_result['reason']}\n"
     )
 
     if (
-
         ai_result["decision"] == "APPROVE"
-
         and ai_result["direction"]
         == result["signal"]
-
         and ai_result["confidence"] >= 89
-
     ):
 
         message += (
-
             "\n🎯 FINAL SIGNAL: "
             f"{result['signal']}\n"
         )
@@ -1123,25 +982,20 @@ if ai_result:
         )
 
 message += (
-
     "\n\n⚠️ Data source: Yahoo Finance\n"
-
     "⚠️ This is not an Olymp Trade price feed.\n"
-
-    "⚠️ Indicator/AI scores are not "
-    "guaranteed win probabilities.\n"
-
+    "⚠️ AI score is not a guaranteed win probability.\n"
     "⚡ Manual execution only."
 )
 
 return message
 ```
 
-# ============================================================
+# =========================================================
 
-# SIGNAL COMMAND
+# /SIGNAL
 
-# ============================================================
+# =========================================================
 
 async def signal_command(
 update: Update,
@@ -1154,7 +1008,6 @@ user_id = update.effective_user.id
 if user_id not in authorized_users:
 
     await update.message.reply_text(
-
         "🔒 Access required.\n\n"
         "Use /access YOUR_CODE"
     )
@@ -1164,9 +1017,7 @@ if user_id not in authorized_users:
 if not context.args:
 
     await update.message.reply_text(
-
         "❌ Pair missing.\n\n"
-
         "Use:\n"
         "/signal EURUSD\n"
         "/signal GBPUSD"
@@ -1179,9 +1030,7 @@ pair = context.args[0].upper()
 if pair not in PAIRS:
 
     await update.message.reply_text(
-
         "❌ Unsupported pair.\n\n"
-
         "Available:\n"
         "EURUSD\n"
         "GBPUSD"
@@ -1190,35 +1039,24 @@ if pair not in PAIRS:
     return
 
 await update.message.reply_text(
-
     f"⏳ Analyzing {pair}..."
 )
 
-# --------------------------------------------------------
-# MARKET DATA
-# --------------------------------------------------------
-
+# Market data
 data, error = get_fx_data(pair)
 
 if error:
 
     await update.message.reply_text(
-
         "❌ LIVE MARKET DATA FAILED\n\n"
-
         f"Market: {pair}\n\n"
-
         f"Reason: {error}\n\n"
-
         "No signal generated."
     )
 
     return
 
-# --------------------------------------------------------
-# INDICATOR ANALYSIS
-# --------------------------------------------------------
-
+# Indicator analysis
 result, error = analyze_indicators(
     data,
     pair
@@ -1227,20 +1065,14 @@ result, error = analyze_indicators(
 if error:
 
     await update.message.reply_text(
-
         "❌ Indicator analysis failed.\n\n"
-
         f"Reason: {error}\n\n"
-
         "No signal generated."
     )
 
     return
 
-# --------------------------------------------------------
-# NO SIGNAL
-# --------------------------------------------------------
-
+# No signal
 if result["signal"] == "NO SIGNAL":
 
     await update.message.reply_text(
@@ -1249,12 +1081,8 @@ if result["signal"] == "NO SIGNAL":
 
     return
 
-# --------------------------------------------------------
-# AI VALIDATION
-# --------------------------------------------------------
-
+# AI validation
 await update.message.reply_text(
-
     "🤖 Indicator signal found.\n"
     "⏳ Airforce AI validation running..."
 )
@@ -1266,13 +1094,9 @@ ai_result, ai_error = validate_with_ai(
 if ai_error:
 
     await update.message.reply_text(
-
         "❌ AI VALIDATION FAILED\n\n"
-
         f"Reason: {ai_error}\n\n"
-
         "🎯 FINAL SIGNAL: NO SIGNAL\n\n"
-
         "No signal generated because "
         "AI validation was unavailable."
     )
@@ -1280,7 +1104,6 @@ if ai_error:
     return
 
 await update.message.reply_text(
-
     format_signal(
         result,
         ai_result
@@ -1288,11 +1111,11 @@ await update.message.reply_text(
 )
 ```
 
-# ============================================================
+# =========================================================
 
 # ERROR HANDLER
 
-# ============================================================
+# =========================================================
 
 async def error_handler(
 update: object,
@@ -1306,11 +1129,11 @@ print(
 )
 ```
 
-# ============================================================
+# =========================================================
 
 # FLASK THREAD
 
-# ============================================================
+# =========================================================
 
 def run_flask():
 
@@ -1328,11 +1151,11 @@ app.run(
 )
 ```
 
-# ============================================================
+# =========================================================
 
 # MAIN
 
-# ============================================================
+# =========================================================
 
 def main():
 
@@ -1358,9 +1181,7 @@ flask_thread.start()
 
 application = (
     Application.builder()
-    .token(
-        TELEGRAM_BOT_TOKEN
-    )
+    .token(TELEGRAM_BOT_TOKEN)
     .build()
 )
 
@@ -1411,12 +1232,6 @@ application.run_polling(
     drop_pending_updates=True
 )
 ```
-
-# ============================================================
-
-# RUN
-
-# ============================================================
 
 if **name** == "**main**":
 main()
