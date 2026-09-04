@@ -1,23 +1,15 @@
 import os
 import threading
+import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-import ta_py as ta
 
 app = Flask(__name__)
-
-# =========================
-# ACCESS CONTROL
-# =========================
 
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
 authorized_users = set()
 
-
-# =========================
-# WEB
-# =========================
 
 @app.route("/")
 def home():
@@ -28,207 +20,126 @@ def home():
 # INDICATOR ENGINE
 # =========================
 
-def analyze_indicators(candles):
-    """
-    candles format:
-    [
-        {"open": 1, "high": 2, "low": 0.5, "close": 1.5},
-        ...
-    ]
-
-    Minimum recommended candles: 200+
-    """
-
-    if not candles or len(candles) < 200:
+def analyze_candles(candles):
+    if len(candles) < 200:
         return {
             "signal": "NO SIGNAL",
-            "confidence": 0,
-            "reason": "Not enough candle data"
+            "reason": "Need at least 200 candles"
         }
 
     closes = [float(x["close"]) for x in candles]
     highs = [float(x["high"]) for x in candles]
     lows = [float(x["low"]) for x in candles]
 
-    score_call = 0
-    score_put = 0
-    confirmations = []
+    # Simple EMA
+    def ema(values, period):
+        multiplier = 2 / (period + 1)
+        result = values[0]
 
-    # -------------------------
-    # EMA
-    # -------------------------
+        for price in values[1:]:
+            result = (price - result) * multiplier + result
 
-    ema9 = ta.ema(closes, 9)[-1]
-    ema21 = ta.ema(closes, 21)[-1]
-    ema50 = ta.ema(closes, 50)[-1]
-    ema200 = ta.ema(closes, 200)[-1]
+        return result
 
-    price = closes[-1]
+    ema9 = ema(closes, 9)
+    ema21 = ema(closes, 21)
+    ema50 = ema(closes, 50)
+    ema200 = ema(closes, 200)
 
-    if price > ema9 > ema21 > ema50 > ema200:
-        score_call += 1
-        confirmations.append("EMA bullish")
+    call = 0
+    put = 0
+    reasons = []
 
-    elif price < ema9 < ema21 < ema50 < ema200:
-        score_put += 1
-        confirmations.append("EMA bearish")
+    # EMA trend
+    if ema9 > ema21 > ema50 > ema200:
+        call += 1
+        reasons.append("EMA bullish")
 
-    # -------------------------
+    elif ema9 < ema21 < ema50 < ema200:
+        put += 1
+        reasons.append("EMA bearish")
+
     # RSI
-    # -------------------------
+    gains = []
+    losses = []
 
-    rsi = ta.rsi(closes, 14)[-1]
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+
+        if change >= 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+
+    avg_gain = sum(gains[-14:]) / 14
+    avg_loss = sum(losses[-14:]) / 14
+
+    if avg_loss == 0:
+        rsi = 100
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
 
     if 50 < rsi < 70:
-        score_call += 1
-        confirmations.append("RSI bullish")
+        call += 1
+        reasons.append("RSI bullish")
 
     elif 30 < rsi < 50:
-        score_put += 1
-        confirmations.append("RSI bearish")
+        put += 1
+        reasons.append("RSI bearish")
 
-    # -------------------------
-    # MACD
-    # -------------------------
+    # Price momentum
+    if closes[-1] > closes[-2] > closes[-3]:
+        call += 1
+        reasons.append("Price momentum bullish")
 
-    macd_data = ta.macd(closes, 12, 26)
+    elif closes[-1] < closes[-2] < closes[-3]:
+        put += 1
+        reasons.append("Price momentum bearish")
 
-    if macd_data:
-        macd_value = macd_data[-1]
+    # Recent candle
+    last = candles[-1]
 
-        if isinstance(macd_value, (list, tuple)):
-            macd_line = macd_value[0]
-            signal_line = macd_value[1]
+    if float(last["close"]) > float(last["open"]):
+        call += 1
+        reasons.append("Bullish candle")
 
-            if macd_line > signal_line:
-                score_call += 1
-                confirmations.append("MACD bullish")
+    elif float(last["close"]) < float(last["open"]):
+        put += 1
+        reasons.append("Bearish candle")
 
-            elif macd_line < signal_line:
-                score_put += 1
-                confirmations.append("MACD bearish")
-
-    # -------------------------
-    # Bollinger Bands
-    # -------------------------
-
-    bands = ta.bands(closes, length=20, deviations=2)
-
-    if bands:
-        last_band = bands[-1]
-
-        if isinstance(last_band, (list, tuple)) and len(last_band) >= 3:
-            lower = last_band[0]
-            middle = last_band[1]
-            upper = last_band[2]
-
-            if price > middle:
-                score_call += 1
-                confirmations.append("Bollinger bullish")
-
-            elif price < middle:
-                score_put += 1
-                confirmations.append("Bollinger bearish")
-
-    # -------------------------
-    # Stochastic
-    # -------------------------
-
-    stoch = ta.stoch(
-        [
-            [h, l, c]
-            for h, l, c in zip(highs, lows, closes)
-        ],
-        14,
-        3
-    )
-
-    if stoch:
-        last_stoch = stoch[-1]
-
-        if isinstance(last_stoch, (list, tuple)):
-            k = last_stoch[0]
-
-            if k > 50:
-                score_call += 1
-                confirmations.append("Stochastic bullish")
-
-            elif k < 50:
-                score_put += 1
-                confirmations.append("Stochastic bearish")
-
-    # -------------------------
-    # ADX
-    # -------------------------
-
-    adx_data = ta.adx(
-        [
-            [h, l, c]
-            for h, l, c in zip(highs, lows, closes)
-        ],
-        14
-    )
-
-    trend_strength = 0
-
-    if adx_data:
-        last_adx = adx_data[-1]
-
-        if isinstance(last_adx, (list, tuple)):
-            trend_strength = last_adx[0]
-
-    # -------------------------
-    # FINAL DECISION
-    # -------------------------
-
-    total_confirmations = max(score_call, score_put)
-
-    if total_confirmations < 3:
-        return {
-            "signal": "NO SIGNAL",
-            "confidence": 0,
-            "call_score": score_call,
-            "put_score": score_put,
-            "adx": trend_strength,
-            "confirmations": confirmations
-        }
-
-    if score_call > score_put:
-        confidence = min(99, 60 + score_call * 7)
-
+    # Final decision
+    if call >= 3 and call > put:
         return {
             "signal": "CALL",
-            "confidence": confidence,
-            "call_score": score_call,
-            "put_score": score_put,
-            "adx": trend_strength,
-            "confirmations": confirmations
+            "confidence": min(99, 70 + call * 5),
+            "confirmations": call,
+            "rsi": round(rsi, 2),
+            "reasons": reasons
         }
 
-    if score_put > score_call:
-        confidence = min(99, 60 + score_put * 7)
-
+    if put >= 3 and put > call:
         return {
             "signal": "PUT",
-            "confidence": confidence,
-            "call_score": score_call,
-            "put_score": score_put,
-            "adx": trend_strength,
-            "confirmations": confirmations
+            "confidence": min(99, 70 + put * 5),
+            "confirmations": put,
+            "rsi": round(rsi, 2),
+            "reasons": reasons
         }
 
     return {
         "signal": "NO SIGNAL",
         "confidence": 0,
-        "call_score": score_call,
-        "put_score": score_put,
-        "adx": trend_strength,
-        "confirmations": confirmations
+        "confirmations": max(call, put),
+        "rsi": round(rsi, 2),
+        "reasons": reasons
     }
 
 
 # =========================
-# TELEGRAM /start
+# TELEGRAM
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -236,56 +147,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if user_id in authorized_users:
-
         await update.message.reply_text(
-            "🔓 Access already authorized.\n\n"
+            "🔓 Access authorized\n\n"
             "🤖 Priyanithan AI Signal Bot\n"
             "📊 Indicator Engine: READY\n"
             "⚡ Auto-trade: OFF\n"
             "🛑 Martingale: OFF"
         )
-
     else:
-
         await update.message.reply_text(
             "🔐 Private Access\n\n"
-            "Please enter:\n"
             "/access YOUR_CODE"
         )
 
-
-# =========================
-# /access
-# =========================
 
 async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
     if not ACCESS_CODE:
-
         await update.message.reply_text(
-            "⚠️ Access system is not configured yet."
+            "⚠️ ACCESS_CODE is not configured."
         )
         return
 
     if not context.args:
-
         await update.message.reply_text(
             "Usage:\n/access YOUR_CODE"
         )
         return
 
-    supplied_code = context.args[0]
-
-    if supplied_code == ACCESS_CODE:
+    if context.args[0] == ACCESS_CODE:
 
         authorized_users.add(user_id)
 
         await update.message.reply_text(
             "✅ ACCESS GRANTED\n\n"
-            "🤖 Priyanithan AI Signal Bot\n"
-            "📊 Indicator Engine: READY\n"
+            "📊 Signal Engine: READY\n"
             "⚡ Auto-trade: OFF\n"
             "🛑 Martingale: OFF"
         )
@@ -293,24 +191,17 @@ async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
 
         await update.message.reply_text(
-            "❌ ACCESS DENIED\n"
-            "Invalid access code."
+            "❌ ACCESS DENIED"
         )
 
-
-# =========================
-# /status
-# =========================
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
     if user_id not in authorized_users:
-
         await update.message.reply_text(
-            "🔒 Access denied.\n"
-            "Use /access YOUR_CODE first."
+            "🔒 Access denied."
         )
         return
 
@@ -320,18 +211,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 Indicator Engine: READY\n"
         "📈 EMA: READY\n"
         "📊 RSI: READY\n"
-        "📉 MACD: READY\n"
-        "〰️ Bollinger: READY\n"
-        "📐 Stochastic: READY\n"
-        "💪 ADX: READY\n"
         "⚡ Auto-trade: OFF\n"
-        "🛑 Martingale: OFF"
+        "🛑 Martingale: OFF\n\n"
+        "📡 Market Data: NOT CONNECTED YET"
     )
 
-
-# =========================
-# WEB SERVER
-# =========================
 
 def run_web():
 
@@ -343,20 +227,12 @@ def run_web():
     )
 
 
-# =========================
-# MAIN
-# =========================
-
 def main():
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
 
     if not token:
-
-        print(
-            "TELEGRAM_BOT_TOKEN is not configured"
-        )
-
+        print("TELEGRAM_BOT_TOKEN is not configured")
         return
 
     telegram_app = (
