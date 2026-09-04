@@ -1,6 +1,7 @@
 import os
 import threading
 import requests
+import json
 import pandas as pd
 
 from flask import Flask
@@ -23,6 +24,10 @@ from ta.volatility import BollingerBands
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ACCESS_CODE = os.getenv("ACCESS_CODE")
 
+BAZAARLINK_API_KEY = os.getenv("BAZAARLINK_API_KEY")
+BAZAARLINK_MODEL = os.getenv("BAZAARLINK_MODEL", "auto:free")
+BAZAARLINK_URL = "https://api.bazaarlink.ai/v1/chat/completions"
+
 authorized_users = set()
 
 app = Flask(__name__)
@@ -34,7 +39,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Priyanithan Indicator Bot is ONLINE"
+    return "Priyanithan AI Indicator Bot is ONLINE"
 
 
 @app.route("/health")
@@ -57,12 +62,16 @@ PAIRS = {
 # =========================
 
 def get_fx_data(pair):
+
     symbol = PAIRS.get(pair.upper())
 
     if not symbol:
         return None, "Unsupported pair"
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    url = (
+        "https://query1.finance.yahoo.com/"
+        f"v8/finance/chart/{symbol}"
+    )
 
     params = {
         "interval": "1m",
@@ -76,6 +85,7 @@ def get_fx_data(pair):
     }
 
     try:
+
         response = requests.get(
             url,
             params=params,
@@ -108,15 +118,23 @@ def get_fx_data(pair):
         })
 
         df = df.dropna(
-            subset=["open", "high", "low", "close"]
+            subset=[
+                "open",
+                "high",
+                "low",
+                "close"
+            ]
         ).copy()
 
         if len(df) < 220:
-            return None, f"Not enough candles: {len(df)}"
+            return None, (
+                f"Not enough candles: {len(df)}"
+            )
 
         return df, None
 
     except Exception as e:
+
         return None, str(e)
 
 
@@ -125,7 +143,9 @@ def get_fx_data(pair):
 # =========================
 
 def analyze_indicators(data, pair):
+
     try:
+
         close = data["close"]
         high = data["high"]
         low = data["low"]
@@ -204,9 +224,8 @@ def analyze_indicators(data, pair):
         plus_di = adx_indicator.adx_pos()
         minus_di = adx_indicator.adx_neg()
 
-        # Use the last CLOSED candle
+        # Last CLOSED candle
         candle = data.iloc[-2]
-
         idx = len(data) - 2
 
         price = float(candle["close"])
@@ -218,16 +237,34 @@ def analyze_indicators(data, pair):
             "ema200": float(ema200.iloc[idx]),
             "rsi": float(rsi.iloc[idx]),
             "macd": float(macd_line.iloc[idx]),
-            "macd_signal": float(macd_signal.iloc[idx]),
-            "macd_histogram": float(macd_histogram.iloc[idx]),
-            "bb_upper": float(bb_upper.iloc[idx]),
-            "bb_middle": float(bb_middle.iloc[idx]),
-            "bb_lower": float(bb_lower.iloc[idx]),
-            "stoch_k": float(stoch_k.iloc[idx]),
-            "stoch_d": float(stoch_d.iloc[idx]),
+            "macd_signal": float(
+                macd_signal.iloc[idx]
+            ),
+            "macd_histogram": float(
+                macd_histogram.iloc[idx]
+            ),
+            "bb_upper": float(
+                bb_upper.iloc[idx]
+            ),
+            "bb_middle": float(
+                bb_middle.iloc[idx]
+            ),
+            "bb_lower": float(
+                bb_lower.iloc[idx]
+            ),
+            "stoch_k": float(
+                stoch_k.iloc[idx]
+            ),
+            "stoch_d": float(
+                stoch_d.iloc[idx]
+            ),
             "adx": float(adx.iloc[idx]),
-            "plus_di": float(plus_di.iloc[idx]),
-            "minus_di": float(minus_di.iloc[idx]),
+            "plus_di": float(
+                plus_di.iloc[idx]
+            ),
+            "minus_di": float(
+                minus_di.iloc[idx]
+            ),
         }
 
         call_confirmations = []
@@ -242,60 +279,98 @@ def analyze_indicators(data, pair):
             and values["ema21"] > values["ema50"]
             and values["ema50"] > values["ema200"]
         ):
-            call_confirmations.append("EMA bullish trend")
+
+            call_confirmations.append(
+                "EMA bullish trend"
+            )
 
         elif (
             values["ema9"] < values["ema21"]
             and values["ema21"] < values["ema50"]
             and values["ema50"] < values["ema200"]
         ):
-            put_confirmations.append("EMA bearish trend")
+
+            put_confirmations.append(
+                "EMA bearish trend"
+            )
 
         # =========================
         # RSI
         # =========================
 
         if values["rsi"] > 50:
-            call_confirmations.append("RSI bullish")
+
+            call_confirmations.append(
+                "RSI bullish"
+            )
 
         elif values["rsi"] < 50:
-            put_confirmations.append("RSI bearish")
+
+            put_confirmations.append(
+                "RSI bearish"
+            )
 
         # =========================
         # MACD
         # =========================
 
         if (
-            values["macd"] > values["macd_signal"]
+            values["macd"]
+            > values["macd_signal"]
             and values["macd_histogram"] > 0
         ):
-            call_confirmations.append("MACD bullish")
+
+            call_confirmations.append(
+                "MACD bullish"
+            )
 
         elif (
-            values["macd"] < values["macd_signal"]
+            values["macd"]
+            < values["macd_signal"]
             and values["macd_histogram"] < 0
         ):
-            put_confirmations.append("MACD bearish")
+
+            put_confirmations.append(
+                "MACD bearish"
+            )
 
         # =========================
         # BOLLINGER
         # =========================
 
         if price > values["bb_middle"]:
-            call_confirmations.append("Bollinger bullish")
+
+            call_confirmations.append(
+                "Bollinger bullish"
+            )
 
         elif price < values["bb_middle"]:
-            put_confirmations.append("Bollinger bearish")
+
+            put_confirmations.append(
+                "Bollinger bearish"
+            )
 
         # =========================
         # STOCHASTIC
         # =========================
 
-        if values["stoch_k"] > values["stoch_d"]:
-            call_confirmations.append("Stochastic bullish")
+        if (
+            values["stoch_k"]
+            > values["stoch_d"]
+        ):
 
-        elif values["stoch_k"] < values["stoch_d"]:
-            put_confirmations.append("Stochastic bearish")
+            call_confirmations.append(
+                "Stochastic bullish"
+            )
+
+        elif (
+            values["stoch_k"]
+            < values["stoch_d"]
+        ):
+
+            put_confirmations.append(
+                "Stochastic bearish"
+            )
 
         # =========================
         # ADX + DI
@@ -303,15 +378,23 @@ def analyze_indicators(data, pair):
 
         if (
             values["adx"] >= 20
-            and values["plus_di"] > values["minus_di"]
+            and values["plus_di"]
+            > values["minus_di"]
         ):
-            call_confirmations.append("ADX bullish")
+
+            call_confirmations.append(
+                "ADX bullish"
+            )
 
         elif (
             values["adx"] >= 20
-            and values["minus_di"] > values["plus_di"]
+            and values["minus_di"]
+            > values["plus_di"]
         ):
-            put_confirmations.append("ADX bearish")
+
+            put_confirmations.append(
+                "ADX bearish"
+            )
 
         call_count = len(call_confirmations)
         put_count = len(put_confirmations)
@@ -320,15 +403,36 @@ def analyze_indicators(data, pair):
         # SIGNAL DECISION
         # =========================
 
-        if call_count >= 4 and call_count > put_count:
-            signal = "CALL"
-            confidence = round((call_count / 6) * 100, 1)
+        # Weak trend filter
+        if values["adx"] < 20:
 
-        elif put_count >= 4 and put_count > call_count:
+            signal = "NO SIGNAL"
+            confidence = 0
+
+        elif (
+            call_count >= 4
+            and call_count > put_count
+        ):
+
+            signal = "CALL"
+            confidence = round(
+                (call_count / 6) * 100,
+                1
+            )
+
+        elif (
+            put_count >= 4
+            and put_count > call_count
+        ):
+
             signal = "PUT"
-            confidence = round((put_count / 6) * 100, 1)
+            confidence = round(
+                (put_count / 6) * 100,
+                1
+            )
 
         else:
+
             signal = "NO SIGNAL"
             confidence = 0
 
@@ -339,13 +443,215 @@ def analyze_indicators(data, pair):
             "confidence": confidence,
             "call_count": call_count,
             "put_count": put_count,
-            "call_confirmations": call_confirmations,
-            "put_confirmations": put_confirmations,
+            "call_confirmations":
+                call_confirmations,
+            "put_confirmations":
+                put_confirmations,
             "values": values,
-            "candle_time": str(candle["timestamp"]),
+            "candle_time":
+                str(candle["timestamp"]),
         }, None
 
     except Exception as e:
+
+        return None, str(e)
+
+
+# =========================
+# AI VALIDATION
+# =========================
+
+def validate_with_ai(result):
+
+    if not BAZAARLINK_API_KEY:
+
+        return None, "BAZAARLINK_API_KEY missing"
+
+    if result["signal"] == "NO SIGNAL":
+
+        return {
+            "decision": "REJECT",
+            "direction": "NO SIGNAL",
+            "confidence": 0,
+            "reason": "Indicator engine produced NO SIGNAL."
+        }, None
+
+    if result["values"]["adx"] < 20:
+
+        return {
+            "decision": "REJECT",
+            "direction": "NO SIGNAL",
+            "confidence": 0,
+            "reason": "ADX below 20."
+        }, None
+
+    values = result["values"]
+
+    system_prompt = """
+You are a strict trading signal validator.
+
+You do NOT create a new signal.
+
+You only validate the proposed indicator direction.
+
+Return ONLY valid JSON.
+
+Required format:
+{
+  "decision": "APPROVE" or "REJECT",
+  "direction": "CALL" or "PUT" or "NO SIGNAL",
+  "confidence": integer from 0 to 100,
+  "reason": "short reason"
+}
+
+Rules:
+1. Direction must match the proposed signal to approve.
+2. Reject weak or contradictory evidence.
+3. Approve only when the indicator evidence reasonably supports
+   the proposed direction.
+4. Confidence is a validation score, NOT a win probability.
+"""
+
+    user_prompt = f"""
+Proposed signal: {result["signal"]}
+
+Indicator score: {result["confidence"]}
+
+CALL confirmations:
+{result["call_confirmations"]}
+
+PUT confirmations:
+{result["put_confirmations"]}
+
+EMA9: {values["ema9"]}
+EMA21: {values["ema21"]}
+EMA50: {values["ema50"]}
+EMA200: {values["ema200"]}
+
+RSI: {values["rsi"]}
+
+MACD: {values["macd"]}
+MACD Signal: {values["macd_signal"]}
+MACD Histogram: {values["macd_histogram"]}
+
+BB Upper: {values["bb_upper"]}
+BB Middle: {values["bb_middle"]}
+BB Lower: {values["bb_lower"]}
+
+Stochastic K: {values["stoch_k"]}
+Stochastic D: {values["stoch_d"]}
+
+ADX: {values["adx"]}
++DI: {values["plus_di"]}
+-DI: {values["minus_di"]}
+
+Validate this proposed signal.
+"""
+
+    headers = {
+        "Authorization":
+            f"Bearer {BAZAARLINK_API_KEY}",
+        "Content-Type": "application/json",
+        "X-Free-Fallback": "false",
+    }
+
+    payload = {
+        "model": BAZAARLINK_MODEL,
+        "temperature": 0,
+        "max_tokens": 200,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+    }
+
+    try:
+
+        response = requests.post(
+            BAZAARLINK_URL,
+            headers=headers,
+            json=payload,
+            timeout=25
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        content = (
+            data["choices"][0]["message"]["content"]
+            .strip()
+        )
+
+        # Remove possible markdown fences
+        if content.startswith("```"):
+
+            content = content.replace(
+                "```json",
+                ""
+            ).replace(
+                "```",
+                ""
+            ).strip()
+
+        ai_result = json.loads(content)
+
+        decision = str(
+            ai_result.get("decision", "")
+        ).upper()
+
+        direction = str(
+            ai_result.get("direction", "")
+        ).upper()
+
+        confidence = int(
+            ai_result.get("confidence", 0)
+        )
+
+        reason = str(
+            ai_result.get("reason", "")
+        )
+
+        if decision not in [
+            "APPROVE",
+            "REJECT"
+        ]:
+
+            return None, (
+                "AI returned invalid decision"
+            )
+
+        if direction not in [
+            "CALL",
+            "PUT",
+            "NO SIGNAL"
+        ]:
+
+            return None, (
+                "AI returned invalid direction"
+            )
+
+        if confidence < 0 or confidence > 100:
+
+            return None, (
+                "AI returned invalid confidence"
+            )
+
+        return {
+            "decision": decision,
+            "direction": direction,
+            "confidence": confidence,
+            "reason": reason,
+        }, None
+
+    except Exception as e:
+
         return None, str(e)
 
 
@@ -358,16 +664,16 @@ async def start_command(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user_id = update.effective_user.id
-
     await update.message.reply_text(
-        "🤖 Priyanithan Indicator Bot\n\n"
-        "📊 Indicator-only system\n"
+        "🤖 Priyanithan AI Indicator Bot\n\n"
+        "📊 Indicator engine: READY\n"
+        "🤖 AI validation: ENABLED\n"
         "⚡ Auto-trade: OFF\n"
         "🛑 Martingale: OFF\n\n"
         "Use:\n"
         "/access YOUR_CODE\n"
         "/status\n"
+        "/aitest\n"
         "/signal EURUSD\n"
         "/signal GBPUSD"
     )
@@ -385,16 +691,19 @@ async def access_command(
     user_id = update.effective_user.id
 
     if not context.args:
+
         await update.message.reply_text(
             "❌ Access code missing.\n\n"
             "Use:\n"
             "/access YOUR_CODE"
         )
+
         return
 
     code = context.args[0]
 
     if ACCESS_CODE and code == ACCESS_CODE:
+
         authorized_users.add(user_id)
 
         await update.message.reply_text(
@@ -402,6 +711,7 @@ async def access_command(
         )
 
     else:
+
         await update.message.reply_text(
             "❌ Invalid access code."
         )
@@ -419,11 +729,18 @@ async def status_command(
     user_id = update.effective_user.id
 
     if user_id not in authorized_users:
+
         await update.message.reply_text(
             "🔒 Access required.\n\n"
             "Use /access YOUR_CODE"
         )
+
         return
+
+    if BAZAARLINK_API_KEY:
+        ai_status = "READY"
+    else:
+        ai_status = "NOT CONFIGURED"
 
     await update.message.reply_text(
         "🟢 Bot Status: ONLINE\n\n"
@@ -436,16 +753,111 @@ async def status_command(
         "〰️ Bollinger Bands: READY\n"
         "📐 Stochastic: READY\n"
         "💪 ADX: READY\n\n"
+        f"🤖 AI Validator: {ai_status}\n"
+        f"🧠 AI Model: {BAZAARLINK_MODEL}\n\n"
         "⚡ Auto-trade: OFF\n"
         "🛑 Martingale: OFF"
     )
 
 
 # =========================
+# /AITEST
+# =========================
+
+async def aitest_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user_id = update.effective_user.id
+
+    if user_id not in authorized_users:
+
+        await update.message.reply_text(
+            "🔒 Access required.\n\n"
+            "Use /access YOUR_CODE"
+        )
+
+        return
+
+    if not BAZAARLINK_API_KEY:
+
+        await update.message.reply_text(
+            "❌ AI API key is missing.\n\n"
+            "Check Render Environment Variables:\n"
+            "BAZAARLINK_API_KEY"
+        )
+
+        return
+
+    await update.message.reply_text(
+        "🤖 Testing AI connection..."
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {BAZAARLINK_API_KEY}",
+        "Content-Type": "application/json",
+        "X-Free-Fallback": "false",
+    }
+
+    payload = {
+        "model": BAZAARLINK_MODEL,
+        "temperature": 0,
+        "max_tokens": 50,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Reply with exactly: AI READY"
+            },
+            {
+                "role": "user",
+                "content": "Test the AI connection."
+            }
+        ]
+    }
+
+    try:
+
+        response = requests.post(
+            BAZAARLINK_URL,
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        reply = (
+            data["choices"][0]["message"]["content"]
+            .strip()
+        )
+
+        await update.message.reply_text(
+            "🤖 AI TEST\n\n"
+            "🟢 BazaarLink: CONNECTED\n"
+            f"🧠 Model: {BAZAARLINK_MODEL}\n"
+            f"💬 Response: {reply}"
+        )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            "❌ AI CONNECTION FAILED\n\n"
+            f"Reason: {str(e)}"
+        )
+
+
+# =========================
 # FORMAT SIGNAL
 # =========================
 
-def format_signal(result):
+def format_signal(
+    result,
+    ai_result=None
+):
 
     values = result["values"]
 
@@ -454,7 +866,8 @@ def format_signal(result):
         f"💱 Market: {result['pair']}\n"
         f"💰 Price: {result['price']:.5f}\n"
         "⏱ Timeframe: 1 minute\n"
-        f"🕐 Closed candle: {result['candle_time']}\n\n"
+        f"🕐 Closed candle: "
+        f"{result['candle_time']}\n\n"
 
         f"EMA9: {values['ema9']:.5f}\n"
         f"EMA21: {values['ema21']:.5f}\n"
@@ -464,40 +877,96 @@ def format_signal(result):
         f"RSI: {values['rsi']:.2f}\n\n"
 
         f"MACD: {values['macd']:.5f}\n"
-        f"Signal: {values['macd_signal']:.5f}\n"
-        f"Histogram: {values['macd_histogram']:.5f}\n\n"
+        f"Signal: "
+        f"{values['macd_signal']:.5f}\n"
+        f"Histogram: "
+        f"{values['macd_histogram']:.5f}\n\n"
 
-        f"BB Upper: {values['bb_upper']:.5f}\n"
-        f"BB Middle: {values['bb_middle']:.5f}\n"
-        f"BB Lower: {values['bb_lower']:.5f}\n\n"
+        f"BB Upper: "
+        f"{values['bb_upper']:.5f}\n"
+        f"BB Middle: "
+        f"{values['bb_middle']:.5f}\n"
+        f"BB Lower: "
+        f"{values['bb_lower']:.5f}\n\n"
 
-        f"Stoch K: {values['stoch_k']:.2f}\n"
-        f"Stoch D: {values['stoch_d']:.2f}\n\n"
+        f"Stoch K: "
+        f"{values['stoch_k']:.2f}\n"
+        f"Stoch D: "
+        f"{values['stoch_d']:.2f}\n\n"
 
         f"ADX: {values['adx']:.2f}\n"
         f"+DI: {values['plus_di']:.2f}\n"
         f"-DI: {values['minus_di']:.2f}\n\n"
 
-        f"🟢 CALL confirmations: {result['call_count']}\n"
-        f"🔴 PUT confirmations: {result['put_count']}\n\n"
-        f"🎯 SIGNAL: {result['signal']}\n"
-        f"📈 Indicator score: {result['confidence']}%\n\n"
-        "⚠️ Data source: Yahoo Finance\n"
-        "⚠️ This is not an Olymp Trade price feed.\n"
-        "⚠️ Indicator score is not a guaranteed win probability."
+        f"🟢 CALL confirmations: "
+        f"{result['call_count']}\n"
+        f"🔴 PUT confirmations: "
+        f"{result['put_count']}\n\n"
+
+        f"🎯 INDICATOR SIGNAL: "
+        f"{result['signal']}\n"
+        f"📈 Indicator score: "
+        f"{result['confidence']}%\n"
     )
 
     if result["call_confirmations"]:
+
         message += (
-            "\n\n🟢 CALL:\n- "
-            + "\n- ".join(result["call_confirmations"])
+            "\n🟢 CALL:\n- "
+            + "\n- ".join(
+                result["call_confirmations"]
+            )
         )
 
     if result["put_confirmations"]:
+
         message += (
             "\n\n🔴 PUT:\n- "
-            + "\n- ".join(result["put_confirmations"])
+            + "\n- ".join(
+                result["put_confirmations"]
+            )
         )
+
+    if ai_result:
+
+        message += (
+            "\n\n🤖 AI VALIDATION\n\n"
+            f"Decision: "
+            f"{ai_result['decision']}\n"
+            f"Direction: "
+            f"{ai_result['direction']}\n"
+            f"AI validation score: "
+            f"{ai_result['confidence']}%\n"
+            f"Reason: "
+            f"{ai_result['reason']}\n"
+        )
+
+        if (
+            ai_result["decision"] == "APPROVE"
+            and ai_result["direction"]
+            == result["signal"]
+            and ai_result["confidence"] >= 89
+        ):
+
+            message += (
+                "\n🎯 FINAL SIGNAL: "
+                f"{result['signal']}\n"
+            )
+
+        else:
+
+            message += (
+                "\n🎯 FINAL SIGNAL: "
+                "NO SIGNAL\n"
+            )
+
+    message += (
+        "\n\n⚠️ Data source: Yahoo Finance\n"
+        "⚠️ This is not an Olymp Trade price feed.\n"
+        "⚠️ Indicator/AI scores are not "
+        "guaranteed win probabilities.\n"
+        "⚡ Manual execution only."
+    )
 
     return message
 
@@ -514,62 +983,108 @@ async def signal_command(
     user_id = update.effective_user.id
 
     if user_id not in authorized_users:
+
         await update.message.reply_text(
             "🔒 Access required.\n\n"
             "Use /access YOUR_CODE"
         )
+
         return
 
     if not context.args:
+
         await update.message.reply_text(
             "❌ Pair missing.\n\n"
             "Use:\n"
             "/signal EURUSD\n"
             "/signal GBPUSD"
         )
+
         return
 
     pair = context.args[0].upper()
 
     if pair not in PAIRS:
+
         await update.message.reply_text(
             "❌ Unsupported pair.\n\n"
             "Available:\n"
             "EURUSD\n"
             "GBPUSD"
         )
+
         return
 
     await update.message.reply_text(
         f"⏳ Analyzing {pair}..."
     )
 
+    # Get market data
     data, error = get_fx_data(pair)
 
     if error:
+
         await update.message.reply_text(
             "❌ LIVE MARKET DATA FAILED\n\n"
             f"Market: {pair}\n\n"
             f"Reason: {error}\n\n"
             "No signal generated."
         )
+
         return
 
+    # Indicator analysis
     result, error = analyze_indicators(
         data,
         pair
     )
 
     if error:
+
         await update.message.reply_text(
             "❌ Indicator analysis failed.\n\n"
             f"Reason: {error}\n\n"
             "No signal generated."
         )
+
+        return
+
+    # No signal = no AI call
+    if result["signal"] == "NO SIGNAL":
+
+        await update.message.reply_text(
+            format_signal(result)
+        )
+
+        return
+
+    # AI validation
+    await update.message.reply_text(
+        "🤖 Indicator signal found.\n"
+        "⏳ AI validation running..."
+    )
+
+    ai_result, ai_error = validate_with_ai(
+        result
+    )
+
+    if ai_error:
+
+        await update.message.reply_text(
+            "❌ AI VALIDATION FAILED\n\n"
+            f"Reason: {ai_error}\n\n"
+            "🎯 FINAL SIGNAL: NO SIGNAL\n\n"
+            "No signal generated because "
+            "AI validation was unavailable."
+        )
+
         return
 
     await update.message.reply_text(
-        format_signal(result)
+        format_signal(
+            result,
+            ai_result
+        )
     )
 
 
@@ -611,16 +1126,17 @@ def run_flask():
 def main():
 
     if not TELEGRAM_BOT_TOKEN:
+
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN is missing"
         )
 
     if not ACCESS_CODE:
+
         raise RuntimeError(
             "ACCESS_CODE is missing"
         )
 
-    # Start web server
     flask_thread = threading.Thread(
         target=run_flask,
         daemon=True
@@ -628,7 +1144,6 @@ def main():
 
     flask_thread.start()
 
-    # Telegram bot
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
@@ -653,6 +1168,13 @@ def main():
         CommandHandler(
             "status",
             status_command
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "aitest",
+            aitest_command
         )
     )
 
