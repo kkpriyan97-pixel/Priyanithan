@@ -1,8 +1,6 @@
-```text
 Flask
 python-telegram-bot
 requests
 pandas
 ta
 gunicorn
-```
