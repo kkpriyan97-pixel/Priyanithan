@@ -1,3 +1,4 @@
+````python
 import os
 import threading
 import requests
@@ -24,9 +25,15 @@ from ta.volatility import BollingerBands
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ACCESS_CODE = os.getenv("ACCESS_CODE")
 
-BAZAARLINK_API_KEY = os.getenv("BAZAARLINK_API_KEY")
-BAZAARLINK_MODEL = os.getenv("BAZAARLINK_MODEL", "auto:free")
-BAZAARLINK_URL = "https://api.bazaarlink.ai/v1/chat/completions"
+# Airforce AI
+AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
+AIRFORCE_MODEL = os.getenv(
+    "AIRFORCE_MODEL",
+    "gpt-4.1-mini"
+)
+AIRFORCE_URL = (
+    "https://api.airforce/v1/chat/completions"
+)
 
 authorized_users = set()
 
@@ -95,7 +102,12 @@ def get_fx_data(pair):
 
         response.raise_for_status()
 
-        result = response.json()["chart"]["result"]
+        chart = response.json().get(
+            "chart",
+            {}
+        )
+
+        result = chart.get("result")
 
         if not result:
             return None, "No market data"
@@ -103,10 +115,21 @@ def get_fx_data(pair):
         result = result[0]
 
         timestamps = result.get("timestamp")
-        quote = result["indicators"]["quote"][0]
 
-        if not timestamps or not quote:
+        indicators = result.get(
+            "indicators",
+            {}
+        )
+
+        quote_list = indicators.get(
+            "quote",
+            []
+        )
+
+        if not timestamps or not quote_list:
             return None, "Incomplete market data"
+
+        quote = quote_list[0]
 
         df = pd.DataFrame({
             "timestamp": timestamps,
@@ -150,7 +173,10 @@ def analyze_indicators(data, pair):
         high = data["high"]
         low = data["low"]
 
+        # =========================
         # EMA
+        # =========================
+
         ema9 = EMAIndicator(
             close=close,
             window=9
@@ -171,13 +197,19 @@ def analyze_indicators(data, pair):
             window=200
         ).ema_indicator()
 
+        # =========================
         # RSI
+        # =========================
+
         rsi = RSIIndicator(
             close=close,
             window=14
         ).rsi()
 
+        # =========================
         # MACD
+        # =========================
+
         macd_indicator = MACD(
             close=close,
             window_slow=26,
@@ -186,10 +218,17 @@ def analyze_indicators(data, pair):
         )
 
         macd_line = macd_indicator.macd()
-        macd_signal = macd_indicator.macd_signal()
-        macd_histogram = macd_indicator.macd_diff()
+        macd_signal = (
+            macd_indicator.macd_signal()
+        )
+        macd_histogram = (
+            macd_indicator.macd_diff()
+        )
 
-        # Bollinger Bands
+        # =========================
+        # BOLLINGER BANDS
+        # =========================
+
         bb = BollingerBands(
             close=close,
             window=20,
@@ -200,7 +239,10 @@ def analyze_indicators(data, pair):
         bb_middle = bb.bollinger_mavg()
         bb_lower = bb.bollinger_lband()
 
-        # Stochastic
+        # =========================
+        # STOCHASTIC
+        # =========================
+
         stoch = StochasticOscillator(
             high=high,
             low=low,
@@ -212,7 +254,10 @@ def analyze_indicators(data, pair):
         stoch_k = stoch.stoch()
         stoch_d = stoch.stoch_signal()
 
+        # =========================
         # ADX
+        # =========================
+
         adx_indicator = ADXIndicator(
             high=high,
             low=low,
@@ -224,7 +269,10 @@ def analyze_indicators(data, pair):
         plus_di = adx_indicator.adx_pos()
         minus_di = adx_indicator.adx_neg()
 
-        # Last CLOSED candle
+        # =========================
+        # LAST CLOSED CANDLE
+        # =========================
+
         candle = data.iloc[-2]
         idx = len(data) - 2
 
@@ -235,14 +283,19 @@ def analyze_indicators(data, pair):
             "ema21": float(ema21.iloc[idx]),
             "ema50": float(ema50.iloc[idx]),
             "ema200": float(ema200.iloc[idx]),
+
             "rsi": float(rsi.iloc[idx]),
-            "macd": float(macd_line.iloc[idx]),
+
+            "macd": float(
+                macd_line.iloc[idx]
+            ),
             "macd_signal": float(
                 macd_signal.iloc[idx]
             ),
             "macd_histogram": float(
                 macd_histogram.iloc[idx]
             ),
+
             "bb_upper": float(
                 bb_upper.iloc[idx]
             ),
@@ -252,13 +305,17 @@ def analyze_indicators(data, pair):
             "bb_lower": float(
                 bb_lower.iloc[idx]
             ),
+
             "stoch_k": float(
                 stoch_k.iloc[idx]
             ),
             "stoch_d": float(
                 stoch_d.iloc[idx]
             ),
-            "adx": float(adx.iloc[idx]),
+
+            "adx": float(
+                adx.iloc[idx]
+            ),
             "plus_di": float(
                 plus_di.iloc[idx]
             ),
@@ -396,14 +453,18 @@ def analyze_indicators(data, pair):
                 "ADX bearish"
             )
 
-        call_count = len(call_confirmations)
-        put_count = len(put_confirmations)
+        call_count = len(
+            call_confirmations
+        )
+
+        put_count = len(
+            put_confirmations
+        )
 
         # =========================
         # SIGNAL DECISION
         # =========================
 
-        # Weak trend filter
         if values["adx"] < 20:
 
             signal = "NO SIGNAL"
@@ -415,6 +476,7 @@ def analyze_indicators(data, pair):
         ):
 
             signal = "CALL"
+
             confidence = round(
                 (call_count / 6) * 100,
                 1
@@ -426,6 +488,7 @@ def analyze_indicators(data, pair):
         ):
 
             signal = "PUT"
+
             confidence = round(
                 (put_count / 6) * 100,
                 1
@@ -463,9 +526,11 @@ def analyze_indicators(data, pair):
 
 def validate_with_ai(result):
 
-    if not BAZAARLINK_API_KEY:
+    if not AIRFORCE_API_KEY:
 
-        return None, "BAZAARLINK_API_KEY missing"
+        return None, (
+            "AIRFORCE_API_KEY missing"
+        )
 
     if result["signal"] == "NO SIGNAL":
 
@@ -473,7 +538,8 @@ def validate_with_ai(result):
             "decision": "REJECT",
             "direction": "NO SIGNAL",
             "confidence": 0,
-            "reason": "Indicator engine produced NO SIGNAL."
+            "reason":
+                "Indicator engine produced NO SIGNAL."
         }, None
 
     if result["values"]["adx"] < 20:
@@ -492,11 +558,12 @@ You are a strict trading signal validator.
 
 You do NOT create a new signal.
 
-You only validate the proposed indicator direction.
+You ONLY validate the proposed indicator direction.
 
 Return ONLY valid JSON.
 
 Required format:
+
 {
   "decision": "APPROVE" or "REJECT",
   "direction": "CALL" or "PUT" or "NO SIGNAL",
@@ -505,11 +572,23 @@ Required format:
 }
 
 Rules:
-1. Direction must match the proposed signal to approve.
+
+1. Direction must match the proposed signal
+   to approve.
+
 2. Reject weak or contradictory evidence.
-3. Approve only when the indicator evidence reasonably supports
-   the proposed direction.
-4. Confidence is a validation score, NOT a win probability.
+
+3. Approve only when the indicator evidence
+   reasonably supports the proposed direction.
+
+4. Do not invent market data.
+
+5. Confidence is a validation score,
+   NOT a win probability.
+
+6. If evidence is insufficient, REJECT.
+
+7. Be conservative.
 """
 
     user_prompt = f"""
@@ -550,13 +629,12 @@ Validate this proposed signal.
 
     headers = {
         "Authorization":
-            f"Bearer {BAZAARLINK_API_KEY}",
+            f"Bearer {AIRFORCE_API_KEY}",
         "Content-Type": "application/json",
-        "X-Free-Fallback": "false",
     }
 
     payload = {
-        "model": BAZAARLINK_MODEL,
+        "model": AIRFORCE_MODEL,
         "temperature": 0,
         "max_tokens": 200,
         "messages": [
@@ -574,22 +652,57 @@ Validate this proposed signal.
     try:
 
         response = requests.post(
-            BAZAARLINK_URL,
+            AIRFORCE_URL,
             headers=headers,
             json=payload,
             timeout=25
         )
 
+        if response.status_code == 429:
+
+            retry_after = response.headers.get(
+                "Retry-After",
+                "unknown"
+            )
+
+            return None, (
+                "Airforce rate limit (429). "
+                f"Retry-After: {retry_after}"
+            )
+
         response.raise_for_status()
 
         data = response.json()
 
-        content = (
-            data["choices"][0]["message"]["content"]
-            .strip()
+        choices = data.get(
+            "choices",
+            []
         )
 
-        # Remove possible markdown fences
+        if not choices:
+
+            return None, (
+                "Airforce returned no choices"
+            )
+
+        message = choices[0].get(
+            "message",
+            {}
+        )
+
+        content = message.get(
+            "content"
+        )
+
+        if not content:
+
+            return None, (
+                "Airforce returned empty response"
+            )
+
+        content = str(content).strip()
+
+        # Remove markdown JSON fences
         if content.startswith("```"):
 
             content = content.replace(
@@ -603,19 +716,34 @@ Validate this proposed signal.
         ai_result = json.loads(content)
 
         decision = str(
-            ai_result.get("decision", "")
+            ai_result.get(
+                "decision",
+                ""
+            )
         ).upper()
 
         direction = str(
-            ai_result.get("direction", "")
+            ai_result.get(
+                "direction",
+                ""
+            )
         ).upper()
 
-        confidence = int(
-            ai_result.get("confidence", 0)
-        )
+        try:
+            confidence = int(
+                ai_result.get(
+                    "confidence",
+                    0
+                )
+            )
+        except Exception:
+            confidence = 0
 
         reason = str(
-            ai_result.get("reason", "")
+            ai_result.get(
+                "reason",
+                ""
+            )
         )
 
         if decision not in [
@@ -650,6 +778,22 @@ Validate this proposed signal.
             "reason": reason,
         }, None
 
+    except requests.exceptions.Timeout:
+
+        return None, (
+            "Airforce request timed out"
+        )
+
+    except requests.exceptions.RequestException as e:
+
+        return None, str(e)
+
+    except json.JSONDecodeError:
+
+        return None, (
+            "AI response was not valid JSON"
+        )
+
     except Exception as e:
 
         return None, str(e)
@@ -668,6 +812,7 @@ async def start_command(
         "🤖 Priyanithan AI Indicator Bot\n\n"
         "📊 Indicator engine: READY\n"
         "🤖 AI validation: ENABLED\n"
+        "📡 AI Provider: Api.Airforce\n"
         "⚡ Auto-trade: OFF\n"
         "🛑 Martingale: OFF\n\n"
         "Use:\n"
@@ -737,9 +882,12 @@ async def status_command(
 
         return
 
-    if BAZAARLINK_API_KEY:
+    if AIRFORCE_API_KEY:
+
         ai_status = "READY"
+
     else:
+
         ai_status = "NOT CONFIGURED"
 
     await update.message.reply_text(
@@ -754,7 +902,8 @@ async def status_command(
         "📐 Stochastic: READY\n"
         "💪 ADX: READY\n\n"
         f"🤖 AI Validator: {ai_status}\n"
-        f"🧠 AI Model: {BAZAARLINK_MODEL}\n\n"
+        f"🧠 AI Provider: Api.Airforce\n"
+        f"🧠 AI Model: {AIRFORCE_MODEL}\n\n"
         "⚡ Auto-trade: OFF\n"
         "🛑 Martingale: OFF"
     )
@@ -780,39 +929,40 @@ async def aitest_command(
 
         return
 
-    if not BAZAARLINK_API_KEY:
+    if not AIRFORCE_API_KEY:
 
         await update.message.reply_text(
             "❌ AI API key is missing.\n\n"
             "Check Render Environment Variables:\n"
-            "BAZAARLINK_API_KEY"
+            "AIRFORCE_API_KEY"
         )
 
         return
 
     await update.message.reply_text(
-        "🤖 Testing AI connection..."
+        "🤖 Testing Airforce AI connection..."
     )
 
     headers = {
         "Authorization":
-            f"Bearer {BAZAARLINK_API_KEY}",
+            f"Bearer {AIRFORCE_API_KEY}",
         "Content-Type": "application/json",
-        "X-Free-Fallback": "false",
     }
 
     payload = {
-        "model": BAZAARLINK_MODEL,
+        "model": AIRFORCE_MODEL,
         "temperature": 0,
         "max_tokens": 50,
         "messages": [
             {
                 "role": "system",
-                "content": "Reply with exactly: AI READY"
+                "content":
+                    "Reply with exactly: AI READY"
             },
             {
                 "role": "user",
-                "content": "Test the AI connection."
+                "content":
+                    "Test the AI connection."
             }
         ]
     }
@@ -820,26 +970,67 @@ async def aitest_command(
     try:
 
         response = requests.post(
-            BAZAARLINK_URL,
+            AIRFORCE_URL,
             headers=headers,
             json=payload,
             timeout=20
         )
 
+        if response.status_code == 429:
+
+            retry_after = response.headers.get(
+                "Retry-After",
+                "unknown"
+            )
+
+            await update.message.reply_text(
+                "❌ AI CONNECTION FAILED\n\n"
+                "Reason: Airforce rate limit (429)\n"
+                f"Retry-After: {retry_after}\n\n"
+                "No signal will be generated "
+                "while AI is unavailable."
+            )
+
+            return
+
         response.raise_for_status()
 
         data = response.json()
 
-        reply = (
-            data["choices"][0]["message"]["content"]
-            .strip()
+        choices = data.get(
+            "choices",
+            []
         )
+
+        if not choices:
+
+            raise RuntimeError(
+                "No choices returned"
+            )
+
+        reply = str(
+            choices[0]["message"]["content"]
+        ).strip()
 
         await update.message.reply_text(
             "🤖 AI TEST\n\n"
-            "🟢 BazaarLink: CONNECTED\n"
-            f"🧠 Model: {BAZAARLINK_MODEL}\n"
+            "🟢 Api.Airforce: CONNECTED\n"
+            f"🧠 Model: {AIRFORCE_MODEL}\n"
             f"💬 Response: {reply}"
+        )
+
+    except requests.exceptions.Timeout:
+
+        await update.message.reply_text(
+            "❌ AI CONNECTION FAILED\n\n"
+            "Reason: Airforce request timed out."
+        )
+
+    except requests.exceptions.RequestException as e:
+
+        await update.message.reply_text(
+            "❌ AI CONNECTION FAILED\n\n"
+            f"Reason: {str(e)}"
         )
 
     except Exception as e:
@@ -863,6 +1054,7 @@ def format_signal(
 
     message = (
         "📊 INDICATOR ANALYSIS\n\n"
+
         f"💱 Market: {result['pair']}\n"
         f"💰 Price: {result['price']:.5f}\n"
         "⏱ Timeframe: 1 minute\n"
@@ -942,7 +1134,8 @@ def format_signal(
         )
 
         if (
-            ai_result["decision"] == "APPROVE"
+            ai_result["decision"]
+            == "APPROVE"
             and ai_result["direction"]
             == result["signal"]
             and ai_result["confidence"] >= 89
@@ -1019,7 +1212,10 @@ async def signal_command(
         f"⏳ Analyzing {pair}..."
     )
 
-    # Get market data
+    # =========================
+    # MARKET DATA
+    # =========================
+
     data, error = get_fx_data(pair)
 
     if error:
@@ -1033,7 +1229,10 @@ async def signal_command(
 
         return
 
-    # Indicator analysis
+    # =========================
+    # INDICATOR ANALYSIS
+    # =========================
+
     result, error = analyze_indicators(
         data,
         pair
@@ -1049,7 +1248,10 @@ async def signal_command(
 
         return
 
-    # No signal = no AI call
+    # =========================
+    # NO SIGNAL
+    # =========================
+
     if result["signal"] == "NO SIGNAL":
 
         await update.message.reply_text(
@@ -1058,10 +1260,13 @@ async def signal_command(
 
         return
 
-    # AI validation
+    # =========================
+    # AI VALIDATION
+    # =========================
+
     await update.message.reply_text(
         "🤖 Indicator signal found.\n"
-        "⏳ AI validation running..."
+        "⏳ Airforce AI validation running..."
     )
 
     ai_result, ai_error = validate_with_ai(
@@ -1110,7 +1315,10 @@ async def error_handler(
 def run_flask():
 
     port = int(
-        os.getenv("PORT", "10000")
+        os.getenv(
+            "PORT",
+            "10000"
+        )
     )
 
     app.run(
@@ -1146,7 +1354,9 @@ def main():
 
     application = (
         Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
+        .token(
+            TELEGRAM_BOT_TOKEN
+        )
         .build()
     )
 
@@ -1200,3 +1410,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+````
