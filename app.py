@@ -1,4 +1,3 @@
-text
 app.py
 
 import os
