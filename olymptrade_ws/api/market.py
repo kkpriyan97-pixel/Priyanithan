@@ -1,4 +1,38 @@
-13 and 281 are sent when unsubscribing
+# api/market.py
+import logging
+import time
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Union
+from datetime import datetime, timezone
+
+from olymptrade_ws.core.protocol import get_current_timestamp_ms
+
+if TYPE_CHECKING:
+    from olymptrade_ws.core.client import OlympTradeClient
+
+logger = logging.getLogger(__name__)
+
+class MarketAPI:
+    def __init__(self, client: 'OlympTradeClient'):
+        self._client = client
+
+    async def subscribe_ticks(self, pair: str) -> None:
+        """Subscribes to live price ticks (Event 1) for a given asset pair."""
+        logger.info(f"Subscribing to ticks for {pair}...")
+        # Logs show events 12 and 280 are sent when subscribing to a pair
+        try:
+            # Event 12
+            await self._client.send_request(12, [{"pair": pair}], requires_response=True)
+             # Event 280
+            await self._client.send_request(280, [{"pair": pair}], requires_response=True)
+            logger.info(f"Successfully sent tick subscription requests for {pair}.")
+        except Exception as e:
+            logger.error(f"Failed to subscribe to ticks for {pair}: {e}")
+            raise
+
+    async def unsubscribe_ticks(self, pair: str) -> None:
+        """Unsubscribes from live price ticks for a given asset pair."""
+        logger.info(f"Unsubscribing from ticks for {pair}...")
+         # Logs show events 13 and 281 are sent when unsubscribing
         try:
              # Event 13
             await self._client.send_request(13, [{"pair": pair}], requires_response=True)
