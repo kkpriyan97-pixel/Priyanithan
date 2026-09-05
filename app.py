@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.1-asia-x-readonly"
+APP_VERSION = "2.2-asia-x-live-tick-candles"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -78,6 +78,12 @@ runtime_loop = None
 latest_candles = {}
 latest_ticks = {}
 latest_signal = {}
+
+# Live tick -> 1-minute OHLC fallback buffers.
+# Used only when OlympTrade historical get_candles() returns no usable candles.
+tick_history = {}
+live_candles = {}
+
 manual_trades = {}
 state_lock = threading.Lock()
 
@@ -140,20 +146,64 @@ def normalize_candles(raw):
 
 async def on_tick(message):
     data = message.get("d", [])
-    if isinstance(data, list):
-        with state_lock:
-            for tick in data:
-                if isinstance(tick, dict):
-                    pair = tick.get("p", tick.get("pair"))
-                    price = tick.get("q", tick.get("price"))
-                    ts = tick.get("t", tick.get("timestamp", time.time()))
-                    if pair and price is not None:
-                        try:
-                            latest_ticks[str(pair)] = {
-                                "price": float(price), "timestamp": float(ts)
-                            }
-                        except Exception:
-                            pass
+    if not isinstance(data, list):
+        return
+
+    for tick in data:
+        if not isinstance(tick, dict):
+            continue
+
+        pair = tick.get("p", tick.get("pair"))
+        price = tick.get("q", tick.get("price"))
+        ts = tick.get("t", tick.get("timestamp", time.time()))
+
+        if not pair or price is None:
+            continue
+
+        try:
+            pair = str(pair).upper()
+            price = float(price)
+            ts = float(ts)
+            minute = int(ts // 60) * 60
+
+            with state_lock:
+                latest_ticks[pair] = {
+                    "price": price,
+                    "timestamp": ts,
+                }
+
+                hist = tick_history.setdefault(pair, {})
+                candle = hist.get(minute)
+
+                if candle is None:
+                    hist[minute] = {
+                        "timestamp": float(minute),
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": 0.0,
+                    }
+                else:
+                    candle["high"] = max(candle["high"], price)
+                    candle["low"] = min(candle["low"], price)
+                    candle["close"] = price
+                    candle["volume"] += 1.0
+
+                # Keep the current minute plus a generous rolling history.
+                if len(hist) > 400:
+                    for old_minute in sorted(hist)[:-400]:
+                        hist.pop(old_minute, None)
+
+                # Only completed minutes are used for technical analysis.
+                completed = [
+                    v for k, v in sorted(hist.items())
+                    if k < minute
+                ]
+                live_candles[pair] = completed[-300:]
+
+        except (TypeError, ValueError):
+            continue
 
 async def on_balance(message):
     # We keep balance read-only; no order placement is performed.
@@ -265,19 +315,43 @@ async def olymptrade_connect_loop():
             retry_delay = min(retry_delay * 2, max_retry_delay)
 
 async def get_ot_candles(pair, size=60, count=260):
-    """Fetch broker candles only; no Yahoo/third-party price feed."""
+    """Fetch OlympTrade candles; fall back to locally aggregated live ticks."""
     client = ot_client
-    if client is None or not client.connection.is_connected:
-        return None, "OlympTrade WebSocket is not connected"
-    broker_pair = PAIR_ALIASES.get(pair, pair)
-    try:
-        raw = await client.market.get_candles(broker_pair, size=size, count=count)
-        df = normalize_candles(raw)
-        if df is None or len(df) < 220:
-            return None, f"Not enough OlympTrade candles ({0 if df is None else len(df)})"
-        return df, None
-    except Exception as e:
-        return None, str(e)
+
+    # First try the broker's historical candle endpoint.
+    if client is not None and client.connection.is_connected:
+        broker_pair = PAIR_ALIASES.get(pair, pair)
+        try:
+            raw = await client.market.get_candles(
+                broker_pair,
+                size=size,
+                count=count
+            )
+            df = normalize_candles(raw)
+            if df is not None and len(df) >= 220:
+                return df, None
+        except Exception as e:
+            log.warning("Historical candle request failed for %s: %s", pair, e)
+
+    # Fallback: build true 1-minute OHLC candles from OlympTrade live ticks.
+    # We never fabricate missing prices. Until enough completed candles exist,
+    # the bot must remain in NO SIGNAL state.
+    with state_lock:
+        rows = list(live_candles.get(pair, []))
+
+    if len(rows) < 220:
+        return None, (
+            f"Not enough live 1-minute candles ({len(rows)}/220). "
+            "Collecting OlympTrade live tick history; no signal generated."
+        )
+
+    df = pd.DataFrame(rows[-count:])
+    df = df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
+
+    if len(df) < 220:
+        return None, f"Not enough live 1-minute candles ({len(df)}/220)"
+
+    return df, None
 
 # ============================================================
 # TECHNICAL / PRICE ACTION ENGINE
@@ -609,7 +683,7 @@ def make_chart(df, result=None):
     ax.set_title(
         f"OlympTrade Live Candles — {result['pair'] if result else ''}"
     )
-    ax.set_xlabel("Recent 1-minute candles")
+    ax.set_xlabel("Recent 1-minute candles from OlympTrade live ticks")
     ax.set_ylabel("Price")
     ax.grid(alpha=0.2)
     fig.tight_layout()
