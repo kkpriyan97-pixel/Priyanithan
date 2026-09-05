@@ -1,5 +1,4 @@
 
-import asyncio
 import io
 import json
 import logging
@@ -53,11 +52,12 @@ AUTO_TRADE = False
 MARTINGALE = False
 
 # Exact OlympTrade symbols can be changed through Render env if needed.
-PAIR_ENV = os.getenv("OLYMP_PAIRS", "EURUSD,GBPUSD")
+PAIR_ENV = os.getenv("OLYMP_PAIRS", "ASIA_X")
 PAIRS = [x.strip().upper() for x in PAIR_ENV.split(",") if x.strip()]
 
 # Optional mapping if the broker uses a different exact symbol.
 PAIR_ALIASES = {
+    "ASIA_X": os.getenv("OT_ASIA_X_PAIR", "ASIA_X"),
     "EURUSD": os.getenv("OT_EURUSD_PAIR", "EURUSD"),
     "GBPUSD": os.getenv("OT_GBPUSD_PAIR", "GBPUSD"),
 }
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.0-live-readonly"
+APP_VERSION = "2.1-asia-x-readonly"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -627,7 +627,7 @@ async def start_command(update, context):
     await update.message.reply_text(
         "🤖 Priyanithan AI OlympTrade Bot\n\n"
         "Use /access YOUR_CODE first.\n"
-        "Then /status or /signal EURUSD"
+        "Then /status or /signal ASIA_X"
     )
 
 async def access_command(update, context):
@@ -663,7 +663,7 @@ async def signal_command(update, context):
         await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
         return
     if not context.args:
-        await update.message.reply_text("Use /signal EURUSD")
+        await update.message.reply_text("Use /signal ASIA_X")
         return
     pair = context.args[0].upper()
     if pair not in PAIRS:
