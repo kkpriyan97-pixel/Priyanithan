@@ -1,4 +1,4 @@
-name: Extract Enable ASIA_X
+name: enable-asia-x-fixed.yml
 
 on:
   workflow_dispatch:
