@@ -178,30 +178,14 @@ async def on_trade_event(message):
             rec["updated_at"] = time.time()
 
 async def olymptrade_connect_loop():
-    """Maintain a resilient read-only OlympTrade WebSocket connection.
-
-    The supplied OlympTrade client intentionally stops its internal processing
-    tasks when the socket is lost. Render can also interrupt long-lived
-    WebSocket connections during deploys, maintenance, or network events.
-    Therefore the application owns the reconnect loop here.
-
-    No trade/order method is called by this loop.
-    """
     global ot_client
     if not OLYMPTRADE_ACCESS_TOKEN:
         log.error("OLYMPTRADE_ACCESS_TOKEN is not configured.")
         return
 
-    retry_delay = 5
-    max_retry_delay = 60
-    attempt = 0
-
     while True:
         client = None
         try:
-            attempt += 1
-            log.info("OlympTrade connection attempt #%s", attempt)
-
             client = OlympTradeClient(
                 access_token=OLYMPTRADE_ACCESS_TOKEN,
                 log_raw_messages=False,
@@ -215,54 +199,33 @@ async def olymptrade_connect_loop():
             await client.start()
             ot_client = client
 
-            # Initialize/read the session. This is read-only.
+            # get_balance() initializes the session according to the supplied reference.
             await client.balance.get_balance()
 
-            # Re-subscribe after EVERY successful reconnect.
             for pair in PAIRS:
                 broker_pair = PAIR_ALIASES.get(pair, pair)
                 try:
                     await client.market.subscribe_ticks(broker_pair)
-                    log.info("Subscribed to OlympTrade ticks: %s", broker_pair)
                 except Exception as e:
                     log.warning("Tick subscription failed for %s: %s", broker_pair, e)
 
             log.info("OlympTrade connection established for: %s", PAIRS)
 
-            # Connection is healthy; reset backoff.
-            retry_delay = 5
-            attempt = 0
-
-            # Keep this connection alive. The library's ping loop handles
-            # keep-alive; this loop detects when that connection is gone.
+            # Keep this connection alive. The library's own ping loop handles keep-alive.
             while client.connection.is_connected:
                 await asyncio.sleep(5)
 
             raise ConnectionError("OlympTrade WebSocket disconnected")
 
-        except asyncio.CancelledError:
-            # Application shutdown/redeploy. Do not keep reconnecting.
-            log.info("OlympTrade connection loop cancelled.")
-            raise
         except Exception as e:
             log.error("OlympTrade connection error: %s", e)
-            ot_client = None
-
-            # The library's connection-lost handler already marks the client
-            # as stopped. Avoid calling client.stop() again, which only emits
-            # a misleading 'Client is not running' warning.
             try:
-                if client and client.connection.is_connected:
-                    await client.connection.disconnect()
+                if client:
+                    await client.stop()
             except Exception:
                 pass
-
-            log.warning(
-                "OlympTrade reconnecting in %s seconds (exponential backoff).",
-                retry_delay,
-            )
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, max_retry_delay)
+            ot_client = None
+            await asyncio.sleep(10)
 
 async def get_ot_candles(pair, size=60, count=260):
     """Fetch broker candles only; no Yahoo/third-party price feed."""
@@ -774,39 +737,12 @@ def run_flask():
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
-async def telegram_runtime(application):
-    """Start PTB first, then create our long-running tasks.
-
-    PTB's post_init hook runs before Application is marked as running, so
-    creating background tasks there can produce warnings and unreliable task
-    lifecycle handling. We explicitly start the Application/Updater first.
-    """
+async def post_init(application):
     global runtime_loop
     runtime_loop = asyncio.get_running_loop()
-
-    await application.initialize()
-    await application.start()
-
-    tasks = [
-        asyncio.create_task(olymptrade_connect_loop(), name="olymptrade-connect"),
-        asyncio.create_task(scan_loop(application), name="signal-scan"),
-        asyncio.create_task(manual_trade_monitor(application), name="trade-monitor"),
-    ]
-
-    try:
-        await application.updater.start_polling(drop_pending_updates=True)
-        log.info("Telegram polling started; background bot tasks are running.")
-        await asyncio.Event().wait()
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        if application.updater and application.updater.running:
-            await application.updater.stop()
-        if application.running:
-            await application.stop()
-        await application.shutdown()
+    application.create_task(olymptrade_connect_loop())
+    application.create_task(scan_loop(application))
+    application.create_task(manual_trade_monitor(application))
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -818,13 +754,17 @@ def main():
 
     threading.Thread(target=run_flask, daemon=True).start()
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("access", access_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("signal", signal_command))
-
-    asyncio.run(telegram_runtime(application))
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
