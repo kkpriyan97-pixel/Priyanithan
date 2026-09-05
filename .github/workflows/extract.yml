@@ -1,4 +1,4 @@
-name: Extract OlympTrade Bot
+name: Extract Enable ASIA_X
 
 on:
   workflow_dispatch:
