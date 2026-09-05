@@ -598,6 +598,13 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
+            # OpenRouter model-level fallback: if the primary model is
+            # rate-limited or unavailable, try another free model automatically.
+            if name == "OpenRouter":
+                payload["models"] = [
+                    model,
+                    "openrouter/free",
+                ]
             if name == "OpenRouter":
                 headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
                 headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
