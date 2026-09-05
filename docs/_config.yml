@@ -1,0 +1,21 @@
+# Jekyll configuration for GitHub Pages
+#
+# GitHub Pages for this repository serves from the /docs folder on main,
+# so THIS file is the config Jekyll actually reads. The _config.yml at the
+# repository root is not used by the published site.
+
+title: "OlympTrade API Documentation"
+description: "Python WebSocket API client for OlympTrade — build, backtest and run automated trading bots."
+
+url: "https://chipadevteam.github.io"
+baseurl: "/OlympTradeAPI"
+
+markdown: kramdown
+highlighter: rouge
+
+# sitemap.xml is maintained by hand in this directory, so jekyll-sitemap
+# is intentionally not enabled (it would skip generation anyway).
+
+exclude:
+  - README.md
+  - assets/affiliate/README.md

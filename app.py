@@ -1,18 +1,29 @@
-import os
-import threading
+
+import asyncio
+import io
 import json
-import requests
+import logging
+import os
+import re
+import threading
+import time
+from datetime import datetime, timezone
+
 import pandas as pd
+import requests
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from flask import Flask
-from openai import OpenAI
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands
 
+from olymptrade_ws import OlympTradeClient
+from olymptrade_ws.olympconfig import parameters
 
 # ============================================================
 # CONFIG
@@ -21,1226 +32,739 @@ from ta.volatility import BollingerBands
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ACCESS_CODE = os.getenv("ACCESS_CODE")
 
+# Never put secrets in this file. Set them as Render Environment Variables.
+OLYMPTRADE_ACCESS_TOKEN = os.getenv("OLYMPTRADE_ACCESS_TOKEN")
+
+# AI: OpenRouter is preferred when configured; Airforce remains supported.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-5.2:free")
 AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
-AIRFORCE_MODEL = os.getenv(
-    "AIRFORCE_MODEL",
-    "gpt-oss-120b"
+AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
+AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "89"))
+
+# Signal scan interval: scans periodically, but does NOT force a signal.
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
+
+# Live monitoring interval requested by the user.
+LIVE_UPDATE_SECONDS = 15
+
+# Manual execution only. This project deliberately contains no order placement call.
+AUTO_TRADE = False
+MARTINGALE = False
+
+# Exact OlympTrade symbols can be changed through Render env if needed.
+PAIR_ENV = os.getenv("OLYMP_PAIRS", "EURUSD,GBPUSD")
+PAIRS = [x.strip().upper() for x in PAIR_ENV.split(",") if x.strip()]
+
+# Optional mapping if the broker uses a different exact symbol.
+PAIR_ALIASES = {
+    "EURUSD": os.getenv("OT_EURUSD_PAIR", "EURUSD"),
+    "GBPUSD": os.getenv("OT_GBPUSD_PAIR", "GBPUSD"),
+}
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+log = logging.getLogger("priyanithan")
 
-AIRFORCE_BASE_URL = "https://api.airforce/v1"
-
+APP_VERSION = "2.0-live-readonly"
+app = Flask(__name__)
 authorized_users = set()
 
-app = Flask(__name__)
-
+# Global async/runtime state
+ot_client = None
+runtime_loop = None
+latest_candles = {}
+latest_ticks = {}
+latest_signal = {}
+manual_trades = {}
+state_lock = threading.Lock()
 
 # ============================================================
-# WEB SERVER
+# WEB HEALTH
 # ============================================================
 
-@app.route("/")
+@app.get("/")
 def home():
-    return "Priyanithan AI Indicator Bot is ONLINE"
+    return f"Priyanithan AI OlympTrade Signal Bot is ONLINE — {APP_VERSION}"
 
-
-@app.route("/health")
+@app.get("/health")
 def health():
     return "OK"
 
-
 # ============================================================
-# MARKET PAIRS
-# ============================================================
-
-PAIRS = {
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-}
-
-
-# ============================================================
-# GET MARKET DATA
+# HELPERS
 # ============================================================
 
-def get_fx_data(pair):
+def now_utc():
+    return datetime.now(timezone.utc)
 
-    symbol = PAIRS.get(pair.upper())
+def is_authorized(update: Update):
+    return update.effective_user and update.effective_user.id in authorized_users
 
-    if not symbol:
-        return None, "Unsupported pair"
+def normalize_candles(raw):
+    """Accept the library's documented candle list and normalize field names."""
+    if not isinstance(raw, list):
+        return None
+    rows = []
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
+        # The supplied API reference documents open/high/low/close;
+        # support common short names too.
+        o = c.get("open", c.get("o"))
+        h = c.get("high", c.get("h"))
+        l = c.get("low", c.get("l"))
+        cl = c.get("close", c.get("c"))
+        ts = c.get("timestamp", c.get("t", c.get("time")))
+        if o is None or h is None or l is None or cl is None:
+            continue
+        try:
+            rows.append({
+                "timestamp": float(ts) if ts is not None else time.time(),
+                "open": float(o), "high": float(h),
+                "low": float(l), "close": float(cl),
+                "volume": float(c.get("volume", c.get("v", 0)) or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    return df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
 
-    url = (
-        "https://query1.finance.yahoo.com/"
-        f"v8/finance/chart/{symbol}"
+# ============================================================
+# OLYMP TRADE CONNECTION
+# ============================================================
+
+async def on_tick(message):
+    data = message.get("d", [])
+    if isinstance(data, list):
+        with state_lock:
+            for tick in data:
+                if isinstance(tick, dict):
+                    pair = tick.get("p", tick.get("pair"))
+                    price = tick.get("q", tick.get("price"))
+                    ts = tick.get("t", tick.get("timestamp", time.time()))
+                    if pair and price is not None:
+                        try:
+                            latest_ticks[str(pair)] = {
+                                "price": float(price), "timestamp": float(ts)
+                            }
+                        except Exception:
+                            pass
+
+async def on_balance(message):
+    # We keep balance read-only; no order placement is performed.
+    log.debug("OlympTrade balance update received.")
+
+async def on_trade_event(message):
+    """Observe platform trade events only; never create/modify a trade."""
+    event = message.get("e")
+    data = message.get("d", [])
+    if not isinstance(data, list):
+        return
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        tid = item.get("id")
+        if not tid:
+            continue
+        with state_lock:
+            rec = manual_trades.setdefault(str(tid), {})
+            rec["event"] = event
+            rec["data"] = item
+            rec["updated_at"] = time.time()
+
+async def olymptrade_connect_loop():
+    global ot_client
+    if not OLYMPTRADE_ACCESS_TOKEN:
+        log.error("OLYMPTRADE_ACCESS_TOKEN is not configured.")
+        return
+
+    while True:
+        client = None
+        try:
+            client = OlympTradeClient(
+                access_token=OLYMPTRADE_ACCESS_TOKEN,
+                log_raw_messages=False,
+            )
+            client.register_callback(parameters.E_TICK_UPDATE, on_tick)
+            client.register_callback(parameters.E_BALANCE_UPDATE, on_balance)
+            client.register_callback(parameters.E_TRADE_ACCEPTED, on_trade_event)
+            client.register_callback(parameters.E_TRADE_UPDATE_INTERIM, on_trade_event)
+            client.register_callback(parameters.E_TRADE_CLOSED, on_trade_event)
+
+            await client.start()
+            ot_client = client
+
+            # get_balance() initializes the session according to the supplied reference.
+            await client.balance.get_balance()
+
+            for pair in PAIRS:
+                broker_pair = PAIR_ALIASES.get(pair, pair)
+                try:
+                    await client.market.subscribe_ticks(broker_pair)
+                except Exception as e:
+                    log.warning("Tick subscription failed for %s: %s", broker_pair, e)
+
+            log.info("OlympTrade connection established for: %s", PAIRS)
+
+            # Keep this connection alive. The library's own ping loop handles keep-alive.
+            while client.connection.is_connected:
+                await asyncio.sleep(5)
+
+            raise ConnectionError("OlympTrade WebSocket disconnected")
+
+        except Exception as e:
+            log.error("OlympTrade connection error: %s", e)
+            try:
+                if client:
+                    await client.stop()
+            except Exception:
+                pass
+            ot_client = None
+            await asyncio.sleep(10)
+
+async def get_ot_candles(pair, size=60, count=260):
+    """Fetch broker candles only; no Yahoo/third-party price feed."""
+    client = ot_client
+    if client is None or not client.connection.is_connected:
+        return None, "OlympTrade WebSocket is not connected"
+    broker_pair = PAIR_ALIASES.get(pair, pair)
+    try:
+        raw = await client.market.get_candles(broker_pair, size=size, count=count)
+        df = normalize_candles(raw)
+        if df is None or len(df) < 220:
+            return None, f"Not enough OlympTrade candles ({0 if df is None else len(df)})"
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+# ============================================================
+# TECHNICAL / PRICE ACTION ENGINE
+# ============================================================
+
+def candle_patterns(df):
+    r = {}
+    a = df.iloc[-2]  # last closed candle
+    b = df.iloc[-3]
+    body = abs(a.close - a.open)
+    rng = max(a.high - a.low, 1e-12)
+    upper = a.high - max(a.open, a.close)
+    lower = min(a.open, a.close) - a.low
+    bull = a.close > a.open
+    bear = a.close < a.open
+
+    r["Doji"] = body <= rng * 0.10
+    r["Hammer"] = lower >= body * 2 and upper <= max(body, rng * 0.15)
+    r["Inverted Hammer"] = upper >= body * 2 and lower <= max(body, rng * 0.15)
+    r["Shooting Star"] = upper >= body * 2 and lower <= max(body, rng * 0.15) and bear
+    r["Bullish Engulfing"] = bull and b.close < b.open and a.open <= b.close and a.close >= b.open
+    r["Bearish Engulfing"] = bear and b.close > b.open and a.open >= b.close and a.close <= b.open
+    r["Harami"] = max(a.open, a.close) <= max(b.open, b.close) and min(a.open, a.close) >= min(b.open, b.close)
+    r["Pin Bar"] = max(upper, lower) >= rng * 0.60
+    r["Marubozu"] = body >= rng * 0.80
+    r["Spinning Top"] = body <= rng * 0.35 and upper >= rng * 0.20 and lower >= rng * 0.20
+
+    # Three-candle patterns
+    c = df.iloc[-4]
+    r["Morning Star"] = (
+        c.close < c.open and
+        abs(b.close-b.open) <= abs(c.close-c.open)*0.45 and
+        bull and a.close > (c.open+c.close)/2
+    )
+    r["Evening Star"] = (
+        c.close > c.open and
+        abs(b.close-b.open) <= abs(c.close-c.open)*0.45 and
+        bear and a.close < (c.open+c.close)/2
     )
 
-    params = {
-        "interval": "1m",
-        "range": "1d",
-        "includePrePost": "false",
-        "events": "div,splits",
+    # Tweezers / soldiers / crows
+    r["Tweezer Bottom"] = abs(a.low-b.low) <= rng*0.08 and bull and b.close < b.open
+    r["Tweezer Top"] = abs(a.high-b.high) <= rng*0.08 and bear and b.close > b.open
+
+    last3 = df.iloc[-4:-1]
+    r["Three White Soldiers"] = all(x.close > x.open for _, x in last3.iterrows())
+    r["Three Black Crows"] = all(x.close < x.open for _, x in last3.iterrows())
+
+    prev = df.iloc[-3]
+    r["Inside Bar"] = a.high <= prev.high and a.low >= prev.low
+
+    return [k for k, v in r.items() if v]
+
+def structure(df):
+    highs = df["high"].tail(30).to_numpy()
+    lows = df["low"].tail(30).to_numpy()
+    hh = highs[-1] > highs[-6] if len(highs) >= 6 else False
+    hl = lows[-1] > lows[-6] if len(lows) >= 6 else False
+    lh = highs[-1] < highs[-6] if len(highs) >= 6 else False
+    ll = lows[-1] < lows[-6] if len(lows) >= 6 else False
+    if hh and hl:
+        trend = "Bullish"
+    elif lh and ll:
+        trend = "Bearish"
+    else:
+        trend = "Range / Mixed"
+    return trend
+
+def analyze(df, pair):
+    x = df.copy()
+    close = x["close"]
+    high = x["high"]
+    low = x["low"]
+
+    x["ema9"] = EMAIndicator(close, 9).ema_indicator()
+    x["ema21"] = EMAIndicator(close, 21).ema_indicator()
+    x["ema50"] = EMAIndicator(close, 50).ema_indicator()
+    x["ema200"] = EMAIndicator(close, 200).ema_indicator()
+
+    macd = MACD(close, 26, 12, 9)
+    x["macd"] = macd.macd()
+    x["macd_signal"] = macd.macd_signal()
+    x["macd_hist"] = macd.macd_diff()
+
+    x["rsi"] = RSIIndicator(close, 14).rsi()
+
+    bb = BollingerBands(close, 20, 2)
+    x["bb_high"] = bb.bollinger_hband()
+    x["bb_mid"] = bb.bollinger_mavg()
+    x["bb_low"] = bb.bollinger_lband()
+
+    st = StochasticOscillator(high, low, close, 14, 3)
+    x["stoch_k"] = st.stoch()
+    x["stoch_d"] = st.stoch_signal()
+
+    adx = ADXIndicator(high, low, close, 14)
+    x["adx"] = adx.adx()
+
+    row = x.iloc[-2]  # closed candle
+    price = float(row.close)
+    pats = candle_patterns(x)
+    trend = structure(x)
+
+    bull = 0
+    bear = 0
+    reasons = []
+    conflicts = []
+
+    if row.ema9 > row.ema21:
+        bull += 1; reasons.append("EMA 9/21 Bullish")
+    elif row.ema9 < row.ema21:
+        bear += 1; reasons.append("EMA 9/21 Bearish")
+
+    if row.macd > row.macd_signal and row.macd_hist > 0:
+        bull += 1; reasons.append("MACD Bullish")
+    elif row.macd < row.macd_signal and row.macd_hist < 0:
+        bear += 1; reasons.append("MACD Bearish")
+
+    if 50 < row.rsi < 70:
+        bull += 1; reasons.append("RSI Momentum")
+    elif 30 < row.rsi < 50:
+        bear += 1; reasons.append("RSI Momentum")
+    elif row.rsi >= 70:
+        conflicts.append("RSI Overbought")
+    elif row.rsi <= 30:
+        conflicts.append("RSI Oversold")
+
+    if price > row.bb_mid:
+        bull += 1; reasons.append("Above Bollinger Mid")
+    elif price < row.bb_mid:
+        bear += 1; reasons.append("Below Bollinger Mid")
+
+    if row.stoch_k > row.stoch_d and row.stoch_k < 85:
+        bull += 1; reasons.append("Stochastic Bullish")
+    elif row.stoch_k < row.stoch_d and row.stoch_k > 15:
+        bear += 1; reasons.append("Stochastic Bearish")
+
+    if trend == "Bullish":
+        bull += 1; reasons.append("Bullish Structure")
+    elif trend == "Bearish":
+        bear += 1; reasons.append("Bearish Structure")
+
+    if "Bullish Engulfing" in pats or "Morning Star" in pats or "Three White Soldiers" in pats:
+        bull += 1; reasons.append("Bullish Candle Pattern")
+    if "Bearish Engulfing" in pats or "Evening Star" in pats or "Three Black Crows" in pats:
+        bear += 1; reasons.append("Bearish Candle Pattern")
+
+    adx_val = float(row.adx)
+    if adx_val < 20:
+        signal = "NO SIGNAL"
+        reason = f"ADX is below 20 ({adx_val:.1f}); market strength is insufficient."
+    elif bull == bear or max(bull, bear) < 4:
+        signal = "NO SIGNAL"
+        reason = "Bullish/bearish evidence is not strong enough or is conflicting."
+    else:
+        signal = "UP" if bull > bear else "DOWN"
+        reason = "Strong multi-factor setup; pending AI validation."
+
+    # Nearby resistance/support approximation from recent closed candles.
+    recent = x.iloc[-22:-2]
+    resistance = float(recent.high.max())
+    support = float(recent.low.min())
+    if signal == "UP" and resistance > price and (resistance-price)/max(price,1e-12) < 0.0008:
+        conflicts.append("Resistance very close")
+    if signal == "DOWN" and support < price and (price-support)/max(price,1e-12) < 0.0008:
+        conflicts.append("Support very close")
+
+    raw_score = max(bull, bear)
+    confidence = min(99, int(55 + raw_score * 5 - len(conflicts) * 7))
+
+    return {
+        "pair": pair,
+        "signal": signal,
+        "price": price,
+        "candle_time": datetime.fromtimestamp(float(row.timestamp), tz=timezone.utc).strftime("%H:%M:%S UTC"),
+        "bull": bull, "bear": bear,
+        "trend": trend,
+        "adx": adx_val,
+        "rsi": float(row.rsi),
+        "macd": float(row.macd),
+        "macd_signal": float(row.macd_signal),
+        "stoch_k": float(row.stoch_k),
+        "stoch_d": float(row.stoch_d),
+        "patterns": pats,
+        "reasons": reasons,
+        "conflicts": conflicts,
+        "support": support,
+        "resistance": resistance,
+        "confidence": confidence,
+        "data_source": "OlympTrade live candle feed",
     }
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=15
-        )
-
-        response.raise_for_status()
-
-        chart = response.json().get("chart", {})
-        results = chart.get("result")
-
-        if not results:
-            return None, "No market data"
-
-        result = results[0]
-
-        timestamps = result.get("timestamp")
-        indicators = result.get("indicators", {})
-        quotes = indicators.get("quote", [])
-
-        if not timestamps or not quotes:
-            return None, "Incomplete market data"
-
-        quote = quotes[0]
-
-        df = pd.DataFrame({
-            "timestamp": timestamps,
-            "open": quote.get("open"),
-            "high": quote.get("high"),
-            "low": quote.get("low"),
-            "close": quote.get("close"),
-            "volume": quote.get("volume"),
-        })
-
-        df = df.dropna(
-            subset=[
-                "open",
-                "high",
-                "low",
-                "close"
-            ]
-        ).copy()
-
-        if len(df) < 220:
-            return None, (
-                f"Not enough candles: {len(df)}"
-            )
-
-        return df, None
-
-    except Exception as e:
-
-        return None, str(e)
-
-
 # ============================================================
-# INDICATOR ANALYSIS
+# AI VALIDATION
 # ============================================================
 
-def analyze_indicators(data, pair):
-
-    try:
-
-        close = data["close"]
-        high = data["high"]
-        low = data["low"]
-
-        # ----------------------------------------------------
-        # EMA
-        # ----------------------------------------------------
-
-        ema9 = EMAIndicator(
-            close=close,
-            window=9
-        ).ema_indicator()
-
-        ema21 = EMAIndicator(
-            close=close,
-            window=21
-        ).ema_indicator()
-
-        ema50 = EMAIndicator(
-            close=close,
-            window=50
-        ).ema_indicator()
-
-        ema200 = EMAIndicator(
-            close=close,
-            window=200
-        ).ema_indicator()
-
-        # ----------------------------------------------------
-        # RSI
-        # ----------------------------------------------------
-
-        rsi = RSIIndicator(
-            close=close,
-            window=14
-        ).rsi()
-
-        # ----------------------------------------------------
-        # MACD
-        # ----------------------------------------------------
-
-        macd_indicator = MACD(
-            close=close,
-            window_slow=26,
-            window_fast=12,
-            window_sign=9
-        )
-
-        macd_line = macd_indicator.macd()
-        macd_signal = macd_indicator.macd_signal()
-        macd_histogram = macd_indicator.macd_diff()
-
-        # ----------------------------------------------------
-        # Bollinger Bands
-        # ----------------------------------------------------
-
-        bb = BollingerBands(
-            close=close,
-            window=20,
-            window_dev=2
-        )
-
-        bb_upper = bb.bollinger_hband()
-        bb_middle = bb.bollinger_mavg()
-        bb_lower = bb.bollinger_lband()
-
-        # ----------------------------------------------------
-        # Stochastic
-        # ----------------------------------------------------
-
-        stoch = StochasticOscillator(
-            high=high,
-            low=low,
-            close=close,
-            window=14,
-            smooth_window=3
-        )
-
-        stoch_k = stoch.stoch()
-        stoch_d = stoch.stoch_signal()
-
-        # ----------------------------------------------------
-        # ADX
-        # ----------------------------------------------------
-
-        adx_indicator = ADXIndicator(
-            high=high,
-            low=low,
-            close=close,
-            window=14
-        )
-
-        adx = adx_indicator.adx()
-        plus_di = adx_indicator.adx_pos()
-        minus_di = adx_indicator.adx_neg()
-
-        # ----------------------------------------------------
-        # LAST CLOSED CANDLE
-        # ----------------------------------------------------
-
-        candle = data.iloc[-2]
-        idx = len(data) - 2
-
-        price = float(candle["close"])
-
-        values = {
-            "ema9": float(ema9.iloc[idx]),
-            "ema21": float(ema21.iloc[idx]),
-            "ema50": float(ema50.iloc[idx]),
-            "ema200": float(ema200.iloc[idx]),
-
-            "rsi": float(rsi.iloc[idx]),
-
-            "macd": float(macd_line.iloc[idx]),
-            "macd_signal": float(
-                macd_signal.iloc[idx]
-            ),
-            "macd_histogram": float(
-                macd_histogram.iloc[idx]
-            ),
-
-            "bb_upper": float(
-                bb_upper.iloc[idx]
-            ),
-            "bb_middle": float(
-                bb_middle.iloc[idx]
-            ),
-            "bb_lower": float(
-                bb_lower.iloc[idx]
-            ),
-
-            "stoch_k": float(
-                stoch_k.iloc[idx]
-            ),
-            "stoch_d": float(
-                stoch_d.iloc[idx]
-            ),
-
-            "adx": float(adx.iloc[idx]),
-            "plus_di": float(
-                plus_di.iloc[idx]
-            ),
-            "minus_di": float(
-                minus_di.iloc[idx]
-            ),
-        }
-
-        call_confirmations = []
-        put_confirmations = []
-
-        # ----------------------------------------------------
-        # EMA TREND
-        # ----------------------------------------------------
-
-        if (
-            values["ema9"] > values["ema21"]
-            and values["ema21"] > values["ema50"]
-            and values["ema50"] > values["ema200"]
-        ):
-
-            call_confirmations.append(
-                "EMA bullish trend"
-            )
-
-        elif (
-            values["ema9"] < values["ema21"]
-            and values["ema21"] < values["ema50"]
-            and values["ema50"] < values["ema200"]
-        ):
-
-            put_confirmations.append(
-                "EMA bearish trend"
-            )
-
-        # ----------------------------------------------------
-        # RSI
-        # ----------------------------------------------------
-
-        if values["rsi"] > 50:
-
-            call_confirmations.append(
-                "RSI bullish"
-            )
-
-        elif values["rsi"] < 50:
-
-            put_confirmations.append(
-                "RSI bearish"
-            )
-
-        # ----------------------------------------------------
-        # MACD
-        # ----------------------------------------------------
-
-        if (
-            values["macd"] > values["macd_signal"]
-            and values["macd_histogram"] > 0
-        ):
-
-            call_confirmations.append(
-                "MACD bullish"
-            )
-
-        elif (
-            values["macd"] < values["macd_signal"]
-            and values["macd_histogram"] < 0
-        ):
-
-            put_confirmations.append(
-                "MACD bearish"
-            )
-
-        # ----------------------------------------------------
-        # BOLLINGER
-        # ----------------------------------------------------
-
-        if price > values["bb_middle"]:
-
-            call_confirmations.append(
-                "Bollinger bullish"
-            )
-
-        elif price < values["bb_middle"]:
-
-            put_confirmations.append(
-                "Bollinger bearish"
-            )
-
-        # ----------------------------------------------------
-        # STOCHASTIC
-        # ----------------------------------------------------
-
-        if values["stoch_k"] > values["stoch_d"]:
-
-            call_confirmations.append(
-                "Stochastic bullish"
-            )
-
-        elif values["stoch_k"] < values["stoch_d"]:
-
-            put_confirmations.append(
-                "Stochastic bearish"
-            )
-
-        # ----------------------------------------------------
-        # ADX + DI
-        # ----------------------------------------------------
-
-        if (
-            values["adx"] >= 20
-            and values["plus_di"] > values["minus_di"]
-        ):
-
-            call_confirmations.append(
-                "ADX bullish"
-            )
-
-        elif (
-            values["adx"] >= 20
-            and values["minus_di"] > values["plus_di"]
-        ):
-
-            put_confirmations.append(
-                "ADX bearish"
-            )
-
-        call_count = len(call_confirmations)
-        put_count = len(put_confirmations)
-
-        # ----------------------------------------------------
-        # SIGNAL
-        # ----------------------------------------------------
-
-        if values["adx"] < 20:
-
-            signal = "NO SIGNAL"
-            confidence = 0
-
-        elif (
-            call_count >= 4
-            and call_count > put_count
-        ):
-
-            signal = "CALL"
-
-            confidence = round(
-                (call_count / 6) * 100,
-                1
-            )
-
-        elif (
-            put_count >= 4
-            and put_count > call_count
-        ):
-
-            signal = "PUT"
-
-            confidence = round(
-                (put_count / 6) * 100,
-                1
-            )
-
-        else:
-
-            signal = "NO SIGNAL"
-            confidence = 0
-
-        return {
-            "pair": pair,
-            "price": price,
-            "signal": signal,
-            "confidence": confidence,
-            "call_count": call_count,
-            "put_count": put_count,
-            "call_confirmations": call_confirmations,
-            "put_confirmations": put_confirmations,
-            "values": values,
-            "candle_time": str(
-                candle["timestamp"]
-            ),
-        }, None
-
-    except Exception as e:
-
-        return None, str(e)
-
-
-# ============================================================
-# AI VALIDATION - AIRFORCE
-# ============================================================
-
-def validate_with_ai(result):
-
-    if not AIRFORCE_API_KEY:
-
-        return None, (
-            "AIRFORCE_API_KEY is not configured"
-        )
-
-    if result["signal"] == "NO SIGNAL":
-
-        return {
-            "decision": "REJECT",
-            "direction": "NO SIGNAL",
-            "confidence": 0,
-            "reason": (
-                "Indicator engine produced NO SIGNAL."
-            )
-        }, None
-
-    if result["values"]["adx"] < 20:
-
-        return {
-            "decision": "REJECT",
-            "direction": "NO SIGNAL",
-            "confidence": 0,
-            "reason": "ADX below 20."
-        }, None
-
-    values = result["values"]
-
-    system_prompt = """
-You are a strict trading signal validator.
-
-You do NOT create a new signal.
-
-You only validate the proposed indicator direction.
-
-Return ONLY valid JSON.
-
-Required format:
-
-{
-  "decision": "APPROVE" or "REJECT",
-  "direction": "CALL" or "PUT" or "NO SIGNAL",
-  "confidence": integer from 0 to 100,
-  "reason": "short reason"
-}
+def ai_prompt(result):
+    return f"""
+You are a cautious market-setup validator. Do NOT invent missing data.
+Evaluate this OlympTrade live-market setup using price action, candle patterns,
+market structure, indicators, support/resistance and volatility/ADX context.
 
 Rules:
+- ADX below 20 => NO SIGNAL.
+- Conflicting evidence => NO SIGNAL.
+- One candle pattern alone is never sufficient.
+- APPROVE only when the setup is coherent and sufficiently strong.
+- This is a validation score, NOT a guaranteed win probability.
+- Return JSON only:
+{{"decision":"APPROVE|REJECT","direction":"UP|DOWN|NO SIGNAL","confidence":0-100,"reason":"short reason"}}
 
-1. Direction must match the proposed signal to approve.
-2. Reject weak or contradictory evidence.
-3. Approve only when the indicator evidence reasonably supports
-   the proposed direction.
-4. Confidence is a validation score, NOT a win probability.
-"""
+DATA:
+{json.dumps(result, ensure_ascii=False)}
+""".strip()
 
-    user_prompt = f"""
-Proposed signal: {result["signal"]}
-
-Indicator score: {result["confidence"]}
-
-CALL confirmations:
-{result["call_confirmations"]}
-
-PUT confirmations:
-{result["put_confirmations"]}
-
-EMA9: {values["ema9"]}
-EMA21: {values["ema21"]}
-EMA50: {values["ema50"]}
-EMA200: {values["ema200"]}
-
-RSI: {values["rsi"]}
-
-MACD: {values["macd"]}
-MACD Signal: {values["macd_signal"]}
-MACD Histogram: {values["macd_histogram"]}
-
-BB Upper: {values["bb_upper"]}
-BB Middle: {values["bb_middle"]}
-BB Lower: {values["bb_lower"]}
-
-Stochastic K: {values["stoch_k"]}
-Stochastic D: {values["stoch_d"]}
-
-ADX: {values["adx"]}
-+DI: {values["plus_di"]}
--DI: {values["minus_di"]}
-
-Validate this proposed signal.
-"""
-
-    try:
-
-        client = OpenAI(
-            base_url=AIRFORCE_BASE_URL,
-            api_key=AIRFORCE_API_KEY
-        )
-
-        response = client.chat.completions.create(
-            model=AIRFORCE_MODEL,
-            temperature=0,
-            max_tokens=200,
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                }
-            ]
-        )
-
-        content = (
-            response.choices[0]
-            .message
-            .content
-            .strip()
-        )
-
-        # Remove Markdown fences if model returns them
-        if content.startswith("```"):
-
-            content = content.replace(
-                "```json",
-                ""
-            )
-
-            content = content.replace(
-                "```",
-                ""
-            )
-
-            content = content.strip()
-
-        ai_result = json.loads(content)
-
-        decision = str(
-            ai_result.get(
-                "decision",
-                ""
-            )
-        ).upper()
-
-        direction = str(
-            ai_result.get(
-                "direction",
-                ""
-            )
-        ).upper()
-
-        confidence = int(
-            ai_result.get(
-                "confidence",
-                0
-            )
-        )
-
-        reason = str(
-            ai_result.get(
-                "reason",
-                ""
-            )
-        )
-
-        if decision not in [
-            "APPROVE",
-            "REJECT"
-        ]:
-
-            return None, (
-                "AI returned invalid decision"
-            )
-
-        if direction not in [
-            "CALL",
-            "PUT",
-            "NO SIGNAL"
-        ]:
-
-            return None, (
-                "AI returned invalid direction"
-            )
-
-        if confidence < 0 or confidence > 100:
-
-            return None, (
-                "AI returned invalid confidence"
-            )
-
-        return {
-            "decision": decision,
-            "direction": direction,
-            "confidence": confidence,
-            "reason": reason,
-        }, None
-
-    except Exception as e:
-
-        return None, str(e)
-
-
-# ============================================================
-# START
-# ============================================================
-
-async def start_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "🤖 Priyanithan AI Indicator Bot\n\n"
-        "📊 Indicator engine: READY\n"
-        "🤖 Airforce AI validation: ENABLED\n"
-        "⚡ Auto-trade: OFF\n"
-        "🛑 Martingale: OFF\n\n"
-        "Commands:\n"
-        "/access YOUR_CODE\n"
-        "/status\n"
-        "/aitest\n"
-        "/signal EURUSD\n"
-        "/signal GBPUSD"
-    )
-
-
-# ============================================================
-# ACCESS
-# ============================================================
-
-async def access_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    if not context.args:
-
-        await update.message.reply_text(
-            "❌ Access code missing.\n\n"
-            "Use:\n"
-            "/access YOUR_CODE"
-        )
-
-        return
-
-    code = context.args[0]
-
-    if ACCESS_CODE and code == ACCESS_CODE:
-
-        authorized_users.add(user_id)
-
-        await update.message.reply_text(
-            "✅ Access authorized."
-        )
-
-    else:
-
-        await update.message.reply_text(
-            "❌ Invalid access code."
-        )
-
-
-# ============================================================
-# STATUS
-# ============================================================
-
-async def status_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    if user_id not in authorized_users:
-
-        await update.message.reply_text(
-            "🔒 Access required.\n\n"
-            "Use /access YOUR_CODE"
-        )
-
-        return
-
+def call_ai(prompt):
+    providers = []
+    if OPENROUTER_API_KEY:
+        providers.append((
+            "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_API_KEY, OPENROUTER_MODEL
+        ))
     if AIRFORCE_API_KEY:
+        providers.append((
+            "Airforce", "https://api.airforce/v1/chat/completions",
+            AIRFORCE_API_KEY, AIRFORCE_MODEL
+        ))
+    if not providers:
+        return None, "No AI provider configured"
 
-        ai_status = "READY"
+    last_error = None
+    for name, url, key, model in providers:
+        try:
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "Return JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+                "max_tokens": 300,
+            }
+            if name == "OpenRouter":
+                headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
+                headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
+            r = requests.post(url, headers=headers, json=payload, timeout=25)
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            # Strip accidental fenced JSON.
+            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
+            parsed = json.loads(content)
+            return parsed, None
+        except Exception as e:
+            last_error = f"{name}: {e}"
+            log.warning("AI provider failed: %s", last_error)
+    return None, last_error or "AI failed"
 
-    else:
+# ============================================================
+# TELEGRAM FORMATTING
+# ============================================================
 
-        ai_status = "NOT CONFIGURED"
+def format_signal(result, ai=None):
+    if result["signal"] == "NO SIGNAL" or not ai:
+        details = "\n".join(f"• {x}" for x in result["reasons"][-5:]) or "• No strong confirmation"
+        conflicts = "\n".join(f"• {x}" for x in result["conflicts"]) or "• Setup strength insufficient"
+        return (
+            "🚫 NO SIGNAL\n\n"
+            f"📈 {result['pair']}\n"
+            f"🕐 {result['candle_time']}\n\n"
+            "🧠 MARKET ANALYSIS\n"
+            f"🕯️ Patterns: {', '.join(result['patterns']) or 'None'}\n"
+            f"📈 Trend: {result['trend']}\n"
+            f"💪 ADX: {result['adx']:.1f}\n\n"
+            f"✅ Confirmations:\n{details}\n\n"
+            f"⚠️ Conflicts:\n{conflicts}\n\n"
+            "🤖 AI Decision: NO SIGNAL\n"
+            "⏳ Waiting for stronger setup..."
+        )
 
+    direction = ai.get("direction", "NO SIGNAL")
+    decision = ai.get("decision", "REJECT")
+    conf = int(ai.get("confidence", 0))
+    if decision != "APPROVE" or direction not in ("UP", "DOWN") or conf < AI_MIN_CONFIDENCE:
+        return (
+            "🚫 NO SIGNAL\n\n"
+            f"📈 {result['pair']}\n"
+            f"🕐 {result['candle_time']}\n\n"
+            f"🕯️ Candle: {', '.join(result['patterns']) or 'No major pattern'}\n"
+            f"📈 Trend: {result['trend']}\n"
+            f"📊 RSI: {result['rsi']:.1f}\n"
+            f"💪 ADX: {result['adx']:.1f}\n"
+            f"⚠️ {ai.get('reason', 'AI rejected the setup.')}\n\n"
+            "🤖 AI Decision: NO SIGNAL\n"
+            "⏳ Waiting for stronger setup..."
+        )
+
+    fire = "🔥🔥🔥" if conf >= 94 else "🔥🔥" if conf >= 91 else "🔥"
+    arrow = "⬆️" if direction == "UP" else "⬇️"
+    duration = "1 MIN" if result["adx"] < 25 else ("2 MIN" if result["adx"] < 35 else "5 MIN")
+    confirmations = "\n".join(f"• {x}" for x in result["reasons"][-7:])
+    return (
+        f"📈 {result['pair']}\n"
+        f"{arrow} TRADE {direction}\n"
+        f"🕐 {result['candle_time']}\n"
+        f"{fire}\n\n"
+        f"{confirmations}\n\n"
+        f"⏱ Duration: {duration}\n"
+        f"🤖 AI: APPROVED\n"
+        f"📊 Confidence: {conf}%\n\n"
+        "⚠️ Manual execution only"
+    )
+
+# ============================================================
+# LIVE CHART IMAGE
+# ============================================================
+
+def make_chart(df, result=None):
+    view = df.tail(60).copy()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for i, (_, r) in enumerate(view.iterrows()):
+        up = r.close >= r.open
+        ax.plot([i, i], [r.low, r.high], linewidth=1)
+        ax.plot([i, i], [r.open, r.close], linewidth=5)
+    ax.set_title(
+        f"OlympTrade Live Candles — {result['pair'] if result else ''}"
+    )
+    ax.set_xlabel("Recent 1-minute candles")
+    ax.set_ylabel("Price")
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+# ============================================================
+# TELEGRAM COMMANDS
+# ============================================================
+
+async def start_command(update, context):
     await update.message.reply_text(
-        "🟢 Bot Status: ONLINE\n\n"
-        "🔐 Access: AUTHORIZED\n\n"
-        "📡 Market API: Yahoo Finance\n\n"
-        "📊 Indicator Engine: READY\n\n"
-        "📈 EMA 9/21/50/200: READY\n"
-        "📊 RSI 14: READY\n"
-        "📉 MACD: READY\n"
-        "〰️ Bollinger Bands: READY\n"
-        "📐 Stochastic: READY\n"
-        "💪 ADX: READY\n\n"
-        f"🤖 Airforce AI: {ai_status}\n"
-        f"🧠 AI Model: {AIRFORCE_MODEL}\n\n"
-        "⚡ Auto-trade: OFF\n"
-        "🛑 Martingale: OFF"
+        "🤖 Priyanithan AI OlympTrade Bot\n\n"
+        "Use /access YOUR_CODE first.\n"
+        "Then /status or /signal EURUSD"
     )
 
-
-# ============================================================
-# AI TEST
-# ============================================================
-
-async def aitest_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    if user_id not in authorized_users:
-
-        await update.message.reply_text(
-            "🔒 Access required.\n\n"
-            "Use /access YOUR_CODE"
-        )
-
-        return
-
-    if not AIRFORCE_API_KEY:
-
-        await update.message.reply_text(
-            "❌ AIRFORCE_API_KEY is missing.\n\n"
-            "Render → Environment Variables\n\n"
-            "Add:\n"
-            "AIRFORCE_API_KEY"
-        )
-
-        return
-
-    await update.message.reply_text(
-        "🤖 Testing Airforce AI connection..."
-    )
-
-    try:
-
-        client = OpenAI(
-            base_url=AIRFORCE_BASE_URL,
-            api_key=AIRFORCE_API_KEY
-        )
-
-        response = client.chat.completions.create(
-            model=AIRFORCE_MODEL,
-            temperature=0,
-            max_tokens=50,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Reply with exactly: AI READY"
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Test the AI connection."
-                    )
-                }
-            ]
-        )
-
-        reply = (
-            response.choices[0]
-            .message
-            .content
-            .strip()
-        )
-
-        await update.message.reply_text(
-            "🤖 AI TEST\n\n"
-            "🟢 Airforce: CONNECTED\n"
-            f"🧠 Model: {AIRFORCE_MODEL}\n"
-            f"💬 Response: {reply}"
-        )
-
-    except Exception as e:
-
-        await update.message.reply_text(
-            "❌ AI CONNECTION FAILED\n\n"
-            f"Reason: {str(e)}"
-        )
-
-
-# ============================================================
-# FORMAT SIGNAL
-# ============================================================
-
-def format_signal(
-    result,
-    ai_result=None
-):
-
-    values = result["values"]
-
-    message = (
-        "📊 INDICATOR ANALYSIS\n\n"
-
-        f"💱 Market: {result['pair']}\n"
-        f"💰 Price: {result['price']:.5f}\n"
-        "⏱ Timeframe: 1 minute\n"
-        f"🕐 Closed candle: "
-        f"{result['candle_time']}\n\n"
-
-        f"EMA9: {values['ema9']:.5f}\n"
-        f"EMA21: {values['ema21']:.5f}\n"
-        f"EMA50: {values['ema50']:.5f}\n"
-        f"EMA200: {values['ema200']:.5f}\n\n"
-
-        f"RSI: {values['rsi']:.2f}\n\n"
-
-        f"MACD: {values['macd']:.5f}\n"
-        f"Signal: {values['macd_signal']:.5f}\n"
-        f"Histogram: {values['macd_histogram']:.5f}\n\n"
-
-        f"BB Upper: {values['bb_upper']:.5f}\n"
-        f"BB Middle: {values['bb_middle']:.5f}\n"
-        f"BB Lower: {values['bb_lower']:.5f}\n\n"
-
-        f"Stoch K: {values['stoch_k']:.2f}\n"
-        f"Stoch D: {values['stoch_d']:.2f}\n\n"
-
-        f"ADX: {values['adx']:.2f}\n"
-        f"+DI: {values['plus_di']:.2f}\n"
-        f"-DI: {values['minus_di']:.2f}\n\n"
-
-        f"🟢 CALL confirmations: "
-        f"{result['call_count']}\n"
-
-        f"🔴 PUT confirmations: "
-        f"{result['put_count']}\n\n"
-
-        f"🎯 INDICATOR SIGNAL: "
-        f"{result['signal']}\n"
-
-        f"📈 Indicator score: "
-        f"{result['confidence']}%\n"
-    )
-
-    if result["call_confirmations"]:
-
-        message += (
-            "\n🟢 CALL:\n- "
-            + "\n- ".join(
-                result["call_confirmations"]
-            )
-        )
-
-    if result["put_confirmations"]:
-
-        message += (
-            "\n\n🔴 PUT:\n- "
-            + "\n- ".join(
-                result["put_confirmations"]
-            )
-        )
-
-    if ai_result:
-
-        message += (
-            "\n\n🤖 AI VALIDATION\n\n"
-
-            f"Decision: "
-            f"{ai_result['decision']}\n"
-
-            f"Direction: "
-            f"{ai_result['direction']}\n"
-
-            f"AI validation score: "
-            f"{ai_result['confidence']}%\n"
-
-            f"Reason: "
-            f"{ai_result['reason']}\n"
-        )
-
-        if (
-            ai_result["decision"] == "APPROVE"
-            and ai_result["direction"]
-            == result["signal"]
-            and ai_result["confidence"] >= 89
-        ):
-
-            message += (
-                "\n🎯 FINAL SIGNAL: "
-                f"{result['signal']}\n"
-            )
-
-        else:
-
-            message += (
-                "\n🎯 FINAL SIGNAL: "
-                "NO SIGNAL\n"
-            )
-
-    message += (
-        "\n\n⚠️ Data source: Yahoo Finance\n"
-        "⚠️ This is not an Olymp Trade price feed.\n"
-        "⚠️ Indicator/AI scores are not "
-        "guaranteed win probabilities.\n"
-        "⚡ Manual execution only."
-    )
-
-    return message
-
-
-# ============================================================
-# SIGNAL
-# ============================================================
-
-async def signal_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    if user_id not in authorized_users:
-
-        await update.message.reply_text(
-            "🔒 Access required.\n\n"
-            "Use /access YOUR_CODE"
-        )
-
-        return
-
+async def access_command(update, context):
     if not context.args:
-
-        await update.message.reply_text(
-            "❌ Pair missing.\n\n"
-            "Use:\n"
-            "/signal EURUSD\n"
-            "/signal GBPUSD"
-        )
-
+        await update.message.reply_text("Use /access YOUR_CODE")
         return
+    if ACCESS_CODE and context.args[0] == ACCESS_CODE:
+        authorized_users.add(update.effective_user.id)
+        await update.message.reply_text("✅ Access authorized.")
+    else:
+        await update.message.reply_text("❌ Invalid access code.")
 
-    pair = context.args[0].upper()
-
-    if pair not in PAIRS:
-
-        await update.message.reply_text(
-            "❌ Unsupported pair.\n\n"
-            "Available:\n"
-            "EURUSD\n"
-            "GBPUSD"
-        )
-
+async def status_command(update, context):
+    if not is_authorized(update):
+        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
         return
-
+    connected = bool(ot_client and ot_client.connection.is_connected)
+    ai = "OpenRouter" if OPENROUTER_API_KEY else ("Airforce" if AIRFORCE_API_KEY else "NOT CONFIGURED")
     await update.message.reply_text(
-        f"⏳ Analyzing {pair}..."
+        "🟢 BOT STATUS\n\n"
+        f"📡 OlympTrade Live Feed: {'CONNECTED' if connected else 'DISCONNECTED'}\n"
+        f"📊 Pairs: {', '.join(PAIRS)}\n"
+        f"🤖 AI: {ai}\n"
+        f"🧠 Model: {OPENROUTER_MODEL if OPENROUTER_API_KEY else AIRFORCE_MODEL}\n\n"
+        "⚡ Auto-trade: OFF\n"
+        "🛑 Martingale: OFF\n"
+        "👤 Execution: MANUAL ONLY\n"
+        "📡 Source: OlympTrade"
     )
 
-    # --------------------------------------------------------
-    # MARKET DATA
-    # --------------------------------------------------------
-
-    data, error = get_fx_data(pair)
-
-    if error:
-
-        await update.message.reply_text(
-            "❌ LIVE MARKET DATA FAILED\n\n"
-            f"Market: {pair}\n\n"
-            f"Reason: {error}\n\n"
-            "No signal generated."
-        )
-
+async def signal_command(update, context):
+    if not is_authorized(update):
+        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
+        return
+    if not context.args:
+        await update.message.reply_text("Use /signal EURUSD")
+        return
+    pair = context.args[0].upper()
+    if pair not in PAIRS:
+        await update.message.reply_text(f"❌ Unsupported pair. Available: {', '.join(PAIRS)}")
         return
 
-    # --------------------------------------------------------
-    # INDICATORS
-    # --------------------------------------------------------
-
-    result, error = analyze_indicators(
-        data,
-        pair
-    )
-
-    if error:
-
-        await update.message.reply_text(
-            "❌ Indicator analysis failed.\n\n"
-            f"Reason: {error}\n\n"
-            "No signal generated."
-        )
-
+    msg = await update.message.reply_text(f"⏳ Reading OlympTrade live candles for {pair}...")
+    df, err = await get_ot_candles(pair, 60, 260)
+    if err:
+        await msg.edit_text(f"❌ LIVE DATA FAILED\n\n{err}\n\nNo signal generated.")
         return
 
-    # --------------------------------------------------------
-    # NO SIGNAL
-    # --------------------------------------------------------
+    result = analyze(df, pair)
+    with state_lock:
+        latest_candles[pair] = df
+        latest_signal[pair] = result
 
     if result["signal"] == "NO SIGNAL":
-
-        await update.message.reply_text(
-            format_signal(result)
-        )
-
+        await msg.edit_text(format_signal(result))
         return
 
-    # --------------------------------------------------------
-    # AI VALIDATION
-    # --------------------------------------------------------
-
-    await update.message.reply_text(
-        "🤖 Indicator signal found.\n"
-        "⏳ Airforce AI validation running..."
-    )
-
-    ai_result, ai_error = validate_with_ai(
-        result
-    )
-
-    if ai_error:
-
-        await update.message.reply_text(
-            "❌ AI VALIDATION FAILED\n\n"
-            f"Reason: {ai_error}\n\n"
-            "🎯 FINAL SIGNAL: NO SIGNAL\n\n"
-            "No signal generated because "
-            "AI validation was unavailable."
+    await msg.edit_text("🤖 Strong setup found. AI validation running...")
+    ai, ai_err = call_ai(ai_prompt(result))
+    if ai_err:
+        await msg.edit_text(
+            "🚫 NO SIGNAL\n\n"
+            f"📈 {pair}\n"
+            f"❌ AI validation unavailable: {ai_err}\n\n"
+            "No trade signal generated."
         )
-
         return
 
-    await update.message.reply_text(
-        format_signal(
-            result,
-            ai_result
-        )
-    )
-
+    await msg.edit_text(format_signal(result, ai))
 
 # ============================================================
-# ERROR HANDLER
+# BACKGROUND SCANNER
 # ============================================================
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def scan_loop(application):
+    await asyncio.sleep(20)
+    while True:
+        try:
+            for pair in PAIRS:
+                df, err = await get_ot_candles(pair, 60, 260)
+                if err:
+                    continue
+                result = analyze(df, pair)
+                with state_lock:
+                    latest_candles[pair] = df
+                    latest_signal[pair] = result
 
-    print(
-        "Telegram error:",
-        context.error
-    )
+                # No forced signals. Only notify when the setup passes local filters
+                # and AI also approves at the configured threshold.
+                if result["signal"] == "NO SIGNAL":
+                    continue
 
+                ai, ai_err = call_ai(ai_prompt(result))
+                if ai_err or not ai:
+                    continue
+                direction = ai.get("direction")
+                conf = int(ai.get("confidence", 0))
+                if ai.get("decision") == "APPROVE" and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE:
+                    text = format_signal(result, ai)
+                    for uid in list(authorized_users):
+                        try:
+                            await application.bot.send_message(chat_id=uid, text=text)
+                        except Exception as e:
+                            log.warning("Telegram signal send failed: %s", e)
+        except Exception:
+            log.exception("Scanner loop error")
+        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 # ============================================================
-# FLASK THREAD
+# MANUAL TRADE MONITOR
 # ============================================================
 
-def run_flask():
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
-
+async def manual_trade_monitor(application):
+    """
+    Observes open/manual trades when the supplied library exposes them.
+    It never calls place_order/place_trade.
+    """
+    while True:
+        try:
+            client = ot_client
+            if client and client.connection.is_connected:
+                # We only read open trades. Account id is obtained from the client's
+                # session initialization if available.
+                account_id = getattr(client, "account_id", None)
+                if account_id:
+                    try:
+                        trades = await client.trade.get_open_trades(account_id, group="real")
+                        if isinstance(trades, list):
+                            with state_lock:
+                                for t in trades:
+                                    if isinstance(t, dict) and t.get("id"):
+                                        manual_trades.setdefault(str(t["id"]), {})["open"] = t
+                    except Exception as e:
+                        log.debug("Open-trade read unavailable: %s", e)
+        except Exception:
+            log.exception("Manual monitor error")
+        await asyncio.sleep(LIVE_UPDATE_SECONDS)
 
 # ============================================================
 # MAIN
 # ============================================================
 
+def run_flask():
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
+
+async def post_init(application):
+    global runtime_loop
+    runtime_loop = asyncio.get_running_loop()
+    application.create_task(olymptrade_connect_loop())
+    application.create_task(scan_loop(application))
+    application.create_task(manual_trade_monitor(application))
+
 def main():
-
     if not TELEGRAM_BOT_TOKEN:
-
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is missing"
-        )
-
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
     if not ACCESS_CODE:
+        raise RuntimeError("ACCESS_CODE is missing")
+    if not OLYMPTRADE_ACCESS_TOKEN:
+        raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is missing")
 
-        raise RuntimeError(
-            "ACCESS_CODE is missing"
-        )
-
-    flask_thread = threading.Thread(
-        target=run_flask,
-        daemon=True
-    )
-
-    flask_thread.start()
+    threading.Thread(target=run_flask, daemon=True).start()
 
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
         .build()
     )
-
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start_command
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "access",
-            access_command
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "status",
-            status_command
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "aitest",
-            aitest_command
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "signal",
-            signal_command
-        )
-    )
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    print(
-        "🤖 Telegram polling started..."
-    )
-
-    application.run_polling(
-        drop_pending_updates=True
-    )
-
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("access", access_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("signal", signal_command))
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Reference - OlympTrade API Documentation</title>
+    <meta name="description" content="Complete API reference for OlympTrade API with detailed method documentation, parameters, and examples.">
+    
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="css/style.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+
+    <!-- Chipa Editor promo bar -->
+    <div class="promo-bar">
+        <div class="promo-bar-inner">
+            <span>⚡</span>
+            <span class="promo-bar-long">Writing OlympTrade bots by hand? <a href="https://chipaeditor.com/?utm_source=olymptradeapi&amp;utm_medium=docs&amp;utm_campaign=olymptrade_api_docs&amp;utm_term=support&amp;utm_content=top_bar" target="_blank" rel="noopener" class="promo-bar-link"><strong>Chipa Editor</strong></a> autocompletes the whole API for you.</span>
+            <span class="promo-bar-short"><a href="https://chipaeditor.com/?utm_source=olymptradeapi&amp;utm_medium=docs&amp;utm_campaign=olymptrade_api_docs&amp;utm_term=support&amp;utm_content=top_bar" target="_blank" rel="noopener" class="promo-bar-link"><strong>Chipa Editor</strong></a> — build bots faster</span>
+            <a href="https://chipaeditor.com/?utm_source=olymptradeapi&amp;utm_medium=docs&amp;utm_campaign=olymptrade_api_docs&amp;utm_term=support&amp;utm_content=top_bar_cta" target="_blank" rel="noopener" class="promo-bar-cta">Try it free →</a>
+        </div>
+    </div>
+
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="nav-logo">
+                <i class="fas fa-chart-line"></i>
+                <span>OlympTrade API</span>
+            </div>
+            <div class="nav-menu">
+                <a href="index.html" class="nav-link">Home</a>
+                <a href="getting-started.html" class="nav-link">Getting Started</a>
+                <a href="api-reference.html" class="nav-link active">API Reference</a>
+                <a href="examples.html" class="nav-link">Examples</a>
+                <a href="https://chipatrade.com/services/bot-development" target="_blank" class="nav-link cta-button">Create Your Bot</a>
+            </div>
+            <div class="hamburger">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="docs-container">
+        <!-- Sidebar -->
+        <aside class="docs-sidebar">
+            <div class="sidebar-content">
+                <h3>API Reference</h3>
+                <ul class="sidebar-nav">
+                    <li><a href="#authentication" class="sidebar-link">Authentication</a></li>
+                    <li><a href="#connection" class="sidebar-link">Connection</a></li>
+                    <li><a href="#account" class="sidebar-link">Account Methods</a>
+                        <ul class="sidebar-subnav">
+                            <li><a href="#get-balance" class="sidebar-link">Get Balance</a></li>
+                            <li><a href="#get-profile" class="sidebar-link">Get Profile</a></li>
+                            <li><a href="#get-positions" class="sidebar-link">Get Positions</a></li>
+                                        <li><a href="https://exchange.chipatrade.com/trade/BTC" target="_blank" rel="noopener" class="nav-link" style="color:#22c55e;"><i class="fas fa-bolt"></i> Trade Bots</a></li>
+            </ul>
+                    </li>
+                    <li><a href="#trading" class="sidebar-link">Trading Methods</a>
+                        <ul class="sidebar-subnav">
+                            <li><a href="#place-order" class="sidebar-link">Place Order</a></li>
+                            <li><a href="#close-position" class="sidebar-link">Close Position</a></li>
+                            <li><a href="#get-candles" class="sidebar-link">Get Candles</a></li>
+                        </ul>
+                    </li>
+                    <li><a href="#real-time" class="sidebar-link">Real-time Data</a>
+                        <ul class="sidebar-subnav">
+                            <li><a href="#subscribe-quotes" class="sidebar-link">Subscribe to Quotes</a></li>
+                            <li><a href="#subscribe-candles" class="sidebar-link">Subscribe to Candles</a></li>
+                        </ul>
+                    </li>
+                    <li><a href="#error-handling" class="sidebar-link">Error Handling</a></li>
+                </ul>
+                
+                <!-- Shop CTA in Sidebar -->
+                <div class="sidebar-cta">
+                    <h4>Need Help?</h4>
+                    <p>Get professional bot development services</p>
+                    <a href="https://chipatrade.com/services/bot-development" class="cta-button-small">
+                        <i class="fas fa-robot"></i> Create Your Bot
+                    </a>
+                </div>
+            </div>
+
+                <!-- Broker affiliate -->
+                <div class="sidebar-affiliate">
+                    <a href="https://trkmad.com/2590624" target="_blank" rel="sponsored nofollow noopener">
+                        <img src="assets/affiliate/300x250/en_300x250_95944.png" alt="Trade on Olymptrade with payouts up to 93%" width="300" height="250" loading="lazy">
+                    </a>
+                    <div class="sidebar-affiliate-body">
+                        <p>You need an OlympTrade account to run any of this. Trading carries inherent risk.</p>
+                        <a href="https://trkmad.com/2590624" target="_blank" rel="sponsored nofollow noopener" class="sidebar-affiliate-btn">Create Free Account</a>
+                    </div>
+                </div>
+
+                <!-- Pre-built bots -->
+                <div class="sidebar-cta" style="margin-top:1.25rem;">
+                    <h4>Skip the Coding</h4>
+                    <p>Trade bots that are already built and running</p>
+                    <a href="https://exchange.chipatrade.com/trade/BTC" target="_blank" rel="noopener" class="cta-button-small">
+                        <i class="fas fa-bolt"></i> Trade Pre-Built Bots
+                    </a>
+                </div>
+
+        </aside>
+
+        <!-- Documentation Content -->
+        <main class="docs-content">
+            <div class="docs-header">
+                <h1>API Reference</h1>
+                <p class="docs-subtitle">Complete reference for all OlympTrade API methods and functionality</p>
+            </div>
+
+            <!-- Authentication Section -->
+            <section id="authentication" class="api-section">
+                <h2><i class="fas fa-key"></i> Authentication</h2>
+                <p>All API requests require authentication using email and password credentials.</p>
+                
+                <div class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge init">INIT</span>
+                        <h3>Initialize Connection</h3>
+                    </div>
+                    <p>Create and authenticate a new API connection.</p>
+                    
+                    <h4>Parameters</h4>
+                    <div class="param-table">
+                        <div class="param-row">
+                            <div class="param-name">email</div>
+                            <div class="param-type">string</div>
+                            <div class="param-required">required</div>
+                            <div class="param-desc">Your OlympTrade account email</div>
+                        </div>
+                        <div class="param-row">
+                            <div class="param-name">password</div>
+                            <div class="param-type">string</div>
+                            <div class="param-required">required</div>
+                            <div class="param-desc">Your OlympTrade account password</div>
+                        </div>
+                    </div>
+
+                    <h4>Example</h4>
+                    <pre><code class="language-python">import asyncio
+from olymptrade_ws import OlympTradeClient
+
+async def main():
+    client = OlympTradeClient(access_token="YOUR_ACCESS_TOKEN")
+    await client.start()
+    if client.is_connected:
+        print("Successfully connected to OlympTrade API")
+    else:
+        print("Failed to connect")
+    await client.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())</code></pre>
+                </div>
+            </section>
+
+            <!-- Connection Section -->
+            <section id="connection" class="api-section">
+                <h2><i class="fas fa-plug"></i> Connection Management</h2>
+                
+                <div class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge get">GET</span>
+                        <h3>is_connected</h3>
+                    </div>
+                    <p>Check if the API connection is active and authenticated.</p>
+                    
+                    <h4>Returns</h4>
+                    <div class="return-info">
+                        <span class="return-type">bool</span>
+                        <span class="return-desc">True if connected, False otherwise</span>
+                    </div>
+
+                    <h4>Example</h4>
+                    <pre><code class="language-python"># After starting the client
+print(f"Connection status: {client.is_connected}")</code></pre>
+                </div>
+
+                <div class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge post">POST</span>
+                        <h3>stop()</h3>
+                    </div>
+                    <p>Disconnect from the OlympTrade API and close the session.</p>
+                    
+                    <h4>Example</h4>
+                    <pre><code class="language-python">await client.stop()
+print("Disconnected from API")</code></pre>
+                </div>
+            </section>
+
+            <!-- Account Methods -->
+            <section id="account" class="api-section">
+                <h2><i class="fas fa-user"></i> Account Methods</h2>
+
+                <div id="get-balance" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge get">GET</span>
+                        <h3>get_balance()</h3>
+                    </div>
+                    <p>Retrieve current account balance information.</p>
+                    
+                    <h4>Returns</h4>
+                    <div class="return-info">
+                        <span class="return-type">dict</span>
+                        <span class="return-desc">Account balance details</span>
+                    </div>
+
+                    <h4>Example</h4>
+                    <pre><code class="language-python">balance = await client.balance.get_balance()
+demo_acc = next(acc for acc in balance['d'] if acc['group'] == 'demo')
+print(f"Demo account balance: {demo_acc['amount']}")</code></pre>
+                </div>
+
+                <div id="get-profile" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge get">GET</span>
+                        <h3>get_profile()</h3>
+                    </div>
+                    <p>Get detailed profile information for the authenticated account.</p>
+                    
+                    <h4>Returns</h4>
+                    <div class="return-info">
+                        <span class="return-type">dict</span>
+                        <span class="return-desc">User profile data</span>
+                    </div>
+
+                    <h4>Example</h4>
+                    <pre><code class="language-python">profile = await client.get_profile()
+print(f"User ID: {profile['user_id']}")
+print(f"Account type: {profile['account_type']}")
+print(f"Registration date: {profile['created_at']}")</code></pre>
+                </div>
+
+                <div id="get-positions" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge get">GET</span>
+                        <h3>get_open_trades()</h3>
+                    </div>
+                    <p>Retrieve all currently open trading positions.</p>
+                    
+                    <h4>Returns</h4>
+                    <div class="return-info">
+                        <span class="return-type">list</span>
+                        <span class="return-desc">List of open position objects</span>
+                    </div>
+
+                    <h4>Example</h4>
+                    <pre><code class="language-python">positions = await client.trade.get_open_trades(account_id, group="demo")
+for position in positions:
+    print(f"Asset: {position['asset']}")
+    print(f"Amount: ${position['amount']}")
+    print(f"Direction: {position['direction']}")
+    print(f"Profit/Loss: ${position['pnl']}")
+    print("---")</code></pre>
+                </div>
+            </section>
+
+            <!-- Trading Methods -->
+            <section id="trading" class="api-section">
+                <h2><i class="fas fa-chart-line"></i> Trading Methods</h2>
+
+                <div id="place-order" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge post">POST</span>
+                        <h3>place_order()</h3>
+                    </div>
+                    <p>Place a trade order on a specified asset.</p>
+                    
+                    <h4>Example</h4>
+                    <pre><code class="language-python">order_result = await client.trade.place_order(
+    pair="LATAM_X",
+    amount=1,
+    direction="up",
+    duration=60,
+    account_id=demo_acc['account_id'],
+    group="demo"
+)
+print("Order result:", order_result)</code></pre>
+                </div>
+
+                <div id="close-position" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge delete">DELETE</span>
+                        <h3>close_position()</h3>
+                    </div>
+                    <p>Close an open position before expiration (if available).</p>
+                    
+                    <h4>Example</h4>
+                    <pre><code class="language-python">result = await client.trade.close_position(position_id)
+if result['success']:
+    print(f"Position closed. Final PnL: ${result['pnl']}")
+else:
+    print(f"Failed to close position: {result['error']}")</code></pre>
+                </div>
+
+                <div id="get-candles" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge get">GET</span>
+                        <h3>get_candles()</h3>
+                    </div>
+                    <p>Retrieve historical candlestick data for technical analysis.</p>
+                    
+                    <h4>Example</h4>
+                    <pre><code class="language-python">candles = await client.market.get_candles("LATAM_X", size=60, count=10)
+for candle in candles:
+    print(f"Time: {candle['time']}")
+    print(f"OHLC: {candle['open']}, {candle['high']}, {candle['low']}, {candle['close']}")
+    print(f"Volume: {candle['volume']}")
+    print("---")</code></pre>
+                </div>
+            </section>
+
+            <!-- Real-time Data -->
+            <section id="real-time" class="api-section">
+                <h2><i class="fas fa-broadcast-tower"></i> Real-time Data</h2>
+
+                <div id="subscribe-quotes" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge ws">WS</span>
+                        <h3>subscribe_ticks()</h3>
+                    </div>
+                    <p>Subscribe to real-time price ticks for a specified asset.</p>
+                    
+                    <h4>Example</h4>
+                    <pre><code class="language-python">async def on_tick(tick):
+    print("Tick:", tick)
+await client.market.subscribe_ticks("LATAM_X")
+# You can then listen for tick events via your event handler</code></pre>
+                </div>
+
+                <div id="subscribe-candles" class="method-card">
+                    <div class="method-header">
+                        <span class="method-badge ws">WS</span>
+                        <h3>subscribe_to_candles()</h3>
+                    </div>
+                    <p>Subscribe to real-time candlestick updates.</p>
+                    
+                    <h4>Example</h4>
+                    <pre><code class="language-python">async def on_candle(candle):
+    print("New candle:", candle)
+await client.market.subscribe_candles("LATAM_X", size=60)
+# Listen for candle events via your event handler</code></pre>
+                </div>
+            </section>
+
+            <!-- Error Handling -->
+            <section id="error-handling" class="api-section">
+                <h2><i class="fas fa-exclamation-triangle"></i> Error Handling</h2>
+                <p>The API uses standard HTTP status codes and provides detailed error messages.</p>
+
+                <div class="error-codes">
+                    <h3>Common Error Codes</h3>
+                    <div class="error-grid">
+                        <div class="error-card">
+                            <div class="error-code">401</div>
+                            <div class="error-title">Unauthorized</div>
+                            <div class="error-desc">Invalid credentials or session expired</div>
+                        </div>
+                        <div class="error-card">
+                            <div class="error-code">400</div>
+                            <div class="error-title">Bad Request</div>
+                            <div class="error-desc">Invalid parameters or malformed request</div>
+                        </div>
+                        <div class="error-card">
+                            <div class="error-code">429</div>
+                            <div class="error-title">Rate Limited</div>
+                            <div class="error-desc">Too many requests, please slow down</div>
+                        </div>
+                        <div class="error-card">
+                            <div class="error-code">500</div>
+                            <div class="error-title">Server Error</div>
+                            <div class="error-desc">Internal server error, try again later</div>
+                        </div>
+                    </div>
+                </div>
+
+                <h3>Exception Handling Example</h3>
+                <pre><code class="language-python">from olymptrade_ws import OlympTradeClient
+
+async def main():
+    client = OlympTradeClient(access_token="YOUR_ACCESS_TOKEN")
+    try:
+        await client.start()
+        balance = await client.balance.get_balance()
+        print(f"Balance: {balance}")
+    except Exception as e:
+        print(f"API Error: {e}")
+    finally:
+        await client.stop()
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())</code></pre>
+            </section>
+
+            
+                <div class="inline-promo">
+                    <div class="inline-promo-text">
+                        <h4><i class="fas fa-bolt" style="color:#22c55e"></i> Rather not build it yourself?</h4>
+                        <p>Pre-built bots are already running on Chipa Exchange — pick one and trade, no code required.</p>
+                    </div>
+                    <a href="https://exchange.chipatrade.com/trade/BTC" target="_blank" rel="noopener" class="inline-promo-btn"><i class="fas fa-chart-line"></i> Trade BTC Now</a>
+                </div>
+
+                <div class="inline-promo is-editor">
+                    <div class="inline-promo-text">
+                        <h4><i class="fas fa-code" style="color:#f59e0b"></i> Stop looking up method names</h4>
+                        <p>Chipa Editor autocompletes every method and parameter on this page while you type.</p>
+                    </div>
+                    <a href="https://chipaeditor.com/?utm_source=olymptradeapi&amp;utm_medium=docs&amp;utm_campaign=olymptrade_api_docs&amp;utm_term=support&amp;utm_content=apiref_inline" target="_blank" rel="noopener" class="inline-promo-btn"><i class="fas fa-download"></i> Get Chipa Editor</a>
+                </div>
+
+            <!-- Shop Promotion -->
+            <section class="shop-promotion">
+                <div class="promotion-content">
+                    <h2><i class="fas fa-robot"></i> Need Professional Bot Development?</h2>
+                    <p>Get custom trading bots built by experts using the OlympTrade API</p>
+                    <div class="promotion-features">
+                        <div class="promo-feature">
+                            <i class="fas fa-cog"></i>
+                            <span>Custom Strategies</span>
+                        </div>
+                        <div class="promo-feature">
+                            <i class="fas fa-shield-alt"></i>
+                            <span>Risk Management</span>
+                        </div>
+                        <div class="promo-feature">
+                            <i class="fas fa-chart-bar"></i>
+                            <span>Advanced Analytics</span>
+                        </div>
+                        <div class="promo-feature">
+                            <i class="fas fa-headset"></i>
+                            <span>24/7 Support</span>
+                        </div>
+                    </div>
+                    <a href="https://chipatrade.com/services/bot-development" class="cta-button-large">
+                        <i class="fas fa-rocket"></i>
+                        Create Your Bot Now
+                    </a>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+    <script src="js/main.js"></script>
+    <script src="js/docs.js"></script>
+</body>
+</html>
