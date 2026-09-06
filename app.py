@@ -41,14 +41,8 @@ AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "89"))
 
-# AI rate-limit protection. Free providers can return HTTP 429.
-AI_COOLDOWN_SECONDS = int(os.getenv("AI_COOLDOWN_SECONDS", "65"))
-AI_LAST_CALL = 0.0
-AI_COOLDOWN_UNTIL = 0.0
-AI_STATE_LOCK = threading.Lock()
-
 # Signal scan interval: scans periodically, but does NOT force a signal.
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))  # 5 minutes
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 
 # Live monitoring interval requested by the user.
 LIVE_UPDATE_SECONDS = 15
@@ -74,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.2-asia-x-live-tick-candles"
+APP_VERSION = "2.3-asia-x-candle-debug-auto-scan"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -321,23 +315,47 @@ async def olymptrade_connect_loop():
             retry_delay = min(retry_delay * 2, max_retry_delay)
 
 async def get_ot_candles(pair, size=60, count=260):
-    """Fetch OlympTrade candles; fall back to locally aggregated live ticks."""
-    client = ot_client
+    """Fetch real OlympTrade historical candles, with live-tick fallback.
 
-    # First try the broker's historical candle endpoint.
+    This function is deliberately verbose in logs so Render clearly shows:
+    1) candle request started
+    2) candle response returned
+    3) how many OHLC rows were received
+    """
+    client = ot_client
+    broker_pair = PAIR_ALIASES.get(pair, pair)
+
     if client is not None and client.connection.is_connected:
-        broker_pair = PAIR_ALIASES.get(pair, pair)
+        log.info("🔍 CANDLE REQUEST: pair=%s broker_pair=%s size=%s count=%s",
+                 pair, broker_pair, size, count)
         try:
             raw = await client.market.get_candles(
                 broker_pair,
                 size=size,
                 count=count
             )
+            raw_rows = len(raw) if isinstance(raw, list) else 0
+            log.info("🔍 CANDLE RESPONSE: pair=%s raw_rows=%s type=%s",
+                     pair, raw_rows, type(raw).__name__)
+
             df = normalize_candles(raw)
+            normalized_rows = len(df) if df is not None else 0
+            log.info("🕯️ CANDLE NORMALIZED: pair=%s rows=%s",
+                     pair, normalized_rows)
+
             if df is not None and len(df) >= 220:
+                log.info("✅ HISTORICAL CANDLES READY: %s rows for %s",
+                         len(df), pair)
                 return df, None
+
+            log.warning("⚠️ Historical candles insufficient for %s: %s/220",
+                        pair, normalized_rows)
         except Exception as e:
-            log.warning("Historical candle request failed for %s: %s", pair, e)
+            log.exception("❌ Historical candle request failed for %s: %s",
+                          pair, e)
+    else:
+        log.warning("⚠️ CANDLE REQUEST SKIPPED: OlympTrade client not connected for %s",
+                    pair)
 
     # Fallback: build true 1-minute OHLC candles from OlympTrade live ticks.
     # We never fabricate missing prices. Until enough completed candles exist,
@@ -345,10 +363,13 @@ async def get_ot_candles(pair, size=60, count=260):
     with state_lock:
         rows = list(live_candles.get(pair, []))
 
+    log.info("📦 LIVE-TICK CANDLE FALLBACK: pair=%s completed_rows=%s",
+             pair, len(rows))
+
     if len(rows) < 220:
         return None, (
             f"Not enough live 1-minute candles ({len(rows)}/220). "
-            "Collecting OlympTrade live tick history; no signal generated."
+            "Historical candle feed unavailable; collecting OlympTrade live ticks."
         )
 
     df = pd.DataFrame(rows[-count:])
@@ -357,6 +378,7 @@ async def get_ot_candles(pair, size=60, count=260):
     if len(df) < 220:
         return None, f"Not enough live 1-minute candles ({len(df)}/220)"
 
+    log.info("✅ LIVE-TICK CANDLES READY: %s rows for %s", len(df), pair)
     return df, None
 
 # ============================================================
@@ -505,26 +527,28 @@ def analyze(df, pair):
     if "Bearish Engulfing" in pats or "Evening Star" in pats or "Three Black Crows" in pats:
         bear += 1; reasons.append("Bearish Candle Pattern")
 
-    # Candidate gate: local analysis should identify a directional edge,
-    # while AI makes the final approval/rejection decision.
     adx_val = float(row.adx)
-    directional = "UP" if bull > bear else ("DOWN" if bear > bull else "NO SIGNAL")
+    # ADX is a caution/penalty, not an automatic blocker.
+    # A coherent directional setup can still be sent to AI for validation
+    # when ADX is between 15 and 20.
     strength = float(max(bull, bear))
     margin = float(abs(bull - bear))
-    weak_adx_penalty = 1.5 if adx_val < 15 else (0.75 if adx_val < 20 else 0.0)
+    directional = "UP" if bull > bear else ("DOWN" if bear > bull else "NO SIGNAL")
 
     if directional == "NO SIGNAL" or strength < 3.0 or margin < 0.75:
         signal = "NO SIGNAL"
-        reason = "Directional evidence is too neutral for an AI candidate."
+        reason = "Directional evidence is not strong/coherent enough."
     elif margin < 1.25 and len(conflicts) >= 2:
         signal = "NO SIGNAL"
-        reason = "Directional edge is too small and conflicts are elevated."
+        reason = "Too much conflicting evidence near the directional boundary."
     else:
         signal = directional
-        reason = "Directional candidate found; pending AI validation."
+        reason = "Directional multi-factor setup; pending AI validation."
 
-    if weak_adx_penalty > 0:
-        conflicts.append(f"Weak ADX caution ({adx_val:.1f})")
+    if adx_val < 15:
+        conflicts.append(f"Very weak ADX ({adx_val:.1f})")
+    elif adx_val < 20:
+        conflicts.append(f"Weak ADX ({adx_val:.1f})")
 
     # Nearby resistance/support approximation from recent closed candles.
     recent = x.iloc[-22:-2]
@@ -571,10 +595,8 @@ Evaluate this OlympTrade live-market setup using price action, candle patterns,
 market structure, indicators, support/resistance and volatility/ADX context.
 
 Rules:
-- ADX below 15 is a strong caution; do not automatically reject if other evidence is aligned.
-- ADX 15-20 reduces confidence but may still be approved when the setup is coherent.
+- ADX below 15 is strong caution; ADX 15-20 reduces confidence but is not an automatic rejection.
 - Conflicting evidence => NO SIGNAL.
-- Validate the directional candidate using the full DATA object, not ADX alone.
 - One candle pattern alone is never sufficient.
 - APPROVE only when the setup is coherent and sufficiently strong.
 - This is a validation score, NOT a guaranteed win probability.
@@ -585,211 +607,30 @@ DATA:
 {json.dumps(result, ensure_ascii=False)}
 """.strip()
 
-def _parse_openrouter_response(data):
-    """Extract JSON from an OpenRouter response, including empty-content guards."""
-    choices = data.get("choices") or []
-    if not choices:
-        raise ValueError("OpenRouter returned no choices")
-    message = choices[0].get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("OpenRouter returned empty content")
-    content = content.strip()
-    content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I).strip()
-    if not content:
-        raise ValueError("OpenRouter returned empty content after cleanup")
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"OpenRouter returned non-JSON content: {e}") from e
-
-
-def _openrouter_request(prompt, model, include_fallback=False):
-    key = (OPENROUTER_API_KEY or "").strip()
-    if not key:
-        raise ValueError("OPENROUTER_API_KEY is empty")
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://priyanithan-ai.onrender.com",
-        "X-Title": "Priyanithan AI OlympTrade Signal Bot",
-    }
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "Return JSON only."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0,
-        "max_tokens": 300,
-    }
-    if include_fallback:
-        payload["models"] = ["openrouter/free"]
-
-    r = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    parsed = _parse_openrouter_response(data)
-    served_model = data.get("model", model)
-    return parsed, served_model
-
-
-def _parse_ai_json(data):
-    """Parse a JSON decision from an OpenAI-compatible response."""
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if not choices:
-        raise ValueError("AI response contained no choices")
-
-    message = choices[0].get("message", {}) or {}
-    content = message.get("content")
-
-    # Some models may return content as a list of typed blocks.
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                value = block.get("text") or block.get("content")
-                if value:
-                    parts.append(str(value))
-            elif isinstance(block, str):
-                parts.append(block)
-        content = "".join(parts)
-
-    if not isinstance(content, str) or not content.strip():
-        # Some reasoning models may put the answer in another field.
-        for key in ("text", "output", "reasoning"):
-            value = message.get(key)
-            if isinstance(value, str) and value.strip():
-                content = value
-                break
-
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("AI response contained empty content")
-
-    content = content.strip()
-    content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.I)
-    content = re.sub(r"\s*```$", "", content)
-
-    # Extract the first JSON object if the model added explanatory text.
-    match = re.search(r"\{.*\}", content, flags=re.S)
-    if not match:
-        raise ValueError("AI response did not contain JSON")
-
-    parsed = json.loads(match.group(0))
-
-    if not isinstance(parsed, dict):
-        raise ValueError("AI JSON was not an object")
-
-    return parsed
-
-
-def _openrouter_request(prompt, model):
-    """Single OpenRouter request for a selected model."""
-    key = (OPENROUTER_API_KEY or "").strip()
-    if not key:
-        raise RuntimeError("OpenRouter API key is not configured")
-
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://priyanithan-ai.onrender.com",
-        "X-Title": "Priyanithan AI OlympTrade Signal Bot",
-    }
-
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict trading setup validator. "
-                    "Return ONLY one JSON object with keys: "
-                    "decision, direction, confidence, reason. "
-                    "Never return an empty response."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0,
-        "max_tokens": 300,
-    }
-
-    r = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=25,
-    )
-
-    if r.status_code == 429:
-        raise RuntimeError("OpenRouter rate limit (429)")
-
-    r.raise_for_status()
-    data = r.json()
-    parsed = _parse_ai_json(data)
-
-    served = data.get("model") or model
-    log.info("OpenRouter response served by: %s", served)
-    return parsed
-
-
 def call_ai(prompt):
-    global AI_LAST_CALL, AI_COOLDOWN_UNTIL
-
-    # IMPORTANT:
-    # The scanner runs every 5 minutes. A provider cooldown must NEVER block
-    # the next scan cycle. Cooldown is only used to avoid immediate hammering
-    # inside the same AI call.
-    now = time.time()
-    with AI_STATE_LOCK:
-        AI_LAST_CALL = now
-
-    if not OPENROUTER_API_KEY and not AIRFORCE_API_KEY:
+    providers = []
+    if OPENROUTER_API_KEY:
+        providers.append((
+            "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_API_KEY, OPENROUTER_MODEL
+        ))
+    if AIRFORCE_API_KEY:
+        providers.append((
+            "Airforce", "https://api.airforce/v1/chat/completions",
+            AIRFORCE_API_KEY, AIRFORCE_MODEL
+        ))
+    if not providers:
         return None, "No AI provider configured"
 
-    errors = []
-
-    if OPENROUTER_API_KEY:
-        # Each model is attempted independently. A 429/empty response from
-        # one model does not prevent the next fallback model from being tried.
-        models = []
-        for model in (
-            OPENROUTER_MODEL,
-            "openrouter/free",
-            "openai/gpt-oss-20b:free",
-        ):
-            if model and model not in models:
-                models.append(model)
-
-        for model in models:
-            try:
-                result = _openrouter_request(prompt, model)
-                with AI_STATE_LOCK:
-                    AI_COOLDOWN_UNTIL = 0.0
-                return result, None
-
-            except Exception as e:
-                msg = f"OpenRouter [{model}]: {e}"
-                errors.append(msg)
-                log.warning("AI provider failed: %s", msg)
-
-                # Do NOT set a global cooldown here.
-                # The next fallback model must be attempted immediately.
-
-    # Independent provider fallback.
-    if AIRFORCE_API_KEY:
+    last_error = None
+    for name, url, key, model in providers:
         try:
             headers = {
-                "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
+                "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": AIRFORCE_MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": "Return JSON only."},
                     {"role": "user", "content": prompt},
@@ -797,23 +638,21 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
-            r = requests.post(
-                "https://api.airforce/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=25,
-            )
+            if name == "OpenRouter":
+                headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
+                headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
+            r = requests.post(url, headers=headers, json=payload, timeout=25)
             r.raise_for_status()
-            parsed = _parse_ai_json(r.json())
+            data = r.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            # Strip accidental fenced JSON.
+            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
+            parsed = json.loads(content)
             return parsed, None
         except Exception as e:
-            msg = f"Airforce: {e}"
-            errors.append(msg)
-            log.warning("AI provider failed: %s", msg)
-
-    # All providers failed for THIS 5-minute cycle.
-    # The next scheduled cycle will automatically try again from the start.
-    return None, " | ".join(errors) if errors else "AI validation failed"
+            last_error = f"{name}: {e}"
+            log.warning("AI provider failed: %s", last_error)
+    return None, last_error or "AI failed"
 
 # ============================================================
 # TELEGRAM FORMATTING
@@ -978,95 +817,48 @@ async def signal_command(update, context):
 # ============================================================
 
 async def scan_loop(application):
-    """
-    Automatic 5-minute signal cycle.
-
-    Every 5 minutes:
-      1. Read fresh OlympTrade candles.
-      2. Run technical/price-action analysis.
-      3. Send the candidate to AI validation when available.
-      4. Send an approved UP/DOWN signal to Telegram.
-
-    Important: the 5-minute cycle is guaranteed; a trade direction is NOT
-    fabricated when the data/AI rejects the setup. In that case the bot sends
-    NO SIGNAL rather than inventing a direction.
-    """
     await asyncio.sleep(20)
-
     while True:
-        cycle_started = time.time()
-
         try:
+            log.info("🔄 AUTO SCAN START — interval=%ss pairs=%s", SCAN_INTERVAL_SECONDS, PAIRS)
             for pair in PAIRS:
+                log.info("🔎 AUTO SCAN: requesting candles for %s", pair)
                 df, err = await get_ot_candles(pair, 60, 260)
-
                 if err:
-                    log.warning("5-minute scan skipped for %s: %s", pair, err)
+                    log.warning("🚫 AUTO SCAN DATA ERROR for %s: %s", pair, err)
                     continue
-
+                log.info("📊 AUTO SCAN ANALYZING %s with %s candles", pair, len(df))
+                if err:
+                    continue
                 result = analyze(df, pair)
-
                 with state_lock:
                     latest_candles[pair] = df
                     latest_signal[pair] = result
 
-                # Always run the AI when a directional candidate exists.
-                # The AI cooldown prevents hammering free providers.
-                if result["signal"] != "NO SIGNAL":
-                    ai, ai_err = call_ai(ai_prompt(result))
+                log.info("🧠 AUTO SCAN RESULT: pair=%s signal=%s bull=%s bear=%s ADX=%.1f",
+                         pair, result["signal"], result["bull"], result["bear"], result["adx"])
 
-                    if ai_err or not ai:
-                        log.warning(
-                            "5-minute AI validation unavailable for %s: %s",
-                            pair, ai_err
-                        )
-                        continue
+                # No forced signals. Only notify when the setup passes local filters
+                # and AI also approves at the configured threshold.
+                if result["signal"] == "NO SIGNAL":
+                    log.info("⏳ AUTO SCAN: NO SIGNAL for %s", pair)
+                    continue
 
-                    direction = str(ai.get("direction", "NO SIGNAL")).upper()
-                    decision = str(ai.get("decision", "REJECT")).upper()
-
-                    try:
-                        conf = int(ai.get("confidence", 0))
-                    except (TypeError, ValueError):
-                        conf = 0
-
-                    if (
-                        decision == "APPROVE"
-                        and direction in ("UP", "DOWN")
-                        and direction == result["signal"]
-                        and conf >= AI_MIN_CONFIDENCE
-                    ):
-                        text = format_signal(result, ai)
-
-                        for uid in list(authorized_users):
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=uid,
-                                    text=text
-                                )
-                            except Exception as e:
-                                log.warning(
-                                    "Telegram signal send failed: %s", e
-                                )
-                    else:
-                        log.info(
-                            "5-minute candidate rejected by AI: %s %s conf=%s",
-                            pair, direction, conf
-                        )
-
-                log.info(
-                    "5-minute scan completed: %s signal=%s confidence=%s",
-                    pair, result["signal"], result["confidence"]
-                )
-
+                ai, ai_err = call_ai(ai_prompt(result))
+                if ai_err or not ai:
+                    continue
+                direction = ai.get("direction")
+                conf = int(ai.get("confidence", 0))
+                if ai.get("decision") == "APPROVE" and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE:
+                    text = format_signal(result, ai)
+                    for uid in list(authorized_users):
+                        try:
+                            await application.bot.send_message(chat_id=uid, text=text)
+                        except Exception as e:
+                            log.warning("Telegram signal send failed: %s", e)
         except Exception:
-            log.exception("5-minute scanner loop error")
-
-        # Keep the cycle aligned to approximately every 5 minutes without
-        # creating a tight loop after a slow API/analysis call.
-        elapsed = time.time() - cycle_started
-        sleep_for = max(1, SCAN_INTERVAL_SECONDS - elapsed)
-        await asyncio.sleep(sleep_for)
+            log.exception("Scanner loop error")
+        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 # ============================================================
 # MANUAL TRADE MONITOR
