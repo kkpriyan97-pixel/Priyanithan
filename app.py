@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -36,7 +36,7 @@ OLYMPTRADE_ACCESS_TOKEN = os.getenv("OLYMPTRADE_ACCESS_TOKEN")
 
 # AI: OpenRouter is preferred when configured; Airforce remains supported.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-5.2:free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "89"))
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.4-asia-x-openrouter-fallback"
+APP_VERSION = "2.5-asia-x-openrouter-free-rotation"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -659,12 +659,17 @@ def call_ai(prompt):
     providers = []
 
     if OPENROUTER_API_KEY:
-        # Primary configured model, then OpenRouter's free router as a fallback.
+        # Primary configured model, then several currently-listed free models.
+        # Free endpoints can be temporarily unavailable/rate-limited, so rotate
+        # through multiple models instead of failing the whole scan.
         models = []
         for model in (
             OPENROUTER_MODEL,
             "openrouter/free",
             "z-ai/glm-5.2:free",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "minimax/minimax-m3:free",
+            "google/gemma-4-26b-a4b-it:free",
         ):
             if model and model not in models:
                 models.append(model)
@@ -715,7 +720,11 @@ def call_ai(prompt):
                 body = r.text[:700].replace("\n", " ")
                 raise RuntimeError(f"HTTP {r.status_code}: {body}")
 
-            data = r.json()
+            try:
+                data = r.json()
+            except Exception:
+                body = r.text[:1200].replace("\n", " ")
+                raise RuntimeError(f"Non-JSON AI response: {body}")
             parsed = _parse_ai_response(data)
             log.info("🤖 AI VALIDATION OK: provider=%s model=%s", name, model)
             return parsed, None
