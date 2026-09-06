@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.2-asia-x-live-tick-candles"
+APP_VERSION = "2.3-mtf-price-action"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -353,6 +353,23 @@ async def get_ot_candles(pair, size=60, count=260):
 
     return df, None
 
+async def get_mtf_context(pair):
+    """Read-only multi-timeframe confirmation from OlympTrade historical candles."""
+    contexts = {}
+    for label, size in (("5m", 300), ("15m", 900)):
+        df, err = await get_ot_candles(pair, size, 220)
+        if err or df is None or len(df) < 60:
+            contexts[label] = {"trend": "UNAVAILABLE", "adx": None, "error": err}
+            continue
+        r = analyze(df, pair)
+        contexts[label] = {
+            "trend": r["trend"],
+            "adx": round(float(r["adx"]), 1),
+            "signal": r["signal"],
+            "rsi": round(float(r["rsi"]), 1),
+        }
+    return contexts
+
 # ============================================================
 # TECHNICAL / PRICE ACTION ENGINE
 # ============================================================
@@ -519,7 +536,35 @@ def analyze(df, pair):
     if signal == "DOWN" and support < price and (price-support)/max(price,1e-12) < 0.0008:
         conflicts.append("Support very close")
 
-    raw_score = max(bull, bear)
+    # Price-action confirmation.
+    pa_score = 0
+    if len(x) >= 6:
+        last = x.iloc[-2]
+        prev5 = x.iloc[-7:-2]
+        recent_high = float(prev5["high"].max())
+        recent_low = float(prev5["low"].min())
+        body = abs(float(last.close) - float(last.open))
+        rng = max(float(last.high) - float(last.low), 1e-12)
+        body_ratio = body / rng
+        if last.close > last.open and body_ratio >= 0.55:
+            pa_score += 1
+            reasons.append("Bullish Price Action")
+        elif last.close < last.open and body_ratio >= 0.55:
+            pa_score -= 1
+            reasons.append("Bearish Price Action")
+        if float(last.close) > recent_high:
+            pa_score += 1
+            reasons.append("Breakout Above Recent High")
+        elif float(last.close) < recent_low:
+            pa_score -= 1
+            reasons.append("Breakout Below Recent Low")
+
+    if signal == "UP" and pa_score < 0:
+        conflicts.append("Price action disagrees")
+    if signal == "DOWN" and pa_score > 0:
+        conflicts.append("Price action disagrees")
+
+    raw_score = max(bull, bear) + max(0, abs(pa_score))
     confidence = min(99, int(55 + raw_score * 5 - len(conflicts) * 7))
 
     return {
@@ -565,6 +610,9 @@ Rules:
 
 DATA:
 {json.dumps(result, ensure_ascii=False)}
+
+MULTI-TIMEFRAME CONTEXT:
+{json.dumps(result.get("mtf", {}), ensure_ascii=False)}
 """.strip()
 
 def call_ai(prompt):
@@ -598,13 +646,6 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
-            # OpenRouter model-level fallback: if the primary model is
-            # rate-limited or unavailable, try another free model automatically.
-            if name == "OpenRouter":
-                payload["models"] = [
-                    model,
-                    "openrouter/free",
-                ]
             if name == "OpenRouter":
                 headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
                 headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
@@ -758,6 +799,15 @@ async def signal_command(update, context):
         return
 
     result = analyze(df, pair)
+    result["mtf"] = await get_mtf_context(pair)
+    mtf = result["mtf"]
+    trends = [v["trend"] for v in mtf.values() if v.get("trend") in ("Bullish", "Bearish")]
+    if result["signal"] == "UP" and trends and trends.count("Bearish") >= len(trends) / 2:
+        result["signal"] = "NO SIGNAL"
+        result["conflicts"].append("Higher-timeframe trend is bearish")
+    elif result["signal"] == "DOWN" and trends and trends.count("Bullish") >= len(trends) / 2:
+        result["signal"] = "NO SIGNAL"
+        result["conflicts"].append("Higher-timeframe trend is bullish")
     with state_lock:
         latest_candles[pair] = df
         latest_signal[pair] = result
