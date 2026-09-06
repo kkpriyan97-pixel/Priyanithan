@@ -937,6 +937,65 @@ async def status_command(update, context):
         "📡 Source: OlympTrade"
     )
 
+def format_signal(result, ai=None):
+    """Format a technical/AI result for Telegram."""
+    if result["signal"] == "NO SIGNAL" or not ai:
+        details = "\n".join(f"• {x}" for x in result.get("reasons", [])[-5:]) or "• No strong confirmation"
+        conflicts = "\n".join(f"• {x}" for x in result.get("conflicts", [])) or "• Setup strength insufficient"
+        return (
+            "🚫 NO SIGNAL\n\n"
+            f"📈 {result['pair']}\n"
+            f"🕐 {result['candle_time']}\n\n"
+            "🧠 MARKET ANALYSIS\n"
+            f"🕯️ Patterns: {', '.join(result.get('patterns', [])) or 'None'}\n"
+            f"📈 Trend: {result.get('trend', 'Unknown')}\n"
+            f"💪 ADX: {float(result.get('adx', 0)):.1f}\n\n"
+            f"✅ Confirmations:\n{details}\n\n"
+            f"⚠️ Conflicts:\n{conflicts}\n\n"
+            "🤖 AI Decision: NO SIGNAL\n"
+            "⏳ Waiting for stronger setup..."
+        )
+
+    direction = ai.get("direction", "NO SIGNAL")
+    decision = ai.get("decision", "REJECT")
+    try:
+        conf = int(ai.get("confidence", 0))
+    except (TypeError, ValueError):
+        conf = 0
+
+    if decision != "APPROVE" or direction not in ("UP", "DOWN") or conf < AI_MIN_CONFIDENCE:
+        return (
+            "🚫 NO SIGNAL\n\n"
+            f"📈 {result['pair']}\n"
+            f"🕐 {result['candle_time']}\n\n"
+            f"🕯️ Candle: {', '.join(result.get('patterns', [])) or 'No major pattern'}\n"
+            f"📈 Trend: {result.get('trend', 'Unknown')}\n"
+            f"📊 RSI: {float(result.get('rsi', 0)):.1f}\n"
+            f"💪 ADX: {float(result.get('adx', 0)):.1f}\n"
+            f"⚠️ {ai.get('reason', 'AI rejected the setup.')}\n\n"
+            "🤖 AI Decision: NO SIGNAL\n"
+            "⏳ Waiting for stronger setup..."
+        )
+
+    fire = "🔥🔥🔥" if conf >= 94 else "🔥🔥" if conf >= 91 else "🔥"
+    arrow = "⬆️" if direction == "UP" else "⬇️"
+    adx = float(result.get("adx", 0))
+    duration = "1 MIN" if adx < 25 else ("2 MIN" if adx < 35 else "5 MIN")
+    confirmations = "\n".join(f"• {x}" for x in result.get("reasons", [])[-7:])
+
+    return (
+        f"📈 {result['pair']}\n"
+        f"{arrow} TRADE {direction}\n"
+        f"🕐 {result['candle_time']}\n"
+        f"{fire}\n\n"
+        f"{confirmations}\n\n"
+        f"⏱ Duration: {duration}\n"
+        f"🤖 AI: APPROVED\n"
+        f"📊 Confidence: {conf}%\n\n"
+        "⚠️ Manual execution only"
+    )
+
+
 async def signal_command(update, context):
     if not is_authorized(update):
         await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
