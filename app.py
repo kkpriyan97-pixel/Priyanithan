@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -754,9 +754,9 @@ def call_ai(prompt):
     errors = []
 
     if OPENROUTER_API_KEY:
-        # Try the configured model first, then a router-selected free model.
-        # Empty content is treated as a failed attempt and triggers the next
-        # model instead of immediately producing NO SIGNAL.
+        # IMPORTANT:
+        # A 429 from one model must NOT stop the fallback chain.
+        # Try every configured free route independently.
         models = []
         for model in (
             OPENROUTER_MODEL,
@@ -766,26 +766,35 @@ def call_ai(prompt):
             if model and model not in models:
                 models.append(model)
 
+        got_429 = False
+
         for model in models:
             try:
                 result = _openrouter_request(prompt, model)
                 with AI_STATE_LOCK:
                     AI_COOLDOWN_UNTIL = 0.0
                 return result, None
+
             except Exception as e:
                 msg = f"OpenRouter [{model}]: {e}"
                 errors.append(msg)
                 log.warning("AI provider failed: %s", msg)
 
                 if "429" in str(e):
-                    # Do not hammer the free endpoint. The next scheduled
-                    # 5-minute cycle can try again.
-                    with AI_STATE_LOCK:
-                        AI_COOLDOWN_UNTIL = time.time() + AI_COOLDOWN_SECONDS
-                    break
+                    got_429 = True
+                    # DO NOT break. The next fallback model may still be
+                    # available even if the primary model is rate-limited.
+                    continue
 
-    # Optional second provider.
-    if AIRFORCE_API_KEY and not any("429" in e for e in errors):
+        # Only after every OpenRouter fallback was tried do we apply a short
+        # cooldown to avoid hammering the free service on repeated cycles.
+        if got_429:
+            with AI_STATE_LOCK:
+                AI_COOLDOWN_UNTIL = time.time() + AI_COOLDOWN_SECONDS
+
+    # Airforce is independent; try it if configured and OpenRouter did not
+    # produce a valid response.
+    if AIRFORCE_API_KEY:
         try:
             headers = {
                 "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
