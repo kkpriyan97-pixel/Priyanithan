@@ -526,25 +526,23 @@ def analyze(df, pair):
     if bear > bull and support < price and (price-support)/max(price,1e-12) < 0.0008:
         conflicts.append("Support very close")
 
-    # Require a meaningful directional margin and enough total evidence.
-    # ADX is a penalty here, not an automatic blocker above 15.
+    # Local engine now produces a CANDIDATE direction for AI instead of blocking
+    # most setups. Only near-neutral evidence is stopped locally. ADX, indecision,
+    # and nearby S/R become penalties/context for the AI validator.
     margin = abs(bull - bear)
     strength = max(bull, bear)
-    weak_adx_penalty = 1.0 if adx_val < 20 else 0.0
+    weak_adx_penalty = 1.5 if adx_val < 15 else 0.75 if adx_val < 20 else 0.0
     directional = "UP" if bull > bear else "DOWN" if bear > bull else "NO SIGNAL"
 
-    if strength < 4.0 or margin < 1.5:
+    if directional == "NO SIGNAL" or strength < 3.0 or margin < 0.75:
         signal = "NO SIGNAL"
-        reason = "Weighted evidence is not strong enough or directions are too close."
-    elif adx_val < 15:
+        reason = "Evidence is too balanced or too weak to create a directional candidate."
+    elif margin < 1.25 and len(conflicts) >= 2:
         signal = "NO SIGNAL"
-        reason = f"ADX is very weak ({adx_val:.1f}); market lacks directional strength."
-    elif len(conflicts) >= 3:
-        signal = "NO SIGNAL"
-        reason = "Too many conflicting conditions remain."
+        reason = "Directional edge is small and multiple conflicts remain."
     else:
         signal = directional
-        reason = "Strong weighted setup; pending AI validation."
+        reason = "Directional candidate found; AI will decide whether the setup is tradable."
 
     raw_score = strength + margin * 0.75 - weak_adx_penalty - len(conflicts) * 0.5
     confidence = max(50, min(99, int(50 + raw_score * 6)))
@@ -573,7 +571,8 @@ Evaluate this OlympTrade live-market setup using price action, candle patterns,
 market structure, indicators, support/resistance and volatility/ADX context.
 
 Rules:
-- ADX below 20 => NO SIGNAL.
+- ADX below 15 is a strong caution; do not automatically reject if other evidence is aligned.
+- ADX 15-20 reduces confidence but AI may still approve a coherent setup.
 - Conflicting evidence => NO SIGNAL.
 - One candle pattern alone is never sufficient.
 - APPROVE only when the setup is coherent and sufficiently strong.
@@ -777,7 +776,7 @@ async def signal_command(update, context):
         await msg.edit_text(format_signal(result))
         return
 
-    await msg.edit_text("🤖 Strong setup found. AI validation running...")
+    await msg.edit_text("🤖 Directional candidate found. AI validation running...")
     ai, ai_err = call_ai(ai_prompt(result))
     if ai_err:
         await msg.edit_text(
@@ -807,8 +806,8 @@ async def scan_loop(application):
                     latest_candles[pair] = df
                     latest_signal[pair] = result
 
-                # No forced signals. Only notify when the setup passes local filters
-                # and AI also approves at the configured threshold.
+                # Do not force signals. Candidate setups go to AI; only AI-approved
+                # directionally matching setups are sent to Telegram.
                 if result["signal"] == "NO SIGNAL":
                     continue
 
