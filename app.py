@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -574,6 +574,7 @@ Rules:
 - ADX below 15 is a strong caution; do not automatically reject if other evidence is aligned.
 - ADX 15-20 reduces confidence but may still be approved when the setup is coherent.
 - Conflicting evidence => NO SIGNAL.
+- Validate the directional candidate using the full DATA object, not ADX alone.
 - One candle pattern alone is never sufficient.
 - APPROVE only when the setup is coherent and sufficiently strong.
 - This is a validation score, NOT a guaranteed win probability.
@@ -639,19 +640,56 @@ def _openrouter_request(prompt, model, include_fallback=False):
 
 
 def _parse_ai_json(data):
+    """Parse a JSON decision from an OpenAI-compatible response."""
     choices = data.get("choices") if isinstance(data, dict) else None
     if not choices:
         raise ValueError("AI response contained no choices")
+
     message = choices[0].get("message", {}) or {}
     content = message.get("content")
+
+    # Some models may return content as a list of typed blocks.
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                value = block.get("text") or block.get("content")
+                if value:
+                    parts.append(str(value))
+            elif isinstance(block, str):
+                parts.append(block)
+        content = "".join(parts)
+
+    if not isinstance(content, str) or not content.strip():
+        # Some reasoning models may put the answer in another field.
+        for key in ("text", "output", "reasoning"):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                content = value
+                break
+
     if not isinstance(content, str) or not content.strip():
         raise ValueError("AI response contained empty content")
-    content = re.sub(r"^```json\s*|\s*```$", "", content.strip(), flags=re.I)
-    return json.loads(content)
+
+    content = content.strip()
+    content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.I)
+    content = re.sub(r"\s*```$", "", content)
+
+    # Extract the first JSON object if the model added explanatory text.
+    match = re.search(r"\{.*\}", content, flags=re.S)
+    if not match:
+        raise ValueError("AI response did not contain JSON")
+
+    parsed = json.loads(match.group(0))
+
+    if not isinstance(parsed, dict):
+        raise ValueError("AI JSON was not an object")
+
+    return parsed
 
 
-def _openrouter_request(prompt):
-    """Call OpenRouter using documented model fallback routing."""
+def _openrouter_request(prompt, model):
+    """Single OpenRouter request for a selected model."""
     key = (OPENROUTER_API_KEY or "").strip()
     if not key:
         raise RuntimeError("OpenRouter API key is not configured")
@@ -663,16 +701,18 @@ def _openrouter_request(prompt):
         "X-Title": "Priyanithan AI OlympTrade Signal Bot",
     }
 
-    # The models array lets OpenRouter try the primary model and then a free
-    # fallback when the primary is rate-limited/unavailable.
-    models = [OPENROUTER_MODEL]
-    if OPENROUTER_MODEL != "openrouter/free":
-        models.append("openrouter/free")
-
     payload = {
-        "models": models,
+        "model": model,
         "messages": [
-            {"role": "system", "content": "Return JSON only."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict trading setup validator. "
+                    "Return ONLY one JSON object with keys: "
+                    "decision, direction, confidence, reason. "
+                    "Never return an empty response."
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
         "temperature": 0,
@@ -685,18 +725,16 @@ def _openrouter_request(prompt):
         json=payload,
         timeout=25,
     )
+
     if r.status_code == 429:
         raise RuntimeError("OpenRouter rate limit (429)")
-    r.raise_for_status()
 
+    r.raise_for_status()
     data = r.json()
     parsed = _parse_ai_json(data)
-    served_model = (
-        data.get("model")
-        or data.get("provider", {}).get("model")
-        or "OpenRouter fallback"
-    )
-    log.info("OpenRouter AI response served by: %s", served_model)
+
+    served = data.get("model") or model
+    log.info("OpenRouter response served by: %s", served)
     return parsed
 
 
@@ -710,28 +748,44 @@ def call_ai(prompt):
             return None, f"AI cooldown active ({remaining}s remaining)"
         AI_LAST_CALL = now
 
+    if not OPENROUTER_API_KEY and not AIRFORCE_API_KEY:
+        return None, "No AI provider configured"
+
     errors = []
 
     if OPENROUTER_API_KEY:
-        try:
-            result = _openrouter_request(prompt)
-            with AI_STATE_LOCK:
-                AI_COOLDOWN_UNTIL = 0.0
-            return result, None
-        except Exception as e:
-            msg = f"OpenRouter: {e}"
-            errors.append(msg)
-            log.warning("AI provider failed: %s", msg)
+        # Try the configured model first, then a router-selected free model.
+        # Empty content is treated as a failed attempt and triggers the next
+        # model instead of immediately producing NO SIGNAL.
+        models = []
+        for model in (
+            OPENROUTER_MODEL,
+            "openrouter/free",
+            "openai/gpt-oss-20b:free",
+        ):
+            if model and model not in models:
+                models.append(model)
 
-            # A 429 is a temporary provider limit, not a signal rejection.
-            # Pause AI calls briefly instead of hammering the free endpoint.
-            if "429" in str(e):
+        for model in models:
+            try:
+                result = _openrouter_request(prompt, model)
                 with AI_STATE_LOCK:
-                    AI_COOLDOWN_UNTIL = time.time() + AI_COOLDOWN_SECONDS
+                    AI_COOLDOWN_UNTIL = 0.0
+                return result, None
+            except Exception as e:
+                msg = f"OpenRouter [{model}]: {e}"
+                errors.append(msg)
+                log.warning("AI provider failed: %s", msg)
 
-    # Airforce remains an optional fallback when configured. Do not use it
-    # during an OpenRouter cooldown if it is the same constrained path.
-    if AIRFORCE_API_KEY and not errors[-1:].__contains__("OpenRouter: OpenRouter rate limit (429)"):
+                if "429" in str(e):
+                    # Do not hammer the free endpoint. The next scheduled
+                    # 5-minute cycle can try again.
+                    with AI_STATE_LOCK:
+                        AI_COOLDOWN_UNTIL = time.time() + AI_COOLDOWN_SECONDS
+                    break
+
+    # Optional second provider.
+    if AIRFORCE_API_KEY and not any("429" in e for e in errors):
         try:
             headers = {
                 "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
@@ -760,7 +814,7 @@ def call_ai(prompt):
             errors.append(msg)
             log.warning("AI provider failed: %s", msg)
 
-    return None, " | ".join(errors) if errors else "No AI provider configured"
+    return None, " | ".join(errors) if errors else "AI validation failed"
 
 # ============================================================
 # TELEGRAM FORMATTING
