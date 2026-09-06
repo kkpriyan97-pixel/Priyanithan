@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.3-asia-x-candle-debug-auto-scan"
+APP_VERSION = "2.4-asia-x-openrouter-fallback"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -607,18 +607,83 @@ DATA:
 {json.dumps(result, ensure_ascii=False)}
 """.strip()
 
+def _parse_ai_response(data):
+    """Extract JSON from common OpenRouter/OpenAI-compatible response shapes."""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise ValueError(f"AI response missing choices: {str(data)[:500]}")
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    content = message.get("content")
+
+    # Some providers return content as a list of blocks.
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                txt = block.get("text") or block.get("content") or ""
+                if txt:
+                    parts.append(str(txt))
+            elif isinstance(block, str):
+                parts.append(block)
+        content = "".join(parts)
+
+    if not content:
+        # A few OpenAI-compatible providers may place text elsewhere.
+        content = message.get("reasoning") or choices[0].get("text")
+
+    if not content:
+        raise ValueError("AI response contained no text content")
+
+    content = str(content).strip()
+    content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.I)
+    content = re.sub(r"\s*```$", "", content)
+
+    # If the model adds surrounding text, extract the first JSON object.
+    if not content.startswith("{"):
+        m = re.search(r"\{.*\}", content, flags=re.S)
+        if m:
+            content = m.group(0)
+
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise ValueError("AI JSON result is not an object")
+    return parsed
+
+
 def call_ai(prompt):
+    """Try OpenRouter with the configured model and free-router fallbacks.
+
+    A failed model/provider must not permanently block the next 5-minute scan.
+    No trade execution is performed here.
+    """
     providers = []
+
     if OPENROUTER_API_KEY:
-        providers.append((
-            "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
-            OPENROUTER_API_KEY, OPENROUTER_MODEL
-        ))
+        # Primary configured model, then OpenRouter's free router as a fallback.
+        models = []
+        for model in (
+            OPENROUTER_MODEL,
+            "openrouter/free",
+            "z-ai/glm-5.2:free",
+        ):
+            if model and model not in models:
+                models.append(model)
+        for model in models:
+            providers.append((
+                f"OpenRouter/{model}",
+                "https://openrouter.ai/api/v1/chat/completions",
+                OPENROUTER_API_KEY,
+                model,
+            ))
+
     if AIRFORCE_API_KEY:
         providers.append((
-            "Airforce", "https://api.airforce/v1/chat/completions",
-            AIRFORCE_API_KEY, AIRFORCE_MODEL
+            "Airforce",
+            "https://api.airforce/v1/chat/completions",
+            AIRFORCE_API_KEY,
+            AIRFORCE_MODEL,
         ))
+
     if not providers:
         return None, "No AI provider configured"
 
@@ -626,7 +691,7 @@ def call_ai(prompt):
     for name, url, key, model in providers:
         try:
             headers = {
-                "Authorization": f"Bearer {key}",
+                "Authorization": f"Bearer {key.strip()}",
                 "Content-Type": "application/json",
             }
             payload = {
@@ -638,179 +703,29 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
-            if name == "OpenRouter":
+            if name.startswith("OpenRouter/"):
                 headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
                 headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
+
             r = requests.post(url, headers=headers, json=payload, timeout=25)
-            r.raise_for_status()
+
+            if not r.ok:
+                # Keep the useful API body; it tells us whether the failure is
+                # model, authentication, quota, routing, or endpoint related.
+                body = r.text[:700].replace("\n", " ")
+                raise RuntimeError(f"HTTP {r.status_code}: {body}")
+
             data = r.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            # Strip accidental fenced JSON.
-            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
-            parsed = json.loads(content)
+            parsed = _parse_ai_response(data)
+            log.info("🤖 AI VALIDATION OK: provider=%s model=%s", name, model)
             return parsed, None
+
         except Exception as e:
             last_error = f"{name}: {e}"
             log.warning("AI provider failed: %s", last_error)
+            continue
+
     return None, last_error or "AI failed"
-
-# ============================================================
-# TELEGRAM FORMATTING
-# ============================================================
-
-def format_signal(result, ai=None):
-    if result["signal"] == "NO SIGNAL" or not ai:
-        details = "\n".join(f"• {x}" for x in result["reasons"][-5:]) or "• No strong confirmation"
-        conflicts = "\n".join(f"• {x}" for x in result["conflicts"]) or "• Setup strength insufficient"
-        return (
-            "🚫 NO SIGNAL\n\n"
-            f"📈 {result['pair']}\n"
-            f"🕐 {result['candle_time']}\n\n"
-            "🧠 MARKET ANALYSIS\n"
-            f"🕯️ Patterns: {', '.join(result['patterns']) or 'None'}\n"
-            f"📈 Trend: {result['trend']}\n"
-            f"💪 ADX: {result['adx']:.1f}\n\n"
-            f"✅ Confirmations:\n{details}\n\n"
-            f"⚠️ Conflicts:\n{conflicts}\n\n"
-            "🤖 AI Decision: NO SIGNAL\n"
-            "⏳ Waiting for stronger setup..."
-        )
-
-    direction = ai.get("direction", "NO SIGNAL")
-    decision = ai.get("decision", "REJECT")
-    conf = int(ai.get("confidence", 0))
-    if decision != "APPROVE" or direction not in ("UP", "DOWN") or conf < AI_MIN_CONFIDENCE:
-        return (
-            "🚫 NO SIGNAL\n\n"
-            f"📈 {result['pair']}\n"
-            f"🕐 {result['candle_time']}\n\n"
-            f"🕯️ Candle: {', '.join(result['patterns']) or 'No major pattern'}\n"
-            f"📈 Trend: {result['trend']}\n"
-            f"📊 RSI: {result['rsi']:.1f}\n"
-            f"💪 ADX: {result['adx']:.1f}\n"
-            f"⚠️ {ai.get('reason', 'AI rejected the setup.')}\n\n"
-            "🤖 AI Decision: NO SIGNAL\n"
-            "⏳ Waiting for stronger setup..."
-        )
-
-    fire = "🔥🔥🔥" if conf >= 94 else "🔥🔥" if conf >= 91 else "🔥"
-    arrow = "⬆️" if direction == "UP" else "⬇️"
-    duration = "1 MIN" if result["adx"] < 25 else ("2 MIN" if result["adx"] < 35 else "5 MIN")
-    confirmations = "\n".join(f"• {x}" for x in result["reasons"][-7:])
-    return (
-        f"📈 {result['pair']}\n"
-        f"{arrow} TRADE {direction}\n"
-        f"🕐 {result['candle_time']}\n"
-        f"{fire}\n\n"
-        f"{confirmations}\n\n"
-        f"⏱ Duration: {duration}\n"
-        f"🤖 AI: APPROVED\n"
-        f"📊 Confidence: {conf}%\n\n"
-        "⚠️ Manual execution only"
-    )
-
-# ============================================================
-# LIVE CHART IMAGE
-# ============================================================
-
-def make_chart(df, result=None):
-    view = df.tail(60).copy()
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for i, (_, r) in enumerate(view.iterrows()):
-        up = r.close >= r.open
-        ax.plot([i, i], [r.low, r.high], linewidth=1)
-        ax.plot([i, i], [r.open, r.close], linewidth=5)
-    ax.set_title(
-        f"OlympTrade Live Candles — {result['pair'] if result else ''}"
-    )
-    ax.set_xlabel("Recent 1-minute candles from OlympTrade live ticks")
-    ax.set_ylabel("Price")
-    ax.grid(alpha=0.2)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-# ============================================================
-# TELEGRAM COMMANDS
-# ============================================================
-
-async def start_command(update, context):
-    await update.message.reply_text(
-        "🤖 Priyanithan AI OlympTrade Bot\n\n"
-        "Use /access YOUR_CODE first.\n"
-        "Then /status or /signal ASIA_X"
-    )
-
-async def access_command(update, context):
-    if not context.args:
-        await update.message.reply_text("Use /access YOUR_CODE")
-        return
-    if ACCESS_CODE and context.args[0] == ACCESS_CODE:
-        authorized_users.add(update.effective_user.id)
-        await update.message.reply_text("✅ Access authorized.")
-    else:
-        await update.message.reply_text("❌ Invalid access code.")
-
-async def status_command(update, context):
-    if not is_authorized(update):
-        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
-        return
-    connected = bool(ot_client and ot_client.connection.is_connected)
-    ai = "OpenRouter" if OPENROUTER_API_KEY else ("Airforce" if AIRFORCE_API_KEY else "NOT CONFIGURED")
-    await update.message.reply_text(
-        "🟢 BOT STATUS\n\n"
-        f"📡 OlympTrade Live Feed: {'CONNECTED' if connected else 'DISCONNECTED'}\n"
-        f"📊 Pairs: {', '.join(PAIRS)}\n"
-        f"🤖 AI: {ai}\n"
-        f"🧠 Model: {OPENROUTER_MODEL if OPENROUTER_API_KEY else AIRFORCE_MODEL}\n\n"
-        "⚡ Auto-trade: OFF\n"
-        "🛑 Martingale: OFF\n"
-        "👤 Execution: MANUAL ONLY\n"
-        "📡 Source: OlympTrade"
-    )
-
-async def signal_command(update, context):
-    if not is_authorized(update):
-        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
-        return
-    if not context.args:
-        await update.message.reply_text("Use /signal ASIA_X")
-        return
-    pair = context.args[0].upper()
-    if pair not in PAIRS:
-        await update.message.reply_text(f"❌ Unsupported pair. Available: {', '.join(PAIRS)}")
-        return
-
-    msg = await update.message.reply_text(f"⏳ Reading OlympTrade live candles for {pair}...")
-    df, err = await get_ot_candles(pair, 60, 260)
-    if err:
-        await msg.edit_text(f"❌ LIVE DATA FAILED\n\n{err}\n\nNo signal generated.")
-        return
-
-    result = analyze(df, pair)
-    with state_lock:
-        latest_candles[pair] = df
-        latest_signal[pair] = result
-
-    if result["signal"] == "NO SIGNAL":
-        await msg.edit_text(format_signal(result))
-        return
-
-    await msg.edit_text("🤖 Strong setup found. AI validation running...")
-    ai, ai_err = call_ai(ai_prompt(result))
-    if ai_err:
-        await msg.edit_text(
-            "🚫 NO SIGNAL\n\n"
-            f"📈 {pair}\n"
-            f"❌ AI validation unavailable: {ai_err}\n\n"
-            "No trade signal generated."
-        )
-        return
-
-    await msg.edit_text(format_signal(result, ai))
 
 # ============================================================
 # BACKGROUND SCANNER
