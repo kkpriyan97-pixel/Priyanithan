@@ -36,7 +36,7 @@ OLYMPTRADE_ACCESS_TOKEN = os.getenv("OLYMPTRADE_ACCESS_TOKEN")
 
 # AI: OpenRouter is preferred when configured; Airforce remains supported.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-5.2:free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "89"))
@@ -664,6 +664,9 @@ def call_ai(prompt):
         for model in (
             OPENROUTER_MODEL,
             "openrouter/free",
+            "minimax/minimax-m3:free",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "google/gemma-4-26b-a4b-it:free",
         ):
             if model and model not in models:
                 models.append(model)
@@ -706,7 +709,7 @@ def call_ai(prompt):
                 headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
                 headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
 
-            r = requests.post(url, headers=headers, json=payload, timeout=25)
+            r = requests.post(url, headers=headers, json=payload, timeout=15)
 
             if not r.ok:
                 # Keep the useful API body; it tells us whether the failure is
@@ -714,7 +717,11 @@ def call_ai(prompt):
                 body = r.text[:700].replace("\n", " ")
                 raise RuntimeError(f"HTTP {r.status_code}: {body}")
 
-            data = r.json()
+            try:
+                data = r.json()
+            except Exception:
+                body = r.text[:700].replace("\n", " ")
+                raise RuntimeError(f"Non-JSON AI response: {body or '<empty response>'}")
             parsed = _parse_ai_response(data)
             log.info("🤖 AI VALIDATION OK: provider=%s model=%s", name, model)
             return parsed, None
