@@ -400,6 +400,26 @@ def analyze(df, pair):
 # ============================================================
 # AI
 # ============================================================
+def choose_duration_min(result, ai=None):
+    if isinstance(ai, dict):
+        try:
+            d = int(ai.get("duration_min", 0))
+            if d in (1, 2, 3, 4, 5, 10, 15):
+                return d
+        except Exception:
+            pass
+    adx = float(result.get("adx", 0))
+    rsi = float(result.get("rsi", 50))
+    if adx >= 35:
+        return 10 if (rsi >= 55 or rsi <= 45) else 5
+    if adx >= 25:
+        return 5
+    if adx >= 20:
+        return 4
+    if adx >= 15:
+        return 3
+    return 1
+
 def ai_prompt(result):
     return f"""You are a cautious OlympTrade market-setup validator. Do not invent data.
 Evaluate price action, candle patterns, market structure, EMA, MACD, RSI, Bollinger Bands,
@@ -410,8 +430,12 @@ Rules:
 - One candle pattern alone is never sufficient.
 - Approve only a coherent, aligned setup.
 - Confidence is a validation score, NOT a guaranteed win probability.
+- If approving, choose the most suitable expiry from exactly: 1, 2, 3, 4, 5, 10, 15 minutes.
+- Choose expiry from setup quality, momentum, volatility, candle structure, trend strength and support/resistance distance.
+- Do not choose a longer expiry merely to avoid NO SIGNAL.
+- If the setup is conflicted or unsafe, reject it.
 Return JSON only:
-{{"decision":"APPROVE|REJECT","direction":"UP|DOWN|NO SIGNAL","confidence":0-100,"reason":"short reason"}}
+{{"decision":"APPROVE|REJECT","direction":"UP|DOWN|NO SIGNAL","confidence":0-100,"duration_min":1|2|3|4|5|10|15,"reason":"short reason"}}
 DATA:
 {json.dumps(result, ensure_ascii=False)}""".strip()
 
@@ -482,8 +506,7 @@ def format_signal(result, ai=None):
                 "⏳ Waiting for stronger confirmation...")
     fire = "🔥🔥🔥" if conf >= 94 else ("🔥🔥" if conf >= 91 else "🔥")
     arrow = "⬆️" if direction == "UP" else "⬇️"
-    adx = result["adx"]
-    duration = "1 MIN" if adx < 25 else ("2 MIN" if adx < 35 else "5 MIN")
+    duration = f"{choose_duration_min(result, ai)} MIN"
     confirmations = "\n".join(f"• {x}" for x in result["reasons"][-7:])
     return (f"📈 {result['pair']}\n{arrow} TRADE {direction}\n🕐 {result['candle_time']}\n{fire}\n\n"
             f"{confirmations}\n\n⏱ Duration: {duration}\n🤖 AI: APPROVED\n📊 Confidence: {conf}%\n\n"
