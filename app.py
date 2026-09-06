@@ -41,8 +41,14 @@ AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "89"))
 
+# AI rate-limit protection. Free providers can return HTTP 429.
+AI_COOLDOWN_SECONDS = int(os.getenv("AI_COOLDOWN_SECONDS", "65"))
+AI_LAST_CALL = 0.0
+AI_COOLDOWN_UNTIL = 0.0
+AI_STATE_LOCK = threading.Lock()
+
 # Signal scan interval: scans periodically, but does NOT force a signal.
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))  # 5 minutes
 
 # Live monitoring interval requested by the user.
 LIVE_UPDATE_SECONDS = 15
@@ -421,11 +427,10 @@ def structure(df):
     return trend
 
 def analyze(df, pair):
-    """Weighted setup scoring: strong aligned evidence can reach AI validation
-    without requiring every indicator to agree. Conflicts still reduce the score.
-    """
     x = df.copy()
-    close, high, low = x["close"], x["high"], x["low"]
+    close = x["close"]
+    high = x["high"]
+    low = x["low"]
 
     x["ema9"] = EMAIndicator(close, 9).ema_indicator()
     x["ema21"] = EMAIndicator(close, 21).ema_indicator()
@@ -436,6 +441,7 @@ def analyze(df, pair):
     x["macd"] = macd.macd()
     x["macd_signal"] = macd.macd_signal()
     x["macd_hist"] = macd.macd_diff()
+
     x["rsi"] = RSIIndicator(close, 14).rsi()
 
     bb = BollingerBands(close, 20, 2)
@@ -450,115 +456,109 @@ def analyze(df, pair):
     adx = ADXIndicator(high, low, close, 14)
     x["adx"] = adx.adx()
 
-    row = x.iloc[-2]
+    row = x.iloc[-2]  # closed candle
     price = float(row.close)
     pats = candle_patterns(x)
     trend = structure(x)
 
-    bull = 0.0
-    bear = 0.0
+    bull = 0
+    bear = 0
     reasons = []
     conflicts = []
 
-    # Weighted evidence. Trend/structure and momentum receive more weight;
-    # weak/ranging conditions reduce confidence rather than hard-blocking first.
     if row.ema9 > row.ema21:
-        bull += 1.5; reasons.append("EMA 9/21 Bullish")
+        bull += 1; reasons.append("EMA 9/21 Bullish")
     elif row.ema9 < row.ema21:
-        bear += 1.5; reasons.append("EMA 9/21 Bearish")
-
-    if row.ema50 > row.ema200:
-        bull += 1.0; reasons.append("EMA 50/200 Bullish")
-    elif row.ema50 < row.ema200:
-        bear += 1.0; reasons.append("EMA 50/200 Bearish")
+        bear += 1; reasons.append("EMA 9/21 Bearish")
 
     if row.macd > row.macd_signal and row.macd_hist > 0:
-        bull += 1.5; reasons.append("MACD Bullish")
+        bull += 1; reasons.append("MACD Bullish")
     elif row.macd < row.macd_signal and row.macd_hist < 0:
-        bear += 1.5; reasons.append("MACD Bearish")
+        bear += 1; reasons.append("MACD Bearish")
 
-    if 52 < row.rsi < 68:
-        bull += 1.0; reasons.append("RSI Bullish Momentum")
-    elif 32 < row.rsi < 48:
-        bear += 1.0; reasons.append("RSI Bearish Momentum")
+    if 50 < row.rsi < 70:
+        bull += 1; reasons.append("RSI Momentum")
+    elif 30 < row.rsi < 50:
+        bear += 1; reasons.append("RSI Momentum")
     elif row.rsi >= 70:
         conflicts.append("RSI Overbought")
     elif row.rsi <= 30:
         conflicts.append("RSI Oversold")
 
     if price > row.bb_mid:
-        bull += 0.75; reasons.append("Above Bollinger Mid")
+        bull += 1; reasons.append("Above Bollinger Mid")
     elif price < row.bb_mid:
-        bear += 0.75; reasons.append("Below Bollinger Mid")
+        bear += 1; reasons.append("Below Bollinger Mid")
 
     if row.stoch_k > row.stoch_d and row.stoch_k < 85:
-        bull += 0.75; reasons.append("Stochastic Bullish")
+        bull += 1; reasons.append("Stochastic Bullish")
     elif row.stoch_k < row.stoch_d and row.stoch_k > 15:
-        bear += 0.75; reasons.append("Stochastic Bearish")
+        bear += 1; reasons.append("Stochastic Bearish")
 
     if trend == "Bullish":
-        bull += 1.5; reasons.append("Bullish Structure")
+        bull += 1; reasons.append("Bullish Structure")
     elif trend == "Bearish":
-        bear += 1.5; reasons.append("Bearish Structure")
-    else:
-        conflicts.append("Range / Mixed Structure")
+        bear += 1; reasons.append("Bearish Structure")
 
     if "Bullish Engulfing" in pats or "Morning Star" in pats or "Three White Soldiers" in pats:
-        bull += 1.5; reasons.append("Bullish Candle Pattern")
+        bull += 1; reasons.append("Bullish Candle Pattern")
     if "Bearish Engulfing" in pats or "Evening Star" in pats or "Three Black Crows" in pats:
-        bear += 1.5; reasons.append("Bearish Candle Pattern")
+        bear += 1; reasons.append("Bearish Candle Pattern")
 
-    # Indecision patterns are not directional confirmation.
-    if any(p in pats for p in ("Doji", "Spinning Top", "Harami")):
-        conflicts.append("Indecision candle")
-
+    # Candidate gate: local analysis should identify a directional edge,
+    # while AI makes the final approval/rejection decision.
     adx_val = float(row.adx)
-    if adx_val < 15:
-        conflicts.append(f"Very weak ADX ({adx_val:.1f})")
-    elif adx_val < 20:
-        conflicts.append(f"Weak ADX ({adx_val:.1f})")
-
-    recent = x.iloc[-22:-2]
-    resistance = float(recent.high.max())
-    support = float(recent.low.min())
-    if bull > bear and resistance > price and (resistance-price)/max(price,1e-12) < 0.0008:
-        conflicts.append("Resistance very close")
-    if bear > bull and support < price and (price-support)/max(price,1e-12) < 0.0008:
-        conflicts.append("Support very close")
-
-    # Local engine now produces a CANDIDATE direction for AI instead of blocking
-    # most setups. Only near-neutral evidence is stopped locally. ADX, indecision,
-    # and nearby S/R become penalties/context for the AI validator.
-    margin = abs(bull - bear)
-    strength = max(bull, bear)
-    weak_adx_penalty = 1.5 if adx_val < 15 else 0.75 if adx_val < 20 else 0.0
-    directional = "UP" if bull > bear else "DOWN" if bear > bull else "NO SIGNAL"
+    directional = "UP" if bull > bear else ("DOWN" if bear > bull else "NO SIGNAL")
+    strength = float(max(bull, bear))
+    margin = float(abs(bull - bear))
+    weak_adx_penalty = 1.5 if adx_val < 15 else (0.75 if adx_val < 20 else 0.0)
 
     if directional == "NO SIGNAL" or strength < 3.0 or margin < 0.75:
         signal = "NO SIGNAL"
-        reason = "Evidence is too balanced or too weak to create a directional candidate."
+        reason = "Directional evidence is too neutral for an AI candidate."
     elif margin < 1.25 and len(conflicts) >= 2:
         signal = "NO SIGNAL"
-        reason = "Directional edge is small and multiple conflicts remain."
+        reason = "Directional edge is too small and conflicts are elevated."
     else:
         signal = directional
-        reason = "Directional candidate found; AI will decide whether the setup is tradable."
+        reason = "Directional candidate found; pending AI validation."
 
-    raw_score = strength + margin * 0.75 - weak_adx_penalty - len(conflicts) * 0.5
-    confidence = max(50, min(99, int(50 + raw_score * 6)))
+    if weak_adx_penalty > 0:
+        conflicts.append(f"Weak ADX caution ({adx_val:.1f})")
+
+    # Nearby resistance/support approximation from recent closed candles.
+    recent = x.iloc[-22:-2]
+    resistance = float(recent.high.max())
+    support = float(recent.low.min())
+    if signal == "UP" and resistance > price and (resistance-price)/max(price,1e-12) < 0.0008:
+        conflicts.append("Resistance very close")
+    if signal == "DOWN" and support < price and (price-support)/max(price,1e-12) < 0.0008:
+        conflicts.append("Support very close")
+
+    raw_score = max(bull, bear)
+    confidence = min(99, int(55 + raw_score * 5 - len(conflicts) * 7))
 
     return {
-        "pair": pair, "signal": signal, "price": price,
+        "pair": pair,
+        "signal": signal,
+        "price": price,
         "candle_time": datetime.fromtimestamp(float(row.timestamp), tz=timezone.utc).strftime("%H:%M:%S UTC"),
-        "bull": round(bull, 2), "bear": round(bear, 2),
-        "trend": trend, "adx": adx_val, "rsi": float(row.rsi),
-        "macd": float(row.macd), "macd_signal": float(row.macd_signal),
-        "stoch_k": float(row.stoch_k), "stoch_d": float(row.stoch_d),
-        "patterns": pats, "reasons": reasons, "conflicts": conflicts,
-        "support": support, "resistance": resistance,
-        "confidence": confidence, "data_source": "OlympTrade live candle feed",
+        "bull": bull, "bear": bear,
+        "trend": trend,
+        "adx": adx_val,
+        "rsi": float(row.rsi),
+        "macd": float(row.macd),
+        "macd_signal": float(row.macd_signal),
+        "stoch_k": float(row.stoch_k),
+        "stoch_d": float(row.stoch_d),
+        "patterns": pats,
+        "reasons": reasons,
+        "conflicts": conflicts,
+        "support": support,
+        "resistance": resistance,
+        "confidence": confidence,
+        "data_source": "OlympTrade live candle feed",
     }
-
 
 # ============================================================
 # AI VALIDATION
@@ -572,7 +572,7 @@ market structure, indicators, support/resistance and volatility/ADX context.
 
 Rules:
 - ADX below 15 is a strong caution; do not automatically reject if other evidence is aligned.
-- ADX 15-20 reduces confidence but AI may still approve a coherent setup.
+- ADX 15-20 reduces confidence but may still be approved when the setup is coherent.
 - Conflicting evidence => NO SIGNAL.
 - One candle pattern alone is never sufficient.
 - APPROVE only when the setup is coherent and sufficiently strong.
@@ -584,30 +584,161 @@ DATA:
 {json.dumps(result, ensure_ascii=False)}
 """.strip()
 
-def call_ai(prompt):
-    providers = []
-    if OPENROUTER_API_KEY:
-        providers.append((
-            "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
-            OPENROUTER_API_KEY, OPENROUTER_MODEL
-        ))
-    if AIRFORCE_API_KEY:
-        providers.append((
-            "Airforce", "https://api.airforce/v1/chat/completions",
-            AIRFORCE_API_KEY, AIRFORCE_MODEL
-        ))
-    if not providers:
-        return None, "No AI provider configured"
+def _parse_openrouter_response(data):
+    """Extract JSON from an OpenRouter response, including empty-content guards."""
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError("OpenRouter returned no choices")
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("OpenRouter returned empty content")
+    content = content.strip()
+    content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I).strip()
+    if not content:
+        raise ValueError("OpenRouter returned empty content after cleanup")
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"OpenRouter returned non-JSON content: {e}") from e
 
-    last_error = None
-    for name, url, key, model in providers:
+
+def _openrouter_request(prompt, model, include_fallback=False):
+    key = (OPENROUTER_API_KEY or "").strip()
+    if not key:
+        raise ValueError("OPENROUTER_API_KEY is empty")
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://priyanithan-ai.onrender.com",
+        "X-Title": "Priyanithan AI OlympTrade Signal Bot",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": 300,
+    }
+    if include_fallback:
+        payload["models"] = ["openrouter/free"]
+
+    r = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    parsed = _parse_openrouter_response(data)
+    served_model = data.get("model", model)
+    return parsed, served_model
+
+
+def _parse_ai_json(data):
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not choices:
+        raise ValueError("AI response contained no choices")
+    message = choices[0].get("message", {}) or {}
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("AI response contained empty content")
+    content = re.sub(r"^```json\s*|\s*```$", "", content.strip(), flags=re.I)
+    return json.loads(content)
+
+
+def _openrouter_request(prompt):
+    """Call OpenRouter using documented model fallback routing."""
+    key = (OPENROUTER_API_KEY or "").strip()
+    if not key:
+        raise RuntimeError("OpenRouter API key is not configured")
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://priyanithan-ai.onrender.com",
+        "X-Title": "Priyanithan AI OlympTrade Signal Bot",
+    }
+
+    # The models array lets OpenRouter try the primary model and then a free
+    # fallback when the primary is rate-limited/unavailable.
+    models = [OPENROUTER_MODEL]
+    if OPENROUTER_MODEL != "openrouter/free":
+        models.append("openrouter/free")
+
+    payload = {
+        "models": models,
+        "messages": [
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": 300,
+    }
+
+    r = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=25,
+    )
+    if r.status_code == 429:
+        raise RuntimeError("OpenRouter rate limit (429)")
+    r.raise_for_status()
+
+    data = r.json()
+    parsed = _parse_ai_json(data)
+    served_model = (
+        data.get("model")
+        or data.get("provider", {}).get("model")
+        or "OpenRouter fallback"
+    )
+    log.info("OpenRouter AI response served by: %s", served_model)
+    return parsed
+
+
+def call_ai(prompt):
+    global AI_LAST_CALL, AI_COOLDOWN_UNTIL
+
+    now = time.time()
+    with AI_STATE_LOCK:
+        if now < AI_COOLDOWN_UNTIL:
+            remaining = int(AI_COOLDOWN_UNTIL - now + 0.999)
+            return None, f"AI cooldown active ({remaining}s remaining)"
+        AI_LAST_CALL = now
+
+    errors = []
+
+    if OPENROUTER_API_KEY:
+        try:
+            result = _openrouter_request(prompt)
+            with AI_STATE_LOCK:
+                AI_COOLDOWN_UNTIL = 0.0
+            return result, None
+        except Exception as e:
+            msg = f"OpenRouter: {e}"
+            errors.append(msg)
+            log.warning("AI provider failed: %s", msg)
+
+            # A 429 is a temporary provider limit, not a signal rejection.
+            # Pause AI calls briefly instead of hammering the free endpoint.
+            if "429" in str(e):
+                with AI_STATE_LOCK:
+                    AI_COOLDOWN_UNTIL = time.time() + AI_COOLDOWN_SECONDS
+
+    # Airforce remains an optional fallback when configured. Do not use it
+    # during an OpenRouter cooldown if it is the same constrained path.
+    if AIRFORCE_API_KEY and not errors[-1:].__contains__("OpenRouter: OpenRouter rate limit (429)"):
         try:
             headers = {
-                "Authorization": f"Bearer {key}",
+                "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": model,
+                "model": AIRFORCE_MODEL,
                 "messages": [
                     {"role": "system", "content": "Return JSON only."},
                     {"role": "user", "content": prompt},
@@ -615,21 +746,21 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
-            if name == "OpenRouter":
-                headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
-                headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
-            r = requests.post(url, headers=headers, json=payload, timeout=25)
+            r = requests.post(
+                "https://api.airforce/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=25,
+            )
             r.raise_for_status()
-            data = r.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            # Strip accidental fenced JSON.
-            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
-            parsed = json.loads(content)
+            parsed = _parse_ai_json(r.json())
             return parsed, None
         except Exception as e:
-            last_error = f"{name}: {e}"
-            log.warning("AI provider failed: %s", last_error)
-    return None, last_error or "AI failed"
+            msg = f"Airforce: {e}"
+            errors.append(msg)
+            log.warning("AI provider failed: %s", msg)
+
+    return None, " | ".join(errors) if errors else "No AI provider configured"
 
 # ============================================================
 # TELEGRAM FORMATTING
@@ -776,7 +907,7 @@ async def signal_command(update, context):
         await msg.edit_text(format_signal(result))
         return
 
-    await msg.edit_text("🤖 Directional candidate found. AI validation running...")
+    await msg.edit_text("🤖 Strong setup found. AI validation running...")
     ai, ai_err = call_ai(ai_prompt(result))
     if ai_err:
         await msg.edit_text(
@@ -794,38 +925,95 @@ async def signal_command(update, context):
 # ============================================================
 
 async def scan_loop(application):
+    """
+    Automatic 5-minute signal cycle.
+
+    Every 5 minutes:
+      1. Read fresh OlympTrade candles.
+      2. Run technical/price-action analysis.
+      3. Send the candidate to AI validation when available.
+      4. Send an approved UP/DOWN signal to Telegram.
+
+    Important: the 5-minute cycle is guaranteed; a trade direction is NOT
+    fabricated when the data/AI rejects the setup. In that case the bot sends
+    NO SIGNAL rather than inventing a direction.
+    """
     await asyncio.sleep(20)
+
     while True:
+        cycle_started = time.time()
+
         try:
             for pair in PAIRS:
                 df, err = await get_ot_candles(pair, 60, 260)
+
                 if err:
+                    log.warning("5-minute scan skipped for %s: %s", pair, err)
                     continue
+
                 result = analyze(df, pair)
+
                 with state_lock:
                     latest_candles[pair] = df
                     latest_signal[pair] = result
 
-                # Do not force signals. Candidate setups go to AI; only AI-approved
-                # directionally matching setups are sent to Telegram.
-                if result["signal"] == "NO SIGNAL":
-                    continue
+                # Always run the AI when a directional candidate exists.
+                # The AI cooldown prevents hammering free providers.
+                if result["signal"] != "NO SIGNAL":
+                    ai, ai_err = call_ai(ai_prompt(result))
 
-                ai, ai_err = call_ai(ai_prompt(result))
-                if ai_err or not ai:
-                    continue
-                direction = ai.get("direction")
-                conf = int(ai.get("confidence", 0))
-                if ai.get("decision") == "APPROVE" and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE:
-                    text = format_signal(result, ai)
-                    for uid in list(authorized_users):
-                        try:
-                            await application.bot.send_message(chat_id=uid, text=text)
-                        except Exception as e:
-                            log.warning("Telegram signal send failed: %s", e)
+                    if ai_err or not ai:
+                        log.warning(
+                            "5-minute AI validation unavailable for %s: %s",
+                            pair, ai_err
+                        )
+                        continue
+
+                    direction = str(ai.get("direction", "NO SIGNAL")).upper()
+                    decision = str(ai.get("decision", "REJECT")).upper()
+
+                    try:
+                        conf = int(ai.get("confidence", 0))
+                    except (TypeError, ValueError):
+                        conf = 0
+
+                    if (
+                        decision == "APPROVE"
+                        and direction in ("UP", "DOWN")
+                        and direction == result["signal"]
+                        and conf >= AI_MIN_CONFIDENCE
+                    ):
+                        text = format_signal(result, ai)
+
+                        for uid in list(authorized_users):
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=uid,
+                                    text=text
+                                )
+                            except Exception as e:
+                                log.warning(
+                                    "Telegram signal send failed: %s", e
+                                )
+                    else:
+                        log.info(
+                            "5-minute candidate rejected by AI: %s %s conf=%s",
+                            pair, direction, conf
+                        )
+
+                log.info(
+                    "5-minute scan completed: %s signal=%s confidence=%s",
+                    pair, result["signal"], result["confidence"]
+                )
+
         except Exception:
-            log.exception("Scanner loop error")
-        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+            log.exception("5-minute scanner loop error")
+
+        # Keep the cycle aligned to approximately every 5 minutes without
+        # creating a tight loop after a slow API/analysis call.
+        elapsed = time.time() - cycle_started
+        sleep_for = max(1, SCAN_INTERVAL_SECONDS - elapsed)
+        await asyncio.sleep(sleep_for)
 
 # ============================================================
 # MANUAL TRADE MONITOR
