@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -36,7 +36,7 @@ OLYMPTRADE_ACCESS_TOKEN = os.getenv("OLYMPTRADE_ACCESS_TOKEN")
 
 # AI: OpenRouter is preferred when configured; Airforce remains supported.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-5.2:free")
 AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "89"))
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.5-asia-x-openrouter-free-rotation"
+APP_VERSION = "2.4-asia-x-openrouter-fallback"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -659,17 +659,12 @@ def call_ai(prompt):
     providers = []
 
     if OPENROUTER_API_KEY:
-        # Primary configured model, then several currently-listed free models.
-        # Free endpoints can be temporarily unavailable/rate-limited, so rotate
-        # through multiple models instead of failing the whole scan.
+        # Primary configured model, then OpenRouter's free router as a fallback.
         models = []
         for model in (
             OPENROUTER_MODEL,
             "openrouter/free",
             "z-ai/glm-5.2:free",
-            "nvidia/nemotron-3-ultra-550b-a55b:free",
-            "minimax/minimax-m3:free",
-            "google/gemma-4-26b-a4b-it:free",
         ):
             if model and model not in models:
                 models.append(model)
@@ -720,11 +715,7 @@ def call_ai(prompt):
                 body = r.text[:700].replace("\n", " ")
                 raise RuntimeError(f"HTTP {r.status_code}: {body}")
 
-            try:
-                data = r.json()
-            except Exception:
-                body = r.text[:1200].replace("\n", " ")
-                raise RuntimeError(f"Non-JSON AI response: {body}")
+            data = r.json()
             parsed = _parse_ai_response(data)
             log.info("🤖 AI VALIDATION OK: provider=%s model=%s", name, model)
             return parsed, None
@@ -741,48 +732,135 @@ def call_ai(prompt):
 # ============================================================
 
 async def scan_loop(application):
+    """
+    Automatic 5-minute signal cycle.
+
+    Sends a Telegram status message for every cycle:
+      - APPROVED UP/DOWN -> trade signal
+      - AI rejected -> NO SIGNAL + reason
+      - data/AI unavailable -> diagnostic message
+
+    Auto-trading remains OFF; this function only sends Telegram messages.
+    """
     await asyncio.sleep(20)
+
     while True:
+        cycle_started = time.time()
         try:
-            log.info("🔄 AUTO SCAN START — interval=%ss pairs=%s", SCAN_INTERVAL_SECONDS, PAIRS)
             for pair in PAIRS:
-                log.info("🔎 AUTO SCAN: requesting candles for %s", pair)
+                recipients = list(authorized_users)
+                if not recipients:
+                    log.warning("AUTO SCAN: no authorized Telegram users; use /access YOUR_CODE")
+                    continue
+
                 df, err = await get_ot_candles(pair, 60, 260)
+
                 if err:
-                    log.warning("🚫 AUTO SCAN DATA ERROR for %s: %s", pair, err)
+                    msg = (
+                        "⚠️ 5-MINUTE SCAN\n\n"
+                        f"📈 {pair}\n"
+                        "❌ LIVE DATA UNAVAILABLE\n\n"
+                        f"{err}"
+                    )
+                    for uid in recipients:
+                        try:
+                            await application.bot.send_message(chat_id=uid, text=msg)
+                        except Exception as e:
+                            log.warning("Telegram scan status send failed: %s", e)
                     continue
-                log.info("📊 AUTO SCAN ANALYZING %s with %s candles", pair, len(df))
-                if err:
-                    continue
+
                 result = analyze(df, pair)
                 with state_lock:
                     latest_candles[pair] = df
                     latest_signal[pair] = result
 
-                log.info("🧠 AUTO SCAN RESULT: pair=%s signal=%s bull=%s bear=%s ADX=%.1f",
-                         pair, result["signal"], result["bull"], result["bear"], result["adx"])
-
-                # No forced signals. Only notify when the setup passes local filters
-                # and AI also approves at the configured threshold.
                 if result["signal"] == "NO SIGNAL":
-                    log.info("⏳ AUTO SCAN: NO SIGNAL for %s", pair)
+                    msg = (
+                        "🚫 NO SIGNAL\n\n"
+                        f"📈 {pair}\n"
+                        f"🕐 {result.get('candle_time', 'N/A')}\n\n"
+                        "📊 Technical analysis did not find a strong setup.\n"
+                        f"📈 Trend: {result.get('trend', 'N/A')}\n"
+                        f"📊 RSI: {result.get('rsi', 0):.1f}\n"
+                        f"💪 ADX: {result.get('adx', 0):.1f}\n\n"
+                        "⏳ Waiting for a stronger setup..."
+                    )
+                    for uid in recipients:
+                        try:
+                            await application.bot.send_message(chat_id=uid, text=msg)
+                        except Exception as e:
+                            log.warning("Telegram NO SIGNAL send failed: %s", e)
                     continue
 
                 ai, ai_err = call_ai(ai_prompt(result))
+
                 if ai_err or not ai:
-                    continue
-                direction = ai.get("direction")
-                conf = int(ai.get("confidence", 0))
-                if ai.get("decision") == "APPROVE" and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE:
-                    text = format_signal(result, ai)
-                    for uid in list(authorized_users):
+                    msg = (
+                        "⚠️ AI VALIDATION UNAVAILABLE\n\n"
+                        f"📈 {pair}\n"
+                        f"📊 Technical candidate: {result['signal']}\n"
+                        f"📊 Technical confidence: {result.get('confidence', 0)}%\n\n"
+                        f"❌ {ai_err or 'No AI response'}\n\n"
+                        "🚫 No trade signal generated."
+                    )
+                    for uid in recipients:
                         try:
-                            await application.bot.send_message(chat_id=uid, text=text)
+                            await application.bot.send_message(chat_id=uid, text=msg)
                         except Exception as e:
-                            log.warning("Telegram signal send failed: %s", e)
+                            log.warning("Telegram AI status send failed: %s", e)
+                    continue
+
+                direction = str(ai.get("direction", "NO SIGNAL")).upper()
+                decision = str(ai.get("decision", "REJECT")).upper()
+                try:
+                    conf = int(ai.get("confidence", 0))
+                except (TypeError, ValueError):
+                    conf = 0
+
+                approved = (
+                    decision == "APPROVE"
+                    and direction in ("UP", "DOWN")
+                    and direction == result["signal"]
+                    and conf >= AI_MIN_CONFIDENCE
+                )
+
+                if approved:
+                    msg = format_signal(result, ai)
+                else:
+                    reason = str(
+                        ai.get("reason")
+                        or ai.get("analysis")
+                        or "AI rejected the setup."
+                    )
+                    msg = (
+                        "🚫 NO SIGNAL\n\n"
+                        f"📈 {pair}\n"
+                        f"🕐 {result.get('candle_time', 'N/A')}\n\n"
+                        f"📊 Technical candidate: {result['signal']}\n"
+                        f"📊 Technical confidence: {result.get('confidence', 0)}%\n"
+                        f"🤖 AI decision: {decision}\n"
+                        f"🧭 AI direction: {direction}\n"
+                        f"📊 AI confidence: {conf}%\n\n"
+                        f"⚠️ Reason: {reason}\n\n"
+                        "⏳ Waiting for stronger confirmation..."
+                    )
+
+                for uid in recipients:
+                    try:
+                        await application.bot.send_message(chat_id=uid, text=msg)
+                    except Exception as e:
+                        log.warning("Telegram scan message send failed: %s", e)
+
+                log.info(
+                    "5-minute scan completed: %s signal=%s confidence=%s",
+                    pair, result["signal"], result.get("confidence", 0)
+                )
+
         except Exception:
             log.exception("Scanner loop error")
-        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+
+        elapsed = time.time() - cycle_started
+        await asyncio.sleep(max(1, SCAN_INTERVAL_SECONDS - elapsed))
 
 # ============================================================
 # MANUAL TRADE MONITOR
