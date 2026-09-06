@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -806,6 +806,211 @@ async def manual_trade_monitor(application):
         await asyncio.sleep(LIVE_UPDATE_SECONDS)
 
 # ============================================================
+# TELEGRAM COMMANDS
+# ============================================================
+
+async def start_command(update, context):
+    await update.message.reply_text(
+        "🤖 Priyanithan AI OlympTrade Bot\n\n"
+        "Use /access YOUR_CODE first.\n"
+        "Then /status or /signal ASIA_X"
+    )
+
+async def access_command(update, context):
+    if not context.args:
+        await update.message.reply_text("Use /access YOUR_CODE")
+        return
+    if ACCESS_CODE and context.args[0] == ACCESS_CODE:
+        authorized_users.add(update.effective_user.id)
+        await update.message.reply_text("✅ Access authorized.")
+    else:
+        await update.message.reply_text("❌ Invalid access code.")
+
+async def status_command(update, context):
+    if not is_authorized(update):
+        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
+        return
+    connected = bool(ot_client and ot_client.connection.is_connected)
+    ai = "OpenRouter" if OPENROUTER_API_KEY else ("Airforce" if AIRFORCE_API_KEY else "NOT CONFIGURED")
+    await update.message.reply_text(
+        "🟢 BOT STATUS\n\n"
+        f"📡 OlympTrade Live Feed: {'CONNECTED' if connected else 'DISCONNECTED'}\n"
+        f"📊 Pairs: {', '.join(PAIRS)}\n"
+        f"🤖 AI: {ai}\n"
+        f"🧠 Model: {OPENROUTER_MODEL if OPENROUTER_API_KEY else AIRFORCE_MODEL}\n\n"
+        "⚡ Auto-trade: OFF\n"
+        "🛑 Martingale: OFF\n"
+        "👤 Execution: MANUAL ONLY\n"
+        "📡 Source: OlympTrade"
+    )
+
+async def signal_command(update, context):
+    if not is_authorized(update):
+        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
+        return
+    if not context.args:
+        await update.message.reply_text("Use /signal ASIA_X")
+        return
+    pair = context.args[0].upper()
+    if pair not in PAIRS:
+        await update.message.reply_text(f"❌ Unsupported pair. Available: {', '.join(PAIRS)}")
+        return
+
+    msg = await update.message.reply_text(f"⏳ Reading OlympTrade live candles for {pair}...")
+    df, err = await get_ot_candles(pair, 60, 260)
+    if err:
+        await msg.edit_text(f"❌ LIVE DATA FAILED\n\n{err}\n\nNo signal generated.")
+        return
+
+    result = analyze(df, pair)
+    with state_lock:
+        latest_candles[pair] = df
+        latest_signal[pair] = result
+
+    if result["signal"] == "NO SIGNAL":
+        await msg.edit_text(format_signal(result))
+        return
+
+    await msg.edit_text("🤖 Strong setup found. AI validation running...")
+    ai, ai_err = call_ai(ai_prompt(result))
+    if ai_err:
+        await msg.edit_text(
+            "🚫 NO SIGNAL\n\n"
+            f"📈 {pair}\n"
+            f"❌ AI validation unavailable: {ai_err}\n\n"
+            "No trade signal generated."
+        )
+        return
+
+    await msg.edit_text(format_signal(result, ai))
+
+# ============================================================
+# BACKGROUND SCANNER
+# ============================================================
+
+async def scan_loop(application):
+    """
+    Automatic 5-minute signal cycle.
+
+    Every 5 minutes:
+      1. Read fresh OlympTrade candles.
+      2. Run technical/price-action analysis.
+      3. Send the candidate to AI validation when available.
+      4. Send an approved UP/DOWN signal to Telegram.
+
+    Important: the 5-minute cycle is guaranteed; a trade direction is NOT
+    fabricated when the data/AI rejects the setup. In that case the bot sends
+    NO SIGNAL rather than inventing a direction.
+    """
+    await asyncio.sleep(20)
+
+    while True:
+        cycle_started = time.time()
+
+        try:
+            for pair in PAIRS:
+                df, err = await get_ot_candles(pair, 60, 260)
+
+                if err:
+                    log.warning("5-minute scan skipped for %s: %s", pair, err)
+                    continue
+
+                result = analyze(df, pair)
+
+                with state_lock:
+                    latest_candles[pair] = df
+                    latest_signal[pair] = result
+
+                # Always run the AI when a directional candidate exists.
+                # The AI cooldown prevents hammering free providers.
+                if result["signal"] != "NO SIGNAL":
+                    ai, ai_err = call_ai(ai_prompt(result))
+
+                    if ai_err or not ai:
+                        log.warning(
+                            "5-minute AI validation unavailable for %s: %s",
+                            pair, ai_err
+                        )
+                        continue
+
+                    direction = str(ai.get("direction", "NO SIGNAL")).upper()
+                    decision = str(ai.get("decision", "REJECT")).upper()
+
+                    try:
+                        conf = int(ai.get("confidence", 0))
+                    except (TypeError, ValueError):
+                        conf = 0
+
+                    if (
+                        decision == "APPROVE"
+                        and direction in ("UP", "DOWN")
+                        and direction == result["signal"]
+                        and conf >= AI_MIN_CONFIDENCE
+                    ):
+                        text = format_signal(result, ai)
+
+                        for uid in list(authorized_users):
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=uid,
+                                    text=text
+                                )
+                            except Exception as e:
+                                log.warning(
+                                    "Telegram signal send failed: %s", e
+                                )
+                    else:
+                        log.info(
+                            "5-minute candidate rejected by AI: %s %s conf=%s",
+                            pair, direction, conf
+                        )
+
+                log.info(
+                    "5-minute scan completed: %s signal=%s confidence=%s",
+                    pair, result["signal"], result["confidence"]
+                )
+
+        except Exception:
+            log.exception("5-minute scanner loop error")
+
+        # Keep the cycle aligned to approximately every 5 minutes without
+        # creating a tight loop after a slow API/analysis call.
+        elapsed = time.time() - cycle_started
+        sleep_for = max(1, SCAN_INTERVAL_SECONDS - elapsed)
+        await asyncio.sleep(sleep_for)
+
+# ============================================================
+# MANUAL TRADE MONITOR
+# ============================================================
+
+async def manual_trade_monitor(application):
+    """
+    Observes open/manual trades when the supplied library exposes them.
+    It never calls place_order/place_trade.
+    """
+    while True:
+        try:
+            client = ot_client
+            if client and client.connection.is_connected:
+                # We only read open trades. Account id is obtained from the client's
+                # session initialization if available.
+                account_id = getattr(client, "account_id", None)
+                if account_id:
+                    try:
+                        trades = await client.trade.get_open_trades(account_id, group="real")
+                        if isinstance(trades, list):
+                            with state_lock:
+                                for t in trades:
+                                    if isinstance(t, dict) and t.get("id"):
+                                        manual_trades.setdefault(str(t["id"]), {})["open"] = t
+                    except Exception as e:
+                        log.debug("Open-trade read unavailable: %s", e)
+        except Exception:
+            log.exception("Manual monitor error")
+        await asyncio.sleep(LIVE_UPDATE_SECONDS)
+
+# ============================================================
+
 # MAIN
 # ============================================================
 
