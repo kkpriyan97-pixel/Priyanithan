@@ -664,7 +664,6 @@ def call_ai(prompt):
         for model in (
             OPENROUTER_MODEL,
             "openrouter/free",
-            "z-ai/glm-5.2:free",
         ):
             if model and model not in models:
                 models.append(model)
@@ -959,7 +958,15 @@ async def signal_command(update, context):
         return
 
     await msg.edit_text("🤖 Strong setup found. AI validation running...")
-    ai, ai_err = call_ai(ai_prompt(result))
+    log.info("SIGNAL AI START: pair=%s", pair)
+    try:
+        ai, ai_err = await asyncio.wait_for(
+            asyncio.to_thread(call_ai, ai_prompt(result)),
+            timeout=90,
+        )
+    except asyncio.TimeoutError:
+        ai, ai_err = None, "AI validation timed out after 90 seconds"
+    log.info("SIGNAL AI END: pair=%s error=%s", pair, ai_err)
     if ai_err:
         await msg.edit_text(
             "🚫 NO SIGNAL\n\n"
@@ -969,8 +976,15 @@ async def signal_command(update, context):
         )
         return
 
-    await msg.edit_text(format_signal(result, ai))
-
+    final_text = format_signal(result, ai)
+    log.info(
+        "SIGNAL FINAL: pair=%s decision=%s direction=%s confidence=%s",
+        pair,
+        ai.get("decision", "N/A") if isinstance(ai, dict) else "N/A",
+        ai.get("direction", "N/A") if isinstance(ai, dict) else "N/A",
+        ai.get("confidence", "N/A") if isinstance(ai, dict) else "N/A",
+    )
+    await msg.edit_text(final_text)
 # ============================================================
 # BACKGROUND SCANNER
 # ============================================================
@@ -1011,8 +1025,15 @@ async def scan_loop(application):
                 # Always run the AI when a directional candidate exists.
                 # The AI cooldown prevents hammering free providers.
                 if result["signal"] != "NO SIGNAL":
-                    ai, ai_err = call_ai(ai_prompt(result))
-
+                    log.info("5-minute AI START: pair=%s", pair)
+                    try:
+                        ai, ai_err = await asyncio.wait_for(
+                            asyncio.to_thread(call_ai, ai_prompt(result)),
+                            timeout=90,
+                        )
+                    except asyncio.TimeoutError:
+                        ai, ai_err = None, "AI validation timed out after 90 seconds"
+                    log.info("5-minute AI END: pair=%s error=%s", pair, ai_err)
                     if ai_err or not ai:
                         log.warning(
                             "5-minute AI validation unavailable for %s: %s",
