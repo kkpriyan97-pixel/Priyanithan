@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -741,11 +741,12 @@ def _openrouter_request(prompt, model):
 def call_ai(prompt):
     global AI_LAST_CALL, AI_COOLDOWN_UNTIL
 
+    # IMPORTANT:
+    # The scanner runs every 5 minutes. A provider cooldown must NEVER block
+    # the next scan cycle. Cooldown is only used to avoid immediate hammering
+    # inside the same AI call.
     now = time.time()
     with AI_STATE_LOCK:
-        if now < AI_COOLDOWN_UNTIL:
-            remaining = int(AI_COOLDOWN_UNTIL - now + 0.999)
-            return None, f"AI cooldown active ({remaining}s remaining)"
         AI_LAST_CALL = now
 
     if not OPENROUTER_API_KEY and not AIRFORCE_API_KEY:
@@ -754,9 +755,8 @@ def call_ai(prompt):
     errors = []
 
     if OPENROUTER_API_KEY:
-        # IMPORTANT:
-        # A 429 from one model must NOT stop the fallback chain.
-        # Try every configured free route independently.
+        # Each model is attempted independently. A 429/empty response from
+        # one model does not prevent the next fallback model from being tried.
         models = []
         for model in (
             OPENROUTER_MODEL,
@@ -765,8 +765,6 @@ def call_ai(prompt):
         ):
             if model and model not in models:
                 models.append(model)
-
-        got_429 = False
 
         for model in models:
             try:
@@ -780,20 +778,10 @@ def call_ai(prompt):
                 errors.append(msg)
                 log.warning("AI provider failed: %s", msg)
 
-                if "429" in str(e):
-                    got_429 = True
-                    # DO NOT break. The next fallback model may still be
-                    # available even if the primary model is rate-limited.
-                    continue
+                # Do NOT set a global cooldown here.
+                # The next fallback model must be attempted immediately.
 
-        # Only after every OpenRouter fallback was tried do we apply a short
-        # cooldown to avoid hammering the free service on repeated cycles.
-        if got_429:
-            with AI_STATE_LOCK:
-                AI_COOLDOWN_UNTIL = time.time() + AI_COOLDOWN_SECONDS
-
-    # Airforce is independent; try it if configured and OpenRouter did not
-    # produce a valid response.
+    # Independent provider fallback.
     if AIRFORCE_API_KEY:
         try:
             headers = {
@@ -823,6 +811,8 @@ def call_ai(prompt):
             errors.append(msg)
             log.warning("AI provider failed: %s", msg)
 
+    # All providers failed for THIS 5-minute cycle.
+    # The next scheduled cycle will automatically try again from the start.
     return None, " | ".join(errors) if errors else "AI validation failed"
 
 # ============================================================
