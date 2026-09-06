@@ -535,15 +535,34 @@ def analyze(df, pair):
     margin = float(abs(bull - bear))
     directional = "UP" if bull > bear else ("DOWN" if bear > bull else "NO SIGNAL")
 
+    core_up = (
+        row.ema9 > row.ema21
+        and row.macd > row.macd_signal
+        and row.macd_hist > 0
+        and trend == "Bullish"
+    )
+    core_down = (
+        row.ema9 < row.ema21
+        and row.macd < row.macd_signal
+        and row.macd_hist < 0
+        and trend == "Bearish"
+    )
+
     if directional == "NO SIGNAL" or strength < 3.0 or margin < 0.75:
         signal = "NO SIGNAL"
         reason = "Directional evidence is not strong/coherent enough."
+    elif directional == "UP" and not core_up:
+        signal = "NO SIGNAL"
+        reason = "Core confirmation conflict: EMA, MACD and market structure are not aligned bullish."
+    elif directional == "DOWN" and not core_down:
+        signal = "NO SIGNAL"
+        reason = "Core confirmation conflict: EMA, MACD and market structure are not aligned bearish."
     elif margin < 1.25 and len(conflicts) >= 2:
         signal = "NO SIGNAL"
         reason = "Too much conflicting evidence near the directional boundary."
     else:
         signal = directional
-        reason = "Directional multi-factor setup; pending AI validation."
+        reason = "Core EMA + MACD + structure aligned; pending AI validation."
 
     if adx_val < 15:
         conflicts.append(f"Very weak ADX ({adx_val:.1f})")
@@ -581,6 +600,7 @@ def analyze(df, pair):
         "support": support,
         "resistance": resistance,
         "confidence": confidence,
+        "reason": reason,
         "data_source": "OlympTrade live candle feed",
     }
 
@@ -786,6 +806,7 @@ async def scan_loop(application):
                         f"📈 {pair}\n"
                         f"🕐 {result.get('candle_time', 'N/A')}\n\n"
                         "📊 Technical analysis did not find a strong setup.\n"
+                        f"🧭 Reason: {result.get('reason', 'No coherent setup.')}\n"
                         f"📈 Trend: {result.get('trend', 'N/A')}\n"
                         f"📊 RSI: {result.get('rsi', 0):.1f}\n"
                         f"💪 ADX: {result.get('adx', 0):.1f}\n\n"
@@ -798,7 +819,15 @@ async def scan_loop(application):
                             log.warning("Telegram NO SIGNAL send failed: %s", e)
                     continue
 
-                ai, ai_err = call_ai(ai_prompt(result))
+                log.info("5-minute AI START: pair=%s", pair)
+                try:
+                    ai, ai_err = await asyncio.wait_for(
+                        asyncio.to_thread(call_ai, ai_prompt(result)),
+                        timeout=90,
+                    )
+                except asyncio.TimeoutError:
+                    ai, ai_err = None, "AI validation timed out after 90 seconds"
+                log.info("5-minute AI END: pair=%s error=%s", pair, ai_err)
 
                 if ai_err or not ai:
                     msg = (
