@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -845,6 +845,7 @@ async def scan_loop(application):
                             log.warning("Telegram AI status send failed: %s", e)
                     continue
 
+                log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision", "N/A"), ai.get("direction", "N/A"), ai.get("confidence", "N/A"), str(ai.get("reason", ai.get("analysis", "N/A")))[:500])
                 direction = str(ai.get("direction", "NO SIGNAL")).upper()
                 decision = str(ai.get("decision", "REJECT")).upper()
                 try:
@@ -1071,6 +1072,8 @@ async def signal_command(update, context):
         )
         return
 
+    if ai:
+        log.info("AI DECISION DETAIL MANUAL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision", "N/A"), ai.get("direction", "N/A"), ai.get("confidence", "N/A"), str(ai.get("reason", ai.get("analysis", "N/A")))[:500])
     final_text = format_signal(result, ai)
     log.info(
         "SIGNAL FINAL: pair=%s decision=%s direction=%s confidence=%s",
