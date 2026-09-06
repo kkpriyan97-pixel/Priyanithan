@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -68,7 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("priyanithan")
 
-APP_VERSION = "2.3-mtf-price-action"
+APP_VERSION = "2.2-asia-x-live-tick-candles"
 app = Flask(__name__)
 authorized_users = set()
 
@@ -353,23 +353,6 @@ async def get_ot_candles(pair, size=60, count=260):
 
     return df, None
 
-async def get_mtf_context(pair):
-    """Read-only multi-timeframe confirmation from OlympTrade historical candles."""
-    contexts = {}
-    for label, size in (("5m", 300), ("15m", 900)):
-        df, err = await get_ot_candles(pair, size, 220)
-        if err or df is None or len(df) < 60:
-            contexts[label] = {"trend": "UNAVAILABLE", "adx": None, "error": err}
-            continue
-        r = analyze(df, pair)
-        contexts[label] = {
-            "trend": r["trend"],
-            "adx": round(float(r["adx"]), 1),
-            "signal": r["signal"],
-            "rsi": round(float(r["rsi"]), 1),
-        }
-    return contexts
-
 # ============================================================
 # TECHNICAL / PRICE ACTION ENGINE
 # ============================================================
@@ -536,35 +519,7 @@ def analyze(df, pair):
     if signal == "DOWN" and support < price and (price-support)/max(price,1e-12) < 0.0008:
         conflicts.append("Support very close")
 
-    # Price-action confirmation.
-    pa_score = 0
-    if len(x) >= 6:
-        last = x.iloc[-2]
-        prev5 = x.iloc[-7:-2]
-        recent_high = float(prev5["high"].max())
-        recent_low = float(prev5["low"].min())
-        body = abs(float(last.close) - float(last.open))
-        rng = max(float(last.high) - float(last.low), 1e-12)
-        body_ratio = body / rng
-        if last.close > last.open and body_ratio >= 0.55:
-            pa_score += 1
-            reasons.append("Bullish Price Action")
-        elif last.close < last.open and body_ratio >= 0.55:
-            pa_score -= 1
-            reasons.append("Bearish Price Action")
-        if float(last.close) > recent_high:
-            pa_score += 1
-            reasons.append("Breakout Above Recent High")
-        elif float(last.close) < recent_low:
-            pa_score -= 1
-            reasons.append("Breakout Below Recent Low")
-
-    if signal == "UP" and pa_score < 0:
-        conflicts.append("Price action disagrees")
-    if signal == "DOWN" and pa_score > 0:
-        conflicts.append("Price action disagrees")
-
-    raw_score = max(bull, bear) + max(0, abs(pa_score))
+    raw_score = max(bull, bear)
     confidence = min(99, int(55 + raw_score * 5 - len(conflicts) * 7))
 
     return {
@@ -610,35 +565,23 @@ Rules:
 
 DATA:
 {json.dumps(result, ensure_ascii=False)}
-
-MULTI-TIMEFRAME CONTEXT:
-{json.dumps(result.get("mtf", {}), ensure_ascii=False)}
 """.strip()
 
 def call_ai(prompt):
-    providers = []
+    """Call OpenRouter with GLM primary + free-router fallback."""
     if OPENROUTER_API_KEY:
-        providers.append((
-            "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
-            OPENROUTER_API_KEY, OPENROUTER_MODEL
-        ))
-    if AIRFORCE_API_KEY:
-        providers.append((
-            "Airforce", "https://api.airforce/v1/chat/completions",
-            AIRFORCE_API_KEY, AIRFORCE_MODEL
-        ))
-    if not providers:
-        return None, "No AI provider configured"
-
-    last_error = None
-    for name, url, key, model in providers:
         try:
+            key = OPENROUTER_API_KEY.strip()
+            primary_model = OPENROUTER_MODEL.strip() or "z-ai/glm-5.2:free"
             headers = {
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
+                "HTTP-Referer": "https://priyanithan-ai.onrender.com",
+                "X-Title": "Priyanithan AI OlympTrade Signal Bot",
             }
             payload = {
-                "model": model,
+                "model": primary_model,
+                "models": ["openrouter/free"],
                 "messages": [
                     {"role": "system", "content": "Return JSON only."},
                     {"role": "user", "content": prompt},
@@ -646,21 +589,77 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
-            if name == "OpenRouter":
-                headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
-                headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
-            r = requests.post(url, headers=headers, json=payload, timeout=25)
+            r = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
             r.raise_for_status()
             data = r.json()
             content = data["choices"][0]["message"]["content"].strip()
-            # Strip accidental fenced JSON.
             content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
             parsed = json.loads(content)
+            served_model = data.get("model", primary_model)
+            log.info("AI validation succeeded via OpenRouter model: %s", served_model)
             return parsed, None
         except Exception as e:
-            last_error = f"{name}: {e}"
-            log.warning("AI provider failed: %s", last_error)
-    return None, last_error or "AI failed"
+            last_error = f"OpenRouter: {e}"
+            log.warning("OpenRouter primary/fallback failed: %s", last_error)
+            # Airforce remains an optional secondary provider if configured.
+            if AIRFORCE_API_KEY:
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
+                        "Content-Type": "application/json",
+                    }
+                    payload = {
+                        "model": AIRFORCE_MODEL,
+                        "messages": [
+                            {"role": "system", "content": "Return JSON only."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0,
+                        "max_tokens": 300,
+                    }
+                    r = requests.post(
+                        "https://api.airforce/v1/chat/completions",
+                        headers=headers, json=payload, timeout=25
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
+                    return json.loads(content), None
+                except Exception as e:
+                    return None, f"{last_error}; Airforce: {e}"
+            return None, last_error
+
+    if AIRFORCE_API_KEY:
+        try:
+            headers = {
+                "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": AIRFORCE_MODEL,
+                "messages": [
+                    {"role": "system", "content": "Return JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+                "max_tokens": 300,
+            }
+            r = requests.post("https://api.airforce/v1/chat/completions", headers=headers, json=payload, timeout=25)
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
+            return json.loads(content), None
+        except Exception as e:
+            return None, f"Airforce: {e}"
+
+    return None, "No AI provider configured"
 
 # ============================================================
 # TELEGRAM FORMATTING
@@ -799,15 +798,6 @@ async def signal_command(update, context):
         return
 
     result = analyze(df, pair)
-    result["mtf"] = await get_mtf_context(pair)
-    mtf = result["mtf"]
-    trends = [v["trend"] for v in mtf.values() if v.get("trend") in ("Bullish", "Bearish")]
-    if result["signal"] == "UP" and trends and trends.count("Bearish") >= len(trends) / 2:
-        result["signal"] = "NO SIGNAL"
-        result["conflicts"].append("Higher-timeframe trend is bearish")
-    elif result["signal"] == "DOWN" and trends and trends.count("Bullish") >= len(trends) / 2:
-        result["signal"] = "NO SIGNAL"
-        result["conflicts"].append("Higher-timeframe trend is bullish")
     with state_lock:
         latest_candles[pair] = df
         latest_signal[pair] = result
