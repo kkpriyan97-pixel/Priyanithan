@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -567,78 +567,104 @@ DATA:
 {json.dumps(result, ensure_ascii=False)}
 """.strip()
 
+def _parse_openrouter_response(data):
+    """Extract JSON from an OpenRouter response, including empty-content guards."""
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError("OpenRouter returned no choices")
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("OpenRouter returned empty content")
+    content = content.strip()
+    content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I).strip()
+    if not content:
+        raise ValueError("OpenRouter returned empty content after cleanup")
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"OpenRouter returned non-JSON content: {e}") from e
+
+
+def _openrouter_request(prompt, model, include_fallback=False):
+    key = (OPENROUTER_API_KEY or "").strip()
+    if not key:
+        raise ValueError("OPENROUTER_API_KEY is empty")
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://priyanithan-ai.onrender.com",
+        "X-Title": "Priyanithan AI OlympTrade Signal Bot",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": 300,
+    }
+    if include_fallback:
+        payload["models"] = ["openrouter/free"]
+
+    r = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    parsed = _parse_openrouter_response(data)
+    served_model = data.get("model", model)
+    return parsed, served_model
+
+
 def call_ai(prompt):
-    """Call OpenRouter with GLM primary + free-router fallback."""
+    """Call GLM first, then OpenRouter's free router, then optional Airforce.
+
+    A successful HTTP response with null/empty content is treated as a failed
+    AI attempt and retried with the explicit free router, because OpenRouter
+    model fallbacks are triggered by classified errors, not by a 200 response
+    containing unusable output.
+    """
+    errors = []
+
     if OPENROUTER_API_KEY:
+        primary_model = (OPENROUTER_MODEL or "z-ai/glm-5.2:free").strip()
+
+        # Attempt 1: configured primary model with OpenRouter model fallback.
         try:
-            key = OPENROUTER_API_KEY.strip()
-            primary_model = OPENROUTER_MODEL.strip() or "z-ai/glm-5.2:free"
-            headers = {
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://priyanithan-ai.onrender.com",
-                "X-Title": "Priyanithan AI OlympTrade Signal Bot",
-            }
-            payload = {
-                "model": primary_model,
-                "models": ["openrouter/free"],
-                "messages": [
-                    {"role": "system", "content": "Return JSON only."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-                "max_tokens": 300,
-            }
-            r = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30,
+            parsed, served_model = _openrouter_request(
+                prompt, primary_model, include_fallback=True
             )
-            r.raise_for_status()
-            data = r.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
-            parsed = json.loads(content)
-            served_model = data.get("model", primary_model)
             log.info("AI validation succeeded via OpenRouter model: %s", served_model)
             return parsed, None
         except Exception as e:
-            last_error = f"OpenRouter: {e}"
-            log.warning("OpenRouter primary/fallback failed: %s", last_error)
-            # Airforce remains an optional secondary provider if configured.
-            if AIRFORCE_API_KEY:
-                try:
-                    headers = {
-                        "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
-                        "Content-Type": "application/json",
-                    }
-                    payload = {
-                        "model": AIRFORCE_MODEL,
-                        "messages": [
-                            {"role": "system", "content": "Return JSON only."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0,
-                        "max_tokens": 300,
-                    }
-                    r = requests.post(
-                        "https://api.airforce/v1/chat/completions",
-                        headers=headers, json=payload, timeout=25
-                    )
-                    r.raise_for_status()
-                    data = r.json()
-                    content = data["choices"][0]["message"]["content"].strip()
-                    content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
-                    return json.loads(content), None
-                except Exception as e:
-                    return None, f"{last_error}; Airforce: {e}"
-            return None, last_error
+            err = f"OpenRouter primary/fallback: {e}"
+            errors.append(err)
+            log.warning(err)
 
+        # Attempt 2: explicit Free Models Router. This also handles the case
+        # where a provider returned HTTP 200 but no usable message content.
+        try:
+            parsed, served_model = _openrouter_request(
+                prompt, "openrouter/free", include_fallback=False
+            )
+            log.info("AI validation succeeded via OpenRouter free router: %s", served_model)
+            return parsed, None
+        except Exception as e:
+            err = f"OpenRouter free router: {e}"
+            errors.append(err)
+            log.warning(err)
+
+    # Optional secondary provider. Never used for order placement.
     if AIRFORCE_API_KEY:
         try:
+            key = AIRFORCE_API_KEY.strip()
             headers = {
-                "Authorization": f"Bearer {AIRFORCE_API_KEY.strip()}",
+                "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             }
             payload = {
@@ -650,16 +676,20 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
-            r = requests.post("https://api.airforce/v1/chat/completions", headers=headers, json=payload, timeout=25)
+            r = requests.post(
+                "https://api.airforce/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=25,
+            )
             r.raise_for_status()
             data = r.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
-            return json.loads(content), None
+            parsed = _parse_openrouter_response(data)
+            return parsed, None
         except Exception as e:
-            return None, f"Airforce: {e}"
+            errors.append(f"Airforce: {e}")
 
-    return None, "No AI provider configured"
+    return None, "; ".join(errors) if errors else "No AI provider configured"
 
 # ============================================================
 # TELEGRAM FORMATTING
