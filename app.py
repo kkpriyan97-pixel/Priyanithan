@@ -1,4 +1,4 @@
-import asyncio
+
 import io
 import json
 import logging
@@ -421,10 +421,11 @@ def structure(df):
     return trend
 
 def analyze(df, pair):
+    """Weighted setup scoring: strong aligned evidence can reach AI validation
+    without requiring every indicator to agree. Conflicts still reduce the score.
+    """
     x = df.copy()
-    close = x["close"]
-    high = x["high"]
-    low = x["low"]
+    close, high, low = x["close"], x["high"], x["low"]
 
     x["ema9"] = EMAIndicator(close, 9).ema_indicator()
     x["ema21"] = EMAIndicator(close, 21).ema_indicator()
@@ -435,7 +436,6 @@ def analyze(df, pair):
     x["macd"] = macd.macd()
     x["macd_signal"] = macd.macd_signal()
     x["macd_hist"] = macd.macd_diff()
-
     x["rsi"] = RSIIndicator(close, 14).rsi()
 
     bb = BollingerBands(close, 20, 2)
@@ -450,99 +450,117 @@ def analyze(df, pair):
     adx = ADXIndicator(high, low, close, 14)
     x["adx"] = adx.adx()
 
-    row = x.iloc[-2]  # closed candle
+    row = x.iloc[-2]
     price = float(row.close)
     pats = candle_patterns(x)
     trend = structure(x)
 
-    bull = 0
-    bear = 0
+    bull = 0.0
+    bear = 0.0
     reasons = []
     conflicts = []
 
+    # Weighted evidence. Trend/structure and momentum receive more weight;
+    # weak/ranging conditions reduce confidence rather than hard-blocking first.
     if row.ema9 > row.ema21:
-        bull += 1; reasons.append("EMA 9/21 Bullish")
+        bull += 1.5; reasons.append("EMA 9/21 Bullish")
     elif row.ema9 < row.ema21:
-        bear += 1; reasons.append("EMA 9/21 Bearish")
+        bear += 1.5; reasons.append("EMA 9/21 Bearish")
+
+    if row.ema50 > row.ema200:
+        bull += 1.0; reasons.append("EMA 50/200 Bullish")
+    elif row.ema50 < row.ema200:
+        bear += 1.0; reasons.append("EMA 50/200 Bearish")
 
     if row.macd > row.macd_signal and row.macd_hist > 0:
-        bull += 1; reasons.append("MACD Bullish")
+        bull += 1.5; reasons.append("MACD Bullish")
     elif row.macd < row.macd_signal and row.macd_hist < 0:
-        bear += 1; reasons.append("MACD Bearish")
+        bear += 1.5; reasons.append("MACD Bearish")
 
-    if 50 < row.rsi < 70:
-        bull += 1; reasons.append("RSI Momentum")
-    elif 30 < row.rsi < 50:
-        bear += 1; reasons.append("RSI Momentum")
+    if 52 < row.rsi < 68:
+        bull += 1.0; reasons.append("RSI Bullish Momentum")
+    elif 32 < row.rsi < 48:
+        bear += 1.0; reasons.append("RSI Bearish Momentum")
     elif row.rsi >= 70:
         conflicts.append("RSI Overbought")
     elif row.rsi <= 30:
         conflicts.append("RSI Oversold")
 
     if price > row.bb_mid:
-        bull += 1; reasons.append("Above Bollinger Mid")
+        bull += 0.75; reasons.append("Above Bollinger Mid")
     elif price < row.bb_mid:
-        bear += 1; reasons.append("Below Bollinger Mid")
+        bear += 0.75; reasons.append("Below Bollinger Mid")
 
     if row.stoch_k > row.stoch_d and row.stoch_k < 85:
-        bull += 1; reasons.append("Stochastic Bullish")
+        bull += 0.75; reasons.append("Stochastic Bullish")
     elif row.stoch_k < row.stoch_d and row.stoch_k > 15:
-        bear += 1; reasons.append("Stochastic Bearish")
+        bear += 0.75; reasons.append("Stochastic Bearish")
 
     if trend == "Bullish":
-        bull += 1; reasons.append("Bullish Structure")
+        bull += 1.5; reasons.append("Bullish Structure")
     elif trend == "Bearish":
-        bear += 1; reasons.append("Bearish Structure")
+        bear += 1.5; reasons.append("Bearish Structure")
+    else:
+        conflicts.append("Range / Mixed Structure")
 
     if "Bullish Engulfing" in pats or "Morning Star" in pats or "Three White Soldiers" in pats:
-        bull += 1; reasons.append("Bullish Candle Pattern")
+        bull += 1.5; reasons.append("Bullish Candle Pattern")
     if "Bearish Engulfing" in pats or "Evening Star" in pats or "Three Black Crows" in pats:
-        bear += 1; reasons.append("Bearish Candle Pattern")
+        bear += 1.5; reasons.append("Bearish Candle Pattern")
+
+    # Indecision patterns are not directional confirmation.
+    if any(p in pats for p in ("Doji", "Spinning Top", "Harami")):
+        conflicts.append("Indecision candle")
 
     adx_val = float(row.adx)
-    if adx_val < 20:
-        signal = "NO SIGNAL"
-        reason = f"ADX is below 20 ({adx_val:.1f}); market strength is insufficient."
-    elif bull == bear or max(bull, bear) < 4:
-        signal = "NO SIGNAL"
-        reason = "Bullish/bearish evidence is not strong enough or is conflicting."
-    else:
-        signal = "UP" if bull > bear else "DOWN"
-        reason = "Strong multi-factor setup; pending AI validation."
+    if adx_val < 15:
+        conflicts.append(f"Very weak ADX ({adx_val:.1f})")
+    elif adx_val < 20:
+        conflicts.append(f"Weak ADX ({adx_val:.1f})")
 
-    # Nearby resistance/support approximation from recent closed candles.
     recent = x.iloc[-22:-2]
     resistance = float(recent.high.max())
     support = float(recent.low.min())
-    if signal == "UP" and resistance > price and (resistance-price)/max(price,1e-12) < 0.0008:
+    if bull > bear and resistance > price and (resistance-price)/max(price,1e-12) < 0.0008:
         conflicts.append("Resistance very close")
-    if signal == "DOWN" and support < price and (price-support)/max(price,1e-12) < 0.0008:
+    if bear > bull and support < price and (price-support)/max(price,1e-12) < 0.0008:
         conflicts.append("Support very close")
 
-    raw_score = max(bull, bear)
-    confidence = min(99, int(55 + raw_score * 5 - len(conflicts) * 7))
+    # Require a meaningful directional margin and enough total evidence.
+    # ADX is a penalty here, not an automatic blocker above 15.
+    margin = abs(bull - bear)
+    strength = max(bull, bear)
+    weak_adx_penalty = 1.0 if adx_val < 20 else 0.0
+    directional = "UP" if bull > bear else "DOWN" if bear > bull else "NO SIGNAL"
+
+    if strength < 4.0 or margin < 1.5:
+        signal = "NO SIGNAL"
+        reason = "Weighted evidence is not strong enough or directions are too close."
+    elif adx_val < 15:
+        signal = "NO SIGNAL"
+        reason = f"ADX is very weak ({adx_val:.1f}); market lacks directional strength."
+    elif len(conflicts) >= 3:
+        signal = "NO SIGNAL"
+        reason = "Too many conflicting conditions remain."
+    else:
+        signal = directional
+        reason = "Strong weighted setup; pending AI validation."
+
+    raw_score = strength + margin * 0.75 - weak_adx_penalty - len(conflicts) * 0.5
+    confidence = max(50, min(99, int(50 + raw_score * 6)))
 
     return {
-        "pair": pair,
-        "signal": signal,
-        "price": price,
+        "pair": pair, "signal": signal, "price": price,
         "candle_time": datetime.fromtimestamp(float(row.timestamp), tz=timezone.utc).strftime("%H:%M:%S UTC"),
-        "bull": bull, "bear": bear,
-        "trend": trend,
-        "adx": adx_val,
-        "rsi": float(row.rsi),
-        "macd": float(row.macd),
-        "macd_signal": float(row.macd_signal),
-        "stoch_k": float(row.stoch_k),
-        "stoch_d": float(row.stoch_d),
-        "patterns": pats,
-        "reasons": reasons,
-        "conflicts": conflicts,
-        "support": support,
-        "resistance": resistance,
-        "confidence": confidence,
-        "data_source": "OlympTrade live candle feed",
+        "bull": round(bull, 2), "bear": round(bear, 2),
+        "trend": trend, "adx": adx_val, "rsi": float(row.rsi),
+        "macd": float(row.macd), "macd_signal": float(row.macd_signal),
+        "stoch_k": float(row.stoch_k), "stoch_d": float(row.stoch_d),
+        "patterns": pats, "reasons": reasons, "conflicts": conflicts,
+        "support": support, "resistance": resistance,
+        "confidence": confidence, "data_source": "OlympTrade live candle feed",
     }
+
 
 # ============================================================
 # AI VALIDATION
@@ -567,108 +585,30 @@ DATA:
 {json.dumps(result, ensure_ascii=False)}
 """.strip()
 
-def _parse_openrouter_response(data):
-    """Extract JSON from an OpenRouter response, including empty-content guards."""
-    choices = data.get("choices") or []
-    if not choices:
-        raise ValueError("OpenRouter returned no choices")
-    message = choices[0].get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("OpenRouter returned empty content")
-    content = content.strip()
-    content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I).strip()
-    if not content:
-        raise ValueError("OpenRouter returned empty content after cleanup")
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"OpenRouter returned non-JSON content: {e}") from e
-
-
-def _openrouter_request(prompt, model, include_fallback=False):
-    key = (OPENROUTER_API_KEY or "").strip()
-    if not key:
-        raise ValueError("OPENROUTER_API_KEY is empty")
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://priyanithan-ai.onrender.com",
-        "X-Title": "Priyanithan AI OlympTrade Signal Bot",
-    }
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "Return JSON only."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0,
-        "max_tokens": 300,
-    }
-    if include_fallback:
-        payload["models"] = ["openrouter/free"]
-
-    r = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    parsed = _parse_openrouter_response(data)
-    served_model = data.get("model", model)
-    return parsed, served_model
-
-
 def call_ai(prompt):
-    """Call GLM first, then OpenRouter's free router, then optional Airforce.
-
-    A successful HTTP response with null/empty content is treated as a failed
-    AI attempt and retried with the explicit free router, because OpenRouter
-    model fallbacks are triggered by classified errors, not by a 200 response
-    containing unusable output.
-    """
-    errors = []
-
+    providers = []
     if OPENROUTER_API_KEY:
-        primary_model = (OPENROUTER_MODEL or "z-ai/glm-5.2:free").strip()
-
-        # Attempt 1: configured primary model with OpenRouter model fallback.
-        try:
-            parsed, served_model = _openrouter_request(
-                prompt, primary_model, include_fallback=True
-            )
-            log.info("AI validation succeeded via OpenRouter model: %s", served_model)
-            return parsed, None
-        except Exception as e:
-            err = f"OpenRouter primary/fallback: {e}"
-            errors.append(err)
-            log.warning(err)
-
-        # Attempt 2: explicit Free Models Router. This also handles the case
-        # where a provider returned HTTP 200 but no usable message content.
-        try:
-            parsed, served_model = _openrouter_request(
-                prompt, "openrouter/free", include_fallback=False
-            )
-            log.info("AI validation succeeded via OpenRouter free router: %s", served_model)
-            return parsed, None
-        except Exception as e:
-            err = f"OpenRouter free router: {e}"
-            errors.append(err)
-            log.warning(err)
-
-    # Optional secondary provider. Never used for order placement.
+        providers.append((
+            "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_API_KEY, OPENROUTER_MODEL
+        ))
     if AIRFORCE_API_KEY:
+        providers.append((
+            "Airforce", "https://api.airforce/v1/chat/completions",
+            AIRFORCE_API_KEY, AIRFORCE_MODEL
+        ))
+    if not providers:
+        return None, "No AI provider configured"
+
+    last_error = None
+    for name, url, key, model in providers:
         try:
-            key = AIRFORCE_API_KEY.strip()
             headers = {
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": AIRFORCE_MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": "Return JSON only."},
                     {"role": "user", "content": prompt},
@@ -676,20 +616,21 @@ def call_ai(prompt):
                 "temperature": 0,
                 "max_tokens": 300,
             }
-            r = requests.post(
-                "https://api.airforce/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=25,
-            )
+            if name == "OpenRouter":
+                headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
+                headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
+            r = requests.post(url, headers=headers, json=payload, timeout=25)
             r.raise_for_status()
             data = r.json()
-            parsed = _parse_openrouter_response(data)
+            content = data["choices"][0]["message"]["content"].strip()
+            # Strip accidental fenced JSON.
+            content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.I)
+            parsed = json.loads(content)
             return parsed, None
         except Exception as e:
-            errors.append(f"Airforce: {e}")
-
-    return None, "; ".join(errors) if errors else "No AI provider configured"
+            last_error = f"{name}: {e}"
+            log.warning("AI provider failed: %s", last_error)
+    return None, last_error or "AI failed"
 
 # ============================================================
 # TELEGRAM FORMATTING
