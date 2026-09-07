@@ -1,4 +1,4 @@
-name: Extract OlympTrade Bot
+name: Extract Flex Scanner v4
 
 on:
   workflow_dispatch:
@@ -7,30 +7,34 @@ permissions:
   contents: write
 
 jobs:
-  extract-bot:
+  extract-v4:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find OlympTrade ZIP
+      - name: Find Flex Scanner v4 ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*OlympTrade*.zip' | head -n 1)
+          ZIP_FILE=$(find . -maxdepth 1 -type f \
+            \( -iname 'Priyanithan-flex-scanner-v4*.zip' \
+               -o -iname 'Priyanithan-flex-auto-v5*.zip' \) \
+            | head -n 1)
 
           if [[ -z "$ZIP_FILE" ]]; then
-            echo "ERROR: OlympTrade ZIP not found"
-            ls -la
+            echo "ERROR: Flex Scanner v4 ZIP not found"
+            echo "Available ZIP files:"
+            find . -maxdepth 1 -type f -iname '*.zip' -print
             exit 1
           fi
 
-          echo "Found: $ZIP_FILE"
+          echo "Using: $ZIP_FILE"
           echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-      - name: Extract bot source
+      - name: Extract Flex Scanner v4
         shell: bash
         run: |
           set -euo pipefail
@@ -40,13 +44,47 @@ jobs:
 
           unzip -o "$ZIP_FILE" -d _extract
 
-          # Do NOT overwrite GitHub Actions workflows
-          rm -rf _extract/.github
+          echo "Extracted structure:"
+          find _extract -maxdepth 3 -type f | sort
 
-          # Copy application files
-          cp -a _extract/. .
+      - name: Locate application root
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          rm -rf _extract
+          APP_FILE=$(find _extract -type f -name app.py | head -n 1)
+
+          if [[ -z "$APP_FILE" ]]; then
+            echo "ERROR: app.py not found inside Flex Scanner ZIP"
+            exit 1
+          fi
+
+          APP_ROOT=$(dirname "$APP_FILE")
+
+          echo "Application root: $APP_ROOT"
+          echo "APP_ROOT=$APP_ROOT" >> "$GITHUB_ENV"
+
+      - name: Install Flex Scanner source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Remove old application files only.
+          rm -rf olymptrade_ws
+          rm -f app.py
+          rm -f requirements.txt
+          rm -f simple_bot.py
+          rm -f test.py
+          rm -f test_api_methods.py
+
+          # Copy the NEW v4 application.
+          cp -a "$APP_ROOT"/. .
+
+          # Never overwrite GitHub workflows from inside the ZIP.
+          rm -rf .github
+
+          echo "Installed application:"
+          ls -la
 
       - name: Clean Python cache
         shell: bash
@@ -62,26 +100,32 @@ jobs:
             \( -name "*.pyc" -o -name "*.pyo" \) \
             -delete
 
-      - name: Remove source ZIP
+      - name: Remove Flex ZIP
         shell: bash
         run: |
           rm -f "$ZIP_FILE"
 
-      - name: Verify application
+      - name: Verify v4 application
         shell: bash
         run: |
           set -euo pipefail
 
           test -f app.py
           test -f requirements.txt
+          test -d olymptrade_ws
 
           python -m py_compile app.py
 
-          echo "================================"
-          echo "BOT EXTRACTION SUCCESS"
-          echo "================================"
+          echo "========================================"
+          echo " FLEX SCANNER V4 INSTALLED SUCCESSFULLY"
+          echo "========================================"
 
-      - name: Commit extracted source
+          grep -n "AUTO_DISCOVER_ASSETS" app.py || true
+          grep -n "MAX_ASSETS_PER_CYCLE" app.py || true
+          grep -n "MAX_AI_CANDIDATES" app.py || true
+          grep -n "SCAN_INTERVAL_SECONDS" app.py || true
+
+      - name: Commit Flex Scanner v4
         shell: bash
         run: |
           set -euo pipefail
@@ -92,15 +136,15 @@ jobs:
 
           git add -A
 
-          # Never commit workflow changes
-          git restore --staged .github/workflows 2>/dev/null || true
-          git checkout -- .github/workflows 2>/dev/null || true
+          # Preserve existing GitHub workflows.
+          git restore --staged .github 2>/dev/null || true
+          git checkout -- .github 2>/dev/null || true
 
           if git diff --cached --quiet; then
-            echo "No application changes to commit."
+            echo "No application changes."
             exit 0
           fi
 
-          git commit -m "Extract OlympTrade bot source"
+          git commit -m "Install Flex Scanner v4"
 
           git push
