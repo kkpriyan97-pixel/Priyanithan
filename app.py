@@ -37,7 +37,7 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 
-AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "89"))
+AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "80"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 LIVE_UPDATE_SECONDS = 15
 AUTO_TRADE = False
@@ -370,16 +370,15 @@ def analyze(df, pair):
     adx_val = float(row.adx)
     strength, margin = max(bull, bear), abs(bull-bear)
     directional = "UP" if bull > bear else ("DOWN" if bear > bull else "NO SIGNAL")
-    core_up = row.ema9 > row.ema21 and row.macd > row.macd_signal and row.macd_hist > 0 and trend == "Bullish"
-    core_down = row.ema9 < row.ema21 and row.macd < row.macd_signal and row.macd_hist < 0 and trend == "Bearish"
+    # Balanced candidate gate: technical scoring creates a CANDIDATE and lets AI
+    # handle weaker ADX / nearby S-R / single-pattern conflicts. Do not require
+    # EMA + MACD + structure to all agree, because that produced almost no candidates.
     if directional == "NO SIGNAL" or strength < 3 or margin < 1:
-        signal, reason = "NO SIGNAL", "Directional evidence is not strong/coherent enough."
-    elif directional == "UP" and not core_up:
-        signal, reason = "NO SIGNAL", "EMA, MACD and market structure are not aligned bullish."
-    elif directional == "DOWN" and not core_down:
-        signal, reason = "NO SIGNAL", "EMA, MACD and market structure are not aligned bearish."
+        signal, reason = "NO SIGNAL", "Directional evidence is too balanced or too weak."
+    elif margin < 1.25 and len(conflicts) >= 2:
+        signal, reason = "NO SIGNAL", "Directional edge is small and multiple conflicts remain."
     else:
-        signal, reason = directional, "Core EMA + MACD + structure aligned; pending AI validation."
+        signal, reason = directional, "Technical candidate found; AI validation will judge conflicts and tradeability."
     if adx_val < 15: conflicts.append(f"Very weak ADX ({adx_val:.1f})")
     elif adx_val < 20: conflicts.append(f"Weak ADX ({adx_val:.1f})")
     recent = x.iloc[-22:-2]
@@ -426,9 +425,10 @@ Evaluate price action, candle patterns, market structure, EMA, MACD, RSI, Bollin
 Stochastic, ADX, support/resistance and conflicts.
 Rules:
 - ADX below 15 is strong caution; 15-20 reduces confidence but is not automatic rejection.
-- Conflicting evidence => REJECT / NO SIGNAL.
+- Multiple major conflicts => REJECT / NO SIGNAL.
+- A single caution (weak ADX, overbought/oversold, or nearby S/R) is not by itself enough to reject.
 - One candle pattern alone is never sufficient.
-- Approve only a coherent, aligned setup.
+- Approve when the overall evidence is directionally coherent, even if one indicator is a caution.
 - Confidence is a validation score, NOT a guaranteed win probability.
 - If approving, choose the most suitable expiry from exactly: 1, 2, 3, 4, 5, 10, 15 minutes.
 - Choose expiry from setup quality, momentum, volatility, candle structure, trend strength and support/resistance distance.
