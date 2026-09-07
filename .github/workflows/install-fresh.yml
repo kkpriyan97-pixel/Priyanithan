@@ -22,7 +22,9 @@ jobs:
           mkdir -p /tmp/fresh
           unzip -q -o Priyanithan-FRESH-FINAL.zip -d /tmp/fresh
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp -a /tmp/fresh/. .
+          # Install all fresh project files except GitHub workflow files.
+          # The connected GitHub App is not permitted to create/update workflow files.
+          find /tmp/fresh -mindepth 1 -maxdepth 1 ! -name .github -exec cp -a {} . \;
           rm -f Priyanithan-FRESH-FINAL.zip
 
       - name: Commit fresh project
