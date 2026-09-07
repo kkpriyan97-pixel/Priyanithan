@@ -1,149 +1,65 @@
-name: Extract Verify Flex Adaptive v5
+name: Deploy Priyanithan Flex Adaptive v5
+
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    branches:
+      - main
 
 jobs:
-  extract-v4:
+  verify:
+    name: Verify Flex Adaptive v5
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find Flex Scanner v4 ZIP
-        shell: bash
+      - name: Show repository structure
         run: |
-          set -euo pipefail
+          echo "=== Repository root ==="
+          pwd
+          echo "=== Files ==="
+          find . -maxdepth 3 -type f | sort
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f \
-            \( -iname 'Priyanithan-flex-scanner-v4*.zip' \
-               -o -iname 'Priyanithan-flex-auto-v5*.zip' \) \
-            | head -n 1)
-
-          if [[ -z "$ZIP_FILE" ]]; then
-            echo "ERROR: Flex Scanner v4 ZIP not found"
-            echo "Available ZIP files:"
-            find . -maxdepth 1 -type f -iname '*.zip' -print
-            exit 1
-          fi
-
-          echo "Using: $ZIP_FILE"
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
-
-      - name: Extract Flex Scanner v4
-        shell: bash
+      - name: Verify required files
         run: |
-          set -euo pipefail
+          test -f app.py || { echo "ERROR: app.py not found in repository root"; exit 1; }
+          test -f requirements.txt || { echo "ERROR: requirements.txt not found"; exit 1; }
+          test -d olymptrade_ws || { echo "ERROR: olymptrade_ws directory not found"; exit 1; }
+          echo "Required files found."
 
-          rm -rf _extract
-          mkdir -p _extract
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-          unzip -o "$ZIP_FILE" -d _extract
-
-          echo "Extracted structure:"
-          find _extract -maxdepth 3 -type f | sort
-
-      - name: Locate application root
-        shell: bash
+      - name: Install dependencies
         run: |
-          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-          APP_FILE=$(find _extract -type f -name app.py | head -n 1)
-
-          if [[ -z "$APP_FILE" ]]; then
-            echo "ERROR: app.py not found inside Flex Scanner ZIP"
-            exit 1
-          fi
-
-          APP_ROOT=$(dirname "$APP_FILE")
-
-          echo "Application root: $APP_ROOT"
-          echo "APP_ROOT=$APP_ROOT" >> "$GITHUB_ENV"
-
-      - name: Install Flex Scanner source
-        shell: bash
+      - name: Compile Python
         run: |
-          set -euo pipefail
-
-          # Remove old application files only.
-          rm -rf olymptrade_ws
-          rm -f app.py
-          rm -f requirements.txt
-          rm -f simple_bot.py
-          rm -f test.py
-          rm -f test_api_methods.py
-
-          # Copy the NEW v4 application.
-          cp -a "$APP_ROOT"/. .
-
-          # Never overwrite GitHub workflows from inside the ZIP.
-          rm -rf .github
-
-          echo "Installed application:"
-          ls -la
-
-      - name: Clean Python cache
-        shell: bash
-        run: |
-          find . \
-            -type d \
-            -name "__pycache__" \
-            -prune \
-            -exec rm -rf {} +
-
-          find . \
-            -type f \
-            \( -name "*.pyc" -o -name "*.pyo" \) \
-            -delete
-
-      - name: Remove Flex ZIP
-        shell: bash
-        run: |
-          rm -f "$ZIP_FILE"
-
-      - name: Verify v4 application
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f app.py
-          test -f requirements.txt
-          test -d olymptrade_ws
-
           python -m py_compile app.py
+          python -m compileall -q olymptrade_ws
+          echo "Python compilation successful."
 
-          echo "========================================"
-          echo " FLEX SCANNER V4 INSTALLED SUCCESSFULLY"
-          echo "========================================"
-
-          grep -n "AUTO_DISCOVER_ASSETS" app.py || true
-          grep -n "MAX_ASSETS_PER_CYCLE" app.py || true
-          grep -n "MAX_AI_CANDIDATES" app.py || true
-          grep -n "SCAN_INTERVAL_SECONDS" app.py || true
-
-      - name: Commit Flex Scanner v4
-        shell: bash
+      - name: Verify adaptive durations
         run: |
-          set -euo pipefail
+          grep -q "1, 2, 3, 5, 10, 15" app.py || {
+            echo "ERROR: adaptive duration list 1,2,3,5,10,15 not found"
+            exit 1
+          }
+          echo "Adaptive durations verified: 1, 2, 3, 5, 10, 15 minutes."
 
-          git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Verify auto-trade is disabled
+        run: |
+          grep -Eq 'AUTO_TRADE[[:space:]]*=[[:space:]]*False' app.py || {
+            echo "ERROR: AUTO_TRADE is not explicitly False"
+            exit 1
+          }
+          echo "AUTO_TRADE=False verified."
 
-          git add -A
-
-          # Preserve existing GitHub workflows.
-          git restore --staged .github 2>/dev/null || true
-          git checkout -- .github 2>/dev/null || true
-
-          if git diff --cached --quiet; then
-            echo "No application changes."
-            exit 0
-          fi
-
-          git commit -m "Install Flex Scanner v4"
-
-          git push
+      - name: Success
+        run: echo "Flex Adaptive v5 verification completed successfully."
