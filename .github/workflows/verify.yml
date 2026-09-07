@@ -1,0 +1,28 @@
+name: Verify Priyanithan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m py_compile app.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
+      - run: |
+          python - <<'PY'
+          from pathlib import Path
+          s = Path("app.py").read_text(encoding="utf-8")
+          assert "AUTO_TRADE = False" in s
+          assert "1, 2, 3, 5, 10, 15" in s
+          assert "global ot_client, PAIRS" in s
+          assert "1054" in s
+          print("Verification OK")
+          PY
