@@ -1,4 +1,4 @@
-#api/market.py
+# api/market.py
 import logging
 import time
 from typing import TYPE_CHECKING, Dict, Any, Optional, List, Union
@@ -55,7 +55,7 @@ class MarketAPI:
                       Defaults to the current time.
 
         Returns:
-            A list of candle dictionaries (format is parsed from the observed e:10 response) or None on error.
+            A list of candle dictionaries (format needs verification from e:1003 response) or None on error.
             
         NOTE: The exact mapping of 'count' to the API request ('solid'?) needs confirmation.
               The response format (event 1003) structure needs verification.
@@ -72,9 +72,9 @@ class MarketAPI:
 
         logger.info(f"Requesting {count} candles for {pair} (size: {size}s) ending around {datetime.fromtimestamp(to_ts, tz=timezone.utc)}")
         
-        # Event 10 seems to request candles, Event 10 returns the candle payload in the observed logs
+        # Event 10 seems to request candles, Event 1003 is the response in logs
         event_code_req = 10
-        event_code_resp = 1003 # Legacy response event code
+        event_code_resp = 1003 # Expected response event code
         
         # The log shows 'solid: true'. This *might* relate to fetching historical batch?
         # The 'count' parameter isn't directly visible in the logged request payload.
@@ -100,63 +100,18 @@ class MarketAPI:
             # Optionally send the secondary request (e:282) if needed - requires_response=False?
             # await self._client.send_request(event_code_req_alt, data_alt, requires_response=False) 
 
-            if not response:
-                logger.error(f"Empty candle response for {pair}.")
-                return None
-
-            # Actual OlympTrade logs show the historical candle payload arrives
-            # as event e:10, with candles nested under d[0]["candles"].
-            # Example:
-            # {"d":[{"pair":"EURUSD","tf":60,"candles":[...]}],"e":10,...}
-            response_event = response.get("e")
-
-            if response_event == event_code_req:
-                payload = response.get("d")
-                if isinstance(payload, list) and payload:
-                    first = payload[0]
-
-                    if isinstance(first, dict):
-                        candles_data = first.get("candles")
-
-                        if isinstance(candles_data, list):
-                            # Keep only actual OHLC dictionaries and normalize
-                            # the timestamp field to the short form expected by
-                            # the bot's candle normalizer.
-                            normalized = []
-                            for candle in candles_data:
-                                if not isinstance(candle, dict):
-                                    continue
-
-                                item = dict(candle)
-                                if "timestamp" not in item and "t" in item:
-                                    item["timestamp"] = item["t"]
-
-                                required = ("open", "low", "high", "close")
-                                if all(k in item for k in required):
-                                    normalized.append(item)
-
-                            logger.info(
-                                "Received %s historical candles for %s (e:%s).",
-                                len(normalized), pair, response_event
-                            )
-                            return normalized or None
-
-            # Backward compatibility for an older response format.
-            if response_event == event_code_resp:
-                candles_data = response.get("d")
-                if isinstance(candles_data, list):
-                    logger.info(
-                        "Received %s candles for %s (legacy e:%s).",
-                        len(candles_data), pair, response_event
-                    )
-                    return candles_data or None
-
-            logger.error(
-                "Unexpected candle response for %s: e:%s, keys:%s",
-                pair, response_event,
-                list(response.keys()) if isinstance(response, dict) else type(response)
-            )
-            return None
+            if response and response.get("e") == event_code_resp:
+                 candles_data = response.get("d")
+                 if isinstance(candles_data, list):
+                     logger.info(f"Received {len(candles_data)} candles for {pair}.")
+                     # TODO: Validate candle format [{p, t, open, low, high, close}, ...]
+                     return candles_data
+                 else:
+                     logger.error(f"Unexpected data format in candle response: {candles_data}")
+                     return None
+            else:
+                 logger.error(f"Did not receive expected candle response (e:{event_code_resp}). Got: {response}")
+                 return None
 
         except Exception as e:
             logger.error(f"Failed to get candles for {pair}: {e}")
