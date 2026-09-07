@@ -58,7 +58,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("priyanithan")
-APP_VERSION = "3.2-safe-ai-decision-normalization-balanced"
+APP_VERSION = "3.2-safe-ai-decision-adaptive"
 
 app = Flask(__name__)
 authorized_users = set()
@@ -488,33 +488,33 @@ def call_ai(prompt):
     return None, last_error or "AI failed"
 
 # ============================================================
-# AI DECISION NORMALIZATION
+# AI DECISION SAFETY
 # ============================================================
-def normalize_ai_decision(value):
-    """
-    Normalize only obvious model-output formatting/typo variants.
-    Unknown values remain REJECT so they can never become an approval.
-    """
-    raw = str(value or "").strip().upper()
-    if raw == "APPROVE":
-        return "APPROVE"
-    if raw in {"APJECT", "APROVE", "APPR0VE", "APPROV", "APPROVED"}:
-        return "APPROVE"
-    if raw in {"REJECT", "REJECTED", "NO SIGNAL", "NO_SIGNAL", "NOSIGNAL"}:
-        return "REJECT"
-    return "REJECT"
+def normalize_ai_decision(ai):
+    """Accept only exact APPROVE/REJECT decisions; never guess a typo."""
+    if not isinstance(ai, dict):
+        return ai
+    raw = str(ai.get("decision", "")).strip().upper()
+    if raw in ("APPROVE", "REJECT"):
+        ai["decision"] = raw
+        return ai
+    # Invalid/typo decision (e.g. APJECT) is unsafe to interpret as approval.
+    ai["decision"] = "REJECT"
+    ai["decision_error"] = f"Invalid AI decision '{raw or 'EMPTY'}'; approval not assumed."
+    return ai
 
 # ============================================================
 # TELEGRAM FORMAT
 # ============================================================
 def format_signal(result, ai=None):
+    ai = normalize_ai_decision(ai) if ai else ai
     if result["signal"] == "NO SIGNAL" or not ai:
         return ("🚫 NO SIGNAL\n\n"
                 f"📈 {result['pair']}\n🕐 {result['candle_time']}\n\n"
                 f"🕯️ Patterns: {', '.join(result['patterns']) or 'None'}\n"
                 f"📈 Trend: {result['trend']}\n📊 RSI: {result['rsi']:.1f}\n💪 ADX: {result['adx']:.1f}\n\n"
                 f"⚠️ {result['reason']}\n⏳ Waiting for stronger setup...")
-    decision = normalize_ai_decision(ai.get("decision", "REJECT"))
+    decision = str(ai.get("decision", "REJECT")).upper()
     direction = str(ai.get("direction", "NO SIGNAL")).upper()
     try: conf = int(ai.get("confidence", 0))
     except: conf = 0
@@ -523,7 +523,7 @@ def format_signal(result, ai=None):
                 f"📈 {result['pair']}\n🕐 {result['candle_time']}\n\n"
                 f"📊 Technical: {result['signal']} ({result['confidence']}%)\n"
                 f"🤖 AI: {decision} / {direction} / {conf}%\n"
-                f"⚠️ {ai.get('reason','AI rejected the setup.')}\n\n"
+                f"⚠️ {ai.get('decision_error', ai.get('reason','AI rejected the setup.'))}\n\n"
                 "⏳ Waiting for stronger confirmation...")
     fire = "🔥🔥🔥" if conf >= 94 else ("🔥🔥" if conf >= 91 else "🔥")
     arrow = "⬆️" if direction == "UP" else "⬇️"
@@ -591,7 +591,7 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ai_err:
         await msg.edit_text(f"🚫 NO SIGNAL\n\n📈 {pair}\n❌ AI validation unavailable: {ai_err}")
         return
-    log.info("AI DECISION DETAIL MANUAL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision"), ai.get("direction"), ai.get("confidence"), str(ai.get("reason",""))[:500])
+    log.info("AI DECISION DETAIL MANUAL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision"), ai.get("direction"), ai.get("confidence"), str(ai.get("decision_error", ai.get("reason","")))[:500])
     await msg.edit_text(format_signal(result, ai))
 
 # ============================================================
@@ -628,11 +628,24 @@ async def scan_loop(application):
                 if ai_err or not ai:
                     await send_to_recipients(application.bot, f"⚠️ AI VALIDATION UNAVAILABLE\n\n📈 {pair}\n📊 Technical: {result['signal']} {result['confidence']}%\n❌ {ai_err or 'No AI response'}\n\n🚫 No trade signal generated.")
                     continue
+                raw_decision = str(ai.get("decision", "")).strip().upper()
+                if raw_decision not in ("APPROVE", "REJECT"):
+                    log.warning("AI INVALID DECISION: pair=%s raw=%s; retrying strict JSON decision", pair, raw_decision or "EMPTY")
+                    retry_prompt = ai_prompt(result) + "\n\nCRITICAL: Return decision EXACTLY as APPROVE or REJECT. Do not use any other spelling or word."
+                    try:
+                        retry_ai, retry_err = await asyncio.wait_for(asyncio.to_thread(call_ai, retry_prompt), timeout=90)
+                    except asyncio.TimeoutError:
+                        retry_ai, retry_err = None, "AI strict-decision retry timed out"
+                    if retry_err or not retry_ai:
+                        ai = normalize_ai_decision(ai)
+                    else:
+                        ai = retry_ai
+                ai = normalize_ai_decision(ai)
                 direction = str(ai.get("direction", "NO SIGNAL")).upper()
-                decision = normalize_ai_decision(ai.get("decision", "REJECT"))
+                decision = str(ai.get("decision", "REJECT")).upper()
                 try: conf = int(ai.get("confidence", 0))
                 except: conf = 0
-                log.info("AI DECISION DETAIL: pair=%s decision_raw=%s decision=%s direction=%s confidence=%s reason=%s", pair, decision_raw, decision, direction, conf, str(ai.get("reason",""))[:500])
+                log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, decision, direction, conf, str(ai.get("decision_error", ai.get("reason","")))[:500])
                 approved = (decision == "APPROVE" and direction in ("UP", "DOWN") and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE and result["confidence"] >= 60 and (conf >= 70 or result["confidence"] >= 70))
                 text = format_signal(result, ai) if approved else (
                     f"🚫 NO SIGNAL\n\n📈 {pair}\n🕐 {result['candle_time']}\n\n"
