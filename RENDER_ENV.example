@@ -1,0 +1,19 @@
+# Render Environment Variables — NEVER paste secret values into chat.
+TELEGRAM_BOT_TOKEN=
+ACCESS_CODE=
+OLYMPTRADE_ACCESS_TOKEN=
+
+# Optional AI provider (preferred):
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=z-ai/glm-5.2:free
+
+# Optional fallback:
+AIRFORCE_API_KEY=
+AIRFORCE_MODEL=gpt-oss-120b
+
+# Optional settings:
+AI_MIN_CONFIDENCE=89
+SCAN_INTERVAL_SECONDS=300
+OLYMP_PAIRS=EURUSD,GBPUSD
+OT_EURUSD_PAIR=EURUSD
+OT_GBPUSD_PAIR=GBPUSD
