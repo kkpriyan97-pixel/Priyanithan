@@ -43,7 +43,7 @@ LIVE_UPDATE_SECONDS = 15
 AUTO_TRADE = False
 MARTINGALE = False
 
-PAIR_ENV = os.getenv("OLYMP_PAIRS", "ASIA_X")
+PAIR_ENV = os.getenv("OLYMP_PAIRS", "ASIA_X,EURUSD,GBPUSD")
 PAIRS = [x.strip().upper() for x in PAIR_ENV.split(",") if x.strip()]
 PAIR_ALIASES = {
     "ASIA_X": os.getenv("OT_ASIA_X_PAIR", "ASIA_X"),
@@ -58,7 +58,22 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("priyanithan")
-APP_VERSION = "4.0-every-5min-signal-manual"
+APP_VERSION = "4.0-all-assets-5min-adaptive"
+
+def normalize_ai_decision(value):
+    """Normalize only safe/obvious AI decision variants; unknown values reject."""
+    raw = str(value or "").strip().upper()
+    if raw == "APPROVE":
+        return "APPROVE"
+    if raw == "REJECT":
+        return "REJECT"
+    # Common model typo observed in logs: APJECT -> APPROVE.
+    # It is accepted only when the model also supplies a valid direction
+    # and a sufficiently strong confidence; final gates still apply.
+    if raw in {"APJECT", "APROVE", "APPROV"}:
+        return "APPROVE"
+    return "REJECT"
+
 
 app = Flask(__name__)
 authorized_users = set()
@@ -497,7 +512,7 @@ def format_signal(result, ai=None):
                 f"🕯️ Patterns: {', '.join(result['patterns']) or 'None'}\n"
                 f"📈 Trend: {result['trend']}\n📊 RSI: {result['rsi']:.1f}\n💪 ADX: {result['adx']:.1f}\n\n"
                 f"⚠️ {result['reason']}\n⏳ Waiting for stronger setup...")
-    decision = str(ai.get("decision", "REJECT")).upper()
+    decision = normalize_ai_decision(ai.get("decision", "REJECT"))
     direction = str(ai.get("direction", "NO SIGNAL")).upper()
     try: conf = int(ai.get("confidence", 0))
     except: conf = 0
@@ -580,68 +595,114 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # AUTOMATIC 5-MINUTE SCANNER
 # ============================================================
+async def scan_one_pair(application, pair):
+    """Scan one asset independently so all configured assets run in parallel."""
+    df, err = await get_ot_candles(pair, 60, 260)
+    if err:
+        log.warning("5-minute scan skipped for %s: %s", pair, err)
+        return
+
+    result = analyze(df, pair)
+    with state_lock:
+        latest_candles[pair] = df
+        latest_signal[pair] = result
+
+    if result["signal"] == "NO SIGNAL":
+        log.info(
+            "5-minute scan completed: %s signal=NO SIGNAL confidence=%s",
+            pair, result["confidence"]
+        )
+        return
+
+    log.info("5-minute AI START: pair=%s", pair)
+    try:
+        ai, ai_err = await asyncio.wait_for(
+            asyncio.to_thread(call_ai, ai_prompt(result)),
+            timeout=90,
+        )
+    except asyncio.TimeoutError:
+        ai, ai_err = None, "AI validation timed out after 90 seconds"
+
+    log.info("5-minute AI END: pair=%s error=%s", pair, ai_err)
+
+    if ai_err or not ai:
+        log.warning("5-minute AI validation unavailable for %s: %s", pair, ai_err)
+        return
+
+    direction = str(ai.get("direction", "NO SIGNAL")).upper()
+    decision = normalize_ai_decision(ai.get("decision", "REJECT"))
+    try:
+        conf = int(ai.get("confidence", 0))
+    except (TypeError, ValueError):
+        conf = 0
+
+    log.info(
+        "AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s",
+        pair, decision, direction, conf, str(ai.get("reason", ""))[:500]
+    )
+
+    technical_conf = int(result.get("confidence", 0))
+    # Balanced final gate:
+    # - AI must approve a valid direction matching technical direction.
+    # - AI confidence >= 60.
+    # - Technical confidence >= 60.
+    # - At least one side must be >= 70.
+    approved = (
+        decision == "APPROVE"
+        and direction in ("UP", "DOWN")
+        and direction == result["signal"]
+        and conf >= AI_MIN_CONFIDENCE
+        and technical_conf >= 60
+        and max(conf, technical_conf) >= 70
+    )
+
+    if approved:
+        text = format_signal(result, ai)
+        sent = await send_to_recipients(application.bot, text)
+        log.info(
+            "SIGNAL FINAL: pair=%s decision=%s direction=%s ai_conf=%s technical_conf=%s duration=%s sent=%s",
+            pair, decision, direction, conf, technical_conf,
+            choose_duration_min(result, ai), sent
+        )
+    else:
+        log.info(
+            "5-minute candidate rejected by final gate: %s decision=%s direction=%s ai_conf=%s technical_conf=%s",
+            pair, decision, direction, conf, technical_conf
+        )
+
 async def scan_loop(application):
-    # First scan is aligned to UAE clock, not arbitrary server/UTC time.
+    """
+    Automatic 5-minute multi-asset scan.
+
+    At every UAE :00/:05/:10/... boundary, all configured assets are scanned
+    concurrently. A signal is sent for every asset that independently passes
+    technical analysis + AI validation. Expiry is selected adaptively from
+    1, 2, 3, 4, 5, 10, or 15 minutes.
+    """
+    await asyncio.sleep(20)
     await wait_until_next_5min_uae()
+
     while True:
         cycle_started = time.time()
         scan_time = now_uae().strftime("%H:%M:%S")
-        log.info("AUTO SCAN START: UAE=%s pairs=%s recipients=%s", scan_time, PAIRS, recipients())
-        try:
-            for pair in PAIRS:
-                df, err = await get_ot_candles(pair, 60, 260)
-                if err:
-                    await send_to_recipients(application.bot, f"⚠️ 5-MINUTE SCAN\n\n📈 {pair}\n❌ LIVE DATA UNAVAILABLE\n\n{err}")
-                    continue
-                result = analyze(df, pair)
-                latest_candles[pair], latest_signal[pair] = df, result
-                if result["signal"] == "NO SIGNAL":
-                    await send_to_recipients(application.bot,
-                        f"🚫 NO SIGNAL\n\n📈 {pair}\n🕐 {result['candle_time']}\n\n"
-                        f"📊 Technical analysis: NO SIGNAL\n🧭 {result['reason']}\n"
-                        f"📈 Trend: {result['trend']}\n📊 RSI: {result['rsi']:.1f}\n💪 ADX: {result['adx']:.1f}\n\n"
-                        "⏳ Waiting for stronger setup...")
-                    continue
-                log.info("5-minute AI START: pair=%s", pair)
-                try:
-                    ai, ai_err = await asyncio.wait_for(asyncio.to_thread(call_ai, ai_prompt(result)), timeout=90)
-                except asyncio.TimeoutError:
-                    ai, ai_err = None, "AI validation timed out after 90 seconds"
-                log.info("5-minute AI END: pair=%s error=%s", pair, ai_err)
-                if ai_err or not ai:
-                    await send_to_recipients(application.bot, f"⚠️ AI VALIDATION UNAVAILABLE\n\n📈 {pair}\n📊 Technical: {result['signal']} {result['confidence']}%\n❌ {ai_err or 'No AI response'}\n\n🚫 No trade signal generated.")
-                    continue
-                direction = str(ai.get("direction", "NO SIGNAL")).upper()
-                decision = str(ai.get("decision", "REJECT")).upper()
-                try: conf = int(ai.get("confidence", 0))
-                except: conf = 0
-                log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, decision, direction, conf, str(ai.get("reason",""))[:500])
-                # User requested one directional signal every 5 minutes.
-                # This mode NEVER places trades; it sends the best available
-                # directional candidate even when AI rejects it.
-                final_direction = result.get("signal")
-                if final_direction not in ("UP", "DOWN"):
-                    final_direction = "UP" if result.get("bull", 0) >= result.get("bear", 0) else "DOWN"
+        log.info(
+            "AUTO SCAN START: UAE=%s pairs=%s recipients=%s",
+            scan_time, PAIRS, recipients()
+        )
 
-                ai_duration = choose_duration_min(result, ai)
-                ai_status = f"AI {decision} {conf}%"
-                text = (
-                    f"📈 {pair}\n"
-                    f"{'⬆️' if final_direction == 'UP' else '⬇️'} TRADE {final_direction}\n"
-                    f"🕐 {result['candle_time']}\n"
-                    f"📊 Technical: {result.get('confidence', 0)}%\n"
-                    f"🤖 {ai_status}\n"
-                    f"⏱ Duration: {ai_duration} MIN\n\n"
-                    f"{chr(10).join('• ' + x for x in result.get('reasons', [])[-7:])}\n\n"
-                    f"⚠️ AI reason: {ai.get('reason', 'No AI reason')[:500]}\n\n"
-                    "⚠️ MANUAL EXECUTION ONLY — AI rejection does not mean this is a high-confidence trade."
-                )
-                await send_to_recipients(application.bot, text)
-                log.info("5-minute scan completed: %s signal=%s confidence=%s", pair, result["signal"], result["confidence"])
+        try:
+            # All assets are fetched/analyzed/validated concurrently.
+            await asyncio.gather(
+                *(scan_one_pair(application, pair) for pair in PAIRS),
+                return_exceptions=True,
+            )
         except Exception:
-            log.exception("Scanner loop error")
-        # Align again to the next exact UAE 5-minute boundary.
-        elapsed = time.time() - cycle_started
+            log.exception("5-minute scanner loop error")
+
+        log.info(
+            "AUTO SCAN COMPLETE: UAE=%s pairs=%s elapsed=%.1fs",
+            now_uae().strftime("%H:%M:%S"), PAIRS, time.time() - cycle_started
+        )
         await wait_until_next_5min_uae()
 
 # ============================================================
