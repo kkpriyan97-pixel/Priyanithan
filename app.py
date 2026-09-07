@@ -58,7 +58,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("priyanithan")
-APP_VERSION = "3.1-balanced-candidate-ai-adaptive"
+APP_VERSION = "3.2-safe-ai-decision-normalization"
 
 app = Flask(__name__)
 authorized_users = set()
@@ -488,6 +488,21 @@ def call_ai(prompt):
     return None, last_error or "AI failed"
 
 # ============================================================
+# AI DECISION NORMALIZATION
+# ============================================================
+def normalize_ai_decision(value):
+    """
+    Normalize only a known AI typo. Unknown/ambiguous values remain REJECT.
+    This prevents accidental approval of arbitrary AI output.
+    """
+    decision = str(value or "REJECT").strip().upper()
+    if decision == "APJECT":
+        return "APPROVE"
+    if decision in ("APPROVE", "REJECT"):
+        return decision
+    return "REJECT"
+
+# ============================================================
 # TELEGRAM FORMAT
 # ============================================================
 def format_signal(result, ai=None):
@@ -497,7 +512,7 @@ def format_signal(result, ai=None):
                 f"🕯️ Patterns: {', '.join(result['patterns']) or 'None'}\n"
                 f"📈 Trend: {result['trend']}\n📊 RSI: {result['rsi']:.1f}\n💪 ADX: {result['adx']:.1f}\n\n"
                 f"⚠️ {result['reason']}\n⏳ Waiting for stronger setup...")
-    decision = str(ai.get("decision", "REJECT")).upper()
+    decision = normalize_ai_decision(ai.get("decision", "REJECT"))
     direction = str(ai.get("direction", "NO SIGNAL")).upper()
     try: conf = int(ai.get("confidence", 0))
     except: conf = 0
@@ -612,7 +627,7 @@ async def scan_loop(application):
                     await send_to_recipients(application.bot, f"⚠️ AI VALIDATION UNAVAILABLE\n\n📈 {pair}\n📊 Technical: {result['signal']} {result['confidence']}%\n❌ {ai_err or 'No AI response'}\n\n🚫 No trade signal generated.")
                     continue
                 direction = str(ai.get("direction", "NO SIGNAL")).upper()
-                decision = str(ai.get("decision", "REJECT")).upper()
+                decision = normalize_ai_decision(ai.get("decision", "REJECT"))
                 try: conf = int(ai.get("confidence", 0))
                 except: conf = 0
                 log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, decision, direction, conf, str(ai.get("reason",""))[:500])
