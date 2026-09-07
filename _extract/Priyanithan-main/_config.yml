@@ -1,0 +1,74 @@
+# Jekyll configuration (repository root)
+#
+# NOTE: GitHub Pages for this repository is configured to serve from the
+# /docs folder on main, so the published site is built with docs/_config.yml
+# and this file is NOT read by Pages. It is kept for local Jekyll builds of
+# the repository root and for tooling that expects a root config.
+
+# Build settings
+markdown: kramdown
+highlighter: rouge
+
+# Exclude files from processing
+exclude:
+  - "*.py"
+  - "__pycache__/"
+  - "*.pyc"
+  - ".git/"
+  - ".github/"
+  - "LICENSE"
+  - "requirements.txt"
+  - "setup.py"
+  - "test/"
+  - "tests/"
+
+# Include specific files
+include:
+  - "_*"
+
+# Plugin settings
+plugins:
+  - jekyll-sitemap
+  - jekyll-feed
+
+# Site settings
+title: "OlympTrade API Documentation"
+description: "Comprehensive documentation for the OlympTrade API with interactive examples and professional services"
+url: "https://chipadevteam.github.io"
+baseurl: "/OlympTradeAPI"
+
+# Collections
+collections_dir: docs
+
+# Sass settings
+sass:
+  sass_dir: docs/css
+  style: compressed
+
+# Deployment settings
+destination: _site
+source: .
+
+# Custom variables
+version: "1.0.0"
+api_version: "v1"
+
+# Navigation
+navigation:
+  - title: "Home"
+    url: "/docs/"
+  - title: "Getting Started"
+    url: "/docs/getting-started.html"
+  - title: "API Reference"
+    url: "/docs/api-reference.html"
+  - title: "Examples"
+    url: "/docs/examples.html"
+  - title: "Create Your Bot"
+    url: "https://chipatrade.com/services/bot-development"
+    external: true
+  - title: "Trade Pre-Built Bots"
+    url: "https://exchange.chipatrade.com/trade/BTC"
+    external: true
+  - title: "Chipa Editor"
+    url: "https://chipaeditor.com/?utm_source=olymptradeapi&utm_medium=docs&utm_campaign=olymptrade_api_docs&utm_term=support&utm_content=nav"
+    external: true

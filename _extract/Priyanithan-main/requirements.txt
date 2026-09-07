@@ -1,0 +1,7 @@
+Flask
+python-telegram-bot>=21,<23
+requests
+pandas
+ta
+matplotlib
+websockets<14
