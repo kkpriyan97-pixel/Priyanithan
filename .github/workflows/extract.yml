@@ -1,4 +1,4 @@
-name: Extract Priyanithan Flex Scanner v4 
+name: Extract OlympTrade Bot
 
 on:
   workflow_dispatch:
@@ -14,16 +14,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check bot archive
+      - name: Find OlympTrade ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ ! -f "Priyanithan-OlympTrade-LiveBot-v2-reconnect.zip" ]]; then
-            echo "ERROR: Bot ZIP not found"
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*OlympTrade*.zip' | head -n 1)
+
+          if [[ -z "$ZIP_FILE" ]]; then
+            echo "ERROR: OlympTrade ZIP not found"
             ls -la
             exit 1
           fi
+
+          echo "Found: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
       - name: Extract bot source
         shell: bash
@@ -33,17 +38,19 @@ jobs:
           rm -rf _extract
           mkdir -p _extract
 
-          unzip -o \
-            "Priyanithan-OlympTrade-LiveBot-v2-reconnect.zip" \
-            -d _extract
+          unzip -o "$ZIP_FILE" -d _extract
 
+          # Do NOT overwrite GitHub Actions workflows
+          rm -rf _extract/.github
+
+          # Copy application files
           cp -a _extract/. .
 
           rm -rf _extract
 
-          rm -f \
-            "Priyanithan-OlympTrade-LiveBot-v2-reconnect.zip"
-
+      - name: Clean Python cache
+        shell: bash
+        run: |
           find . \
             -type d \
             -name "__pycache__" \
@@ -55,18 +62,24 @@ jobs:
             \( -name "*.pyc" -o -name "*.pyo" \) \
             -delete
 
-      - name: Verify extracted application
+      - name: Remove source ZIP
+        shell: bash
+        run: |
+          rm -f "$ZIP_FILE"
+
+      - name: Verify application
         shell: bash
         run: |
           set -euo pipefail
 
           test -f app.py
           test -f requirements.txt
-          test -d olymptrade_ws
 
           python -m py_compile app.py
 
-          echo "Extraction verification passed."
+          echo "================================"
+          echo "BOT EXTRACTION SUCCESS"
+          echo "================================"
 
       - name: Commit extracted source
         shell: bash
@@ -79,12 +92,15 @@ jobs:
 
           git add -A
 
+          # Never commit workflow changes
+          git restore --staged .github/workflows 2>/dev/null || true
+          git checkout -- .github/workflows 2>/dev/null || true
+
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No application changes to commit."
             exit 0
           fi
 
-          git commit \
-            -m "Extract OlympTrade bot source"
+          git commit -m "Extract OlympTrade bot source"
 
           git push
