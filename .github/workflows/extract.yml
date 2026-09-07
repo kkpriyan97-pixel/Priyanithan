@@ -1,36 +1,90 @@
-name: enable-asia-x-fixed.yml
+name: Extract OlympTrade Bot
 
 on:
   workflow_dispatch:
 
-jobs:
-  extract:
-    runs-on: ubuntu-latest
+permissions:
+  contents: write
 
-    permissions:
-      contents: write
+jobs:
+  extract-bot:
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract v3 bot ZIP
+      - name: Check bot archive
+        shell: bash
         run: |
-          rm -rf extracted
-          mkdir -p extracted
+          set -euo pipefail
 
-          unzip -o Priyanithan-OlympTrade-LiveBot-v3-fixed.zip -d extracted
+          if [[ ! -f "Priyanithan-OlympTrade-LiveBot-v2-reconnect.zip" ]]; then
+            echo "ERROR: Bot ZIP not found"
+            ls -la
+            exit 1
+          fi
 
-          cp -r extracted/* .
-
-          rm -rf extracted
-          rm -f Priyanithan-OlympTrade-LiveBot-v3-fixed.zip
-
-      - name: Commit extracted files
+      - name: Extract bot source
+        shell: bash
         run: |
+          set -euo pipefail
+
+          rm -rf _extract
+          mkdir -p _extract
+
+          unzip -o \
+            "Priyanithan-OlympTrade-LiveBot-v2-reconnect.zip" \
+            -d _extract
+
+          cp -a _extract/. .
+
+          rm -rf _extract
+
+          rm -f \
+            "Priyanithan-OlympTrade-LiveBot-v2-reconnect.zip"
+
+          find . \
+            -type d \
+            -name "__pycache__" \
+            -prune \
+            -exec rm -rf {} +
+
+          find . \
+            -type f \
+            \( -name "*.pyc" -o -name "*.pyo" \) \
+            -delete
+
+      - name: Verify extracted application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f app.py
+          test -f requirements.txt
+          test -d olymptrade_ws
+
+          python -m py_compile app.py
+
+          echo "Extraction verification passed."
+
+      - name: Commit extracted source
+        shell: bash
+        run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add .
-          git commit -m "Deploy v3 PTB lifecycle fix" || echo "No changes"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit \
+            -m "Extract OlympTrade bot source"
+
           git push
