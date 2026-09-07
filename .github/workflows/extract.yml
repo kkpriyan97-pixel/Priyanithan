@@ -1,4 +1,4 @@
-name: Extract OlympTrade Bot
+name: Extract Priyanithan Flex Scanner v4 
 
 on:
   workflow_dispatch:
