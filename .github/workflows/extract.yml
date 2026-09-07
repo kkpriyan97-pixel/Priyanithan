@@ -1,4 +1,4 @@
-name: Extract Flex Scanner v4
+name: Extract Flex Scanner v5
 
 on:
   workflow_dispatch:
