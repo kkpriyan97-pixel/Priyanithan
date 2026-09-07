@@ -37,7 +37,7 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 
-AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "75"))
+AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "60"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 LIVE_UPDATE_SECONDS = 15
 AUTO_TRADE = False
@@ -616,7 +616,7 @@ async def scan_loop(application):
                 try: conf = int(ai.get("confidence", 0))
                 except: conf = 0
                 log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, decision, direction, conf, str(ai.get("reason",""))[:500])
-                approved = decision == "APPROVE" and direction in ("UP","DOWN") and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE
+                approved = (decision == "APPROVE" and direction in ("UP", "DOWN") and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE and result["confidence"] >= 60 and (conf >= 70 or result["confidence"] >= 70))
                 text = format_signal(result, ai) if approved else (
                     f"🚫 NO SIGNAL\n\n📈 {pair}\n🕐 {result['candle_time']}\n\n"
                     f"📊 Technical candidate: {result['signal']} ({result['confidence']}%)\n"
