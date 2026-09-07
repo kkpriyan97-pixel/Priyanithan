@@ -63,7 +63,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("priyanithan")
-APP_VERSION = "3.2-safe-ai-decision-adaptive"
+APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"
 
 app = Flask(__name__)
 authorized_users = set()
@@ -450,7 +450,7 @@ def choose_duration_min(result, ai=None):
     if isinstance(ai, dict):
         try:
             d = int(ai.get("duration_min", 0))
-            if d in (1, 2, 3, 4, 5, 10, 15):
+            if d in (1, 2, 3, 5, 10, 15):
                 return d
         except Exception:
             pass
@@ -478,12 +478,12 @@ Rules:
 - If at least 3 independent factors support the same direction and there is no major conflict, APPROVE can be used.
 - Do not require every indicator to agree; markets can be valid while one indicator is neutral or cautionary.
 - Confidence is a validation score, NOT a guaranteed win probability.
-- If approving, choose the most suitable expiry from exactly: 1, 2, 3, 4, 5, 10, 15 minutes.
+- If approving, choose the most suitable expiry from exactly: 1, 2, 3, 5, 10, 15 minutes.
 - Choose expiry from setup quality, momentum, volatility, candle structure, trend strength and support/resistance distance.
 - Do not choose a longer expiry merely to avoid NO SIGNAL.
 - If the setup is conflicted or unsafe, reject it.
 Return JSON only:
-{{"decision":"APPROVE|REJECT","direction":"UP|DOWN|NO SIGNAL","confidence":0-100,"duration_min":1|2|3|4|5|10|15,"reason":"short reason"}}
+{{"decision":"APPROVE|REJECT","direction":"UP|DOWN|NO SIGNAL","confidence":0-100,"duration_min":1|2|3|5|10|15,"reason":"short reason"}}
 DATA:
 {json.dumps(result, ensure_ascii=False)}""".strip()
 
