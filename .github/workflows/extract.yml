@@ -1,5 +1,4 @@
-name: Extract Flex Scanner v5
-
+name: Extract Verify Flex Adaptive v5
 on:
   workflow_dispatch:
 
