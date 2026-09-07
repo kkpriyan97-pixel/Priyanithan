@@ -37,7 +37,7 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 AIRFORCE_API_KEY = os.getenv("AIRFORCE_API_KEY")
 AIRFORCE_MODEL = os.getenv("AIRFORCE_MODEL", "gpt-oss-120b")
 
-AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "80"))
+AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "75"))
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 LIVE_UPDATE_SECONDS = 15
 AUTO_TRADE = False
@@ -58,7 +58,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("priyanithan")
-APP_VERSION = "3.0-uae-auto-signal-readonly"
+APP_VERSION = "3.1-balanced-candidate-ai-adaptive"
 
 app = Flask(__name__)
 authorized_users = set()
@@ -373,12 +373,15 @@ def analyze(df, pair):
     # Balanced candidate gate: technical scoring creates a CANDIDATE and lets AI
     # handle weaker ADX / nearby S-R / single-pattern conflicts. Do not require
     # EMA + MACD + structure to all agree, because that produced almost no candidates.
-    if directional == "NO SIGNAL" or strength < 3 or margin < 1:
+    # Candidate gate is intentionally broad: the technical layer should find
+    # coherent setups and let the AI validator make the final safety decision.
+    # Require at least 2 directional factors and a non-zero directional edge.
+    if directional == "NO SIGNAL" or strength < 2 or margin < 1:
         signal, reason = "NO SIGNAL", "Directional evidence is too balanced or too weak."
-    elif margin < 1.25 and len(conflicts) >= 2:
-        signal, reason = "NO SIGNAL", "Directional edge is small and multiple conflicts remain."
+    elif len(conflicts) >= 3:
+        signal, reason = "NO SIGNAL", "Several technical conflicts remain; waiting for a cleaner setup."
     else:
-        signal, reason = directional, "Technical candidate found; AI validation will judge conflicts and tradeability."
+        signal, reason = directional, "Technical candidate found; AI validation will make the final decision."
     if adx_val < 15: conflicts.append(f"Very weak ADX ({adx_val:.1f})")
     elif adx_val < 20: conflicts.append(f"Weak ADX ({adx_val:.1f})")
     recent = x.iloc[-22:-2]
@@ -425,10 +428,11 @@ Evaluate price action, candle patterns, market structure, EMA, MACD, RSI, Bollin
 Stochastic, ADX, support/resistance and conflicts.
 Rules:
 - ADX below 15 is strong caution; 15-20 reduces confidence but is not automatic rejection.
-- Multiple major conflicts => REJECT / NO SIGNAL.
+- Reject when there are multiple major conflicts or the direction is genuinely mixed.
 - A single caution (weak ADX, overbought/oversold, or nearby S/R) is not by itself enough to reject.
 - One candle pattern alone is never sufficient.
-- Approve when the overall evidence is directionally coherent, even if one indicator is a caution.
+- If at least 3 independent factors support the same direction and there is no major conflict, APPROVE can be used.
+- Do not require every indicator to agree; markets can be valid while one indicator is neutral or cautionary.
 - Confidence is a validation score, NOT a guaranteed win probability.
 - If approving, choose the most suitable expiry from exactly: 1, 2, 3, 4, 5, 10, 15 minutes.
 - Choose expiry from setup quality, momentum, volatility, candle structure, trend strength and support/resistance distance.
