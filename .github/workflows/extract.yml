@@ -15,19 +15,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show repository structure
-        run: |
-          echo "=== Repository root ==="
-          pwd
-          echo "=== Files ==="
-          find . -maxdepth 3 -type f | sort
-
-      - name: Verify required files
+      - name: Verify repository structure
         run: |
           test -f app.py || { echo "ERROR: app.py not found in repository root"; exit 1; }
           test -f requirements.txt || { echo "ERROR: requirements.txt not found"; exit 1; }
           test -d olymptrade_ws || { echo "ERROR: olymptrade_ws directory not found"; exit 1; }
-          echo "Required files found."
+          echo "Repository structure OK."
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,11 +40,27 @@ jobs:
 
       - name: Verify adaptive durations
         run: |
-          grep -q "1, 2, 3, 5, 10, 15" app.py || {
-            echo "ERROR: adaptive duration list 1,2,3,5,10,15 not found"
-            exit 1
-          }
-          echo "Adaptive durations verified: 1, 2, 3, 5, 10, 15 minutes."
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("app.py").read_text(encoding="utf-8")
+
+          # Accept normal Python formatting such as:
+          # (1, 2, 3, 5, 10, 15)
+          # (1,2,3,5,10,15)
+          patterns = [
+              r'\(\s*1\s*,\s*2\s*,\s*3\s*,\s*5\s*,\s*10\s*,\s*15\s*\)',
+              r'1\s*\|\s*2\s*\|\s*3\s*\|\s*5\s*\|\s*10\s*\|\s*15'
+          ]
+
+          if not any(re.search(p, text) for p in patterns):
+              print("ERROR: app.py does not contain the adaptive duration set 1, 2, 3, 5, 10, 15.")
+              print("Please replace the repository app.py with the Flex Adaptive v5 app.py.")
+              raise SystemExit(1)
+
+          print("Adaptive durations verified: 1, 2, 3, 5, 10, 15 minutes.")
+          PY
 
       - name: Verify auto-trade is disabled
         run: |
