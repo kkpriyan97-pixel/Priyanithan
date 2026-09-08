@@ -219,291 +219,180 @@ async def on_tick(message):
     data = message.get("d", []) if isinstance(message, dict) else []
     if not isinstance(data, list):
         return
-    for tick in data:
-        if not isinstance(tick, dict):
-            continue
-        pair = tick.get("p", tick.get("pair"))
-        price = tick.get("q", tick.get("price"))
-        ts = tick.get("t", tick.get("timestamp", time.time()))
-        if pair is None or price is None:
-            continue
-        try:
-            with state_lock:
-                latest_ticks[str(pair).upper()] = {"price": float(price), "timestamp": float(ts)}
-        except (TypeError, ValueError):
-            pass
-
-async def on_balance(message):
-    log.debug("OlympTrade balance update received (read-only).")
-
-async def on_instruments(message):
-    """Capture the broker's live instrument catalogue when the session sends it."""
-    global PAIRS
-    data = message.get("d", []) if isinstance(message, dict) else []
-    if isinstance(data, list) and data and isinstance(data[0], dict) and "pairs" in data[0]:
-        data = data[0].get("pairs", [])
-    if not isinstance(data, list):
-        return
-    found = {}
     for item in data:
         if not isinstance(item, dict):
             continue
-        pair = item.get("id") or item.get("pair") or item.get("symbol")
+        pair = str(item.get("pair") or item.get("symbol") or "").upper()
+        if pair:
+            latest_ticks[pair] = item
+
+
+def extract_instruments(message):
+    found = {}
+    data = message.get("d") if isinstance(message, dict) else None
+    if isinstance(data, dict):
+        data = data.get("instruments", data.get("pairs", data.get("items", [])))
+    if not isinstance(data, list):
+        return found
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        pair = str(item.get("pair") or item.get("symbol") or item.get("name") or "").upper().strip()
         if not pair:
             continue
-        pair = str(pair).upper()
-        locked = bool(item.get("locked_trading", item.get("locked", False)))
-        disabled = bool(item.get("disabled", False))
-        if not locked and not disabled:
-            found[pair] = item
+        found[pair] = item
+    return found
+
+async def on_instruments(message):
+    found = extract_instruments(message)
     if found:
-        with state_lock:
-            discovered_assets.update(found)
+        discovered_assets.update(found)
         if AUTO_DISCOVER_ASSETS:
-            PAIRS = sorted(discovered_assets.keys())
-            log.info("AUTO DISCOVERY: %s tradable instruments captured", len(PAIRS))
+            PAIRS[:] = sorted(discovered_assets.keys())[:MAX_ASSETS_PER_CYCLE]
+            log.info("AUTO DISCOVERY: %s tradable assets available", len(PAIRS))
 
-async def on_trade_event(message):
-    event = message.get("e") if isinstance(message, dict) else None
-    data = message.get("d", []) if isinstance(message, dict) else []
-    if not isinstance(data, list):
-        return
-    for item in data:
-        if not isinstance(item, dict) or not item.get("id"):
-            continue
-        with state_lock:
-            rec = manual_trades.setdefault(str(item["id"]), {})
-            rec["event"] = event
-            rec["data"] = item
-            rec["updated_at"] = time.time()
-
-async def olymptrade_connect_loop():
-    global ot_client, PAIRS
-    if not OLYMPTRADE_ACCESS_TOKEN:
-        log.error("OLYMPTRADE_ACCESS_TOKEN is not configured.")
-        return
-    retry_delay = 5
-    attempt = 0
-    while True:
-        client = None
-        try:
-            attempt += 1
-            log.info("OlympTrade connection attempt #%s", attempt)
-            client = OlympTradeClient(access_token=OLYMPTRADE_ACCESS_TOKEN, log_raw_messages=False)
-            client.register_callback(parameters.E_TICK_UPDATE, on_tick)
-            client.register_callback(parameters.E_BALANCE_UPDATE, on_balance)
-            # Instrument catalogue observed in the project logs (event 1054).
-            # Register before start so the initial catalogue is not missed.
-            client.register_callback(1054, on_instruments)
-            client.register_callback(parameters.E_TRADE_ACCEPTED, on_trade_event)
-            client.register_callback(parameters.E_TRADE_UPDATE_INTERIM, on_trade_event)
-            client.register_callback(parameters.E_TRADE_CLOSED, on_trade_event)
-            await client.start()
-            ot_client = client
-
-            # Balance is optional. A timeout here must NOT kill market data.
-            try:
-                await asyncio.wait_for(client.balance.get_balance(), timeout=10)
-            except Exception as e:
-                log.warning("Balance read skipped/failed: %s", e)
-
-            # If auto discovery is enabled, the instrument callback may have populated PAIRS.
-            # Manual PAIRS remain supported for testing.
-            if not PAIRS and AUTO_DISCOVER_ASSETS:
-                log.info("Waiting briefly for broker instrument catalogue...")
-                await asyncio.sleep(2)
-            if not PAIRS and MANUAL_PAIRS:
-                PAIRS = MANUAL_PAIRS[:]
-            for pair in PAIRS[:MAX_ASSETS_PER_CYCLE]:
-                broker_pair = PAIR_ALIASES.get(pair, pair)
-                try:
-                    await client.market.subscribe_ticks(broker_pair)
-                    log.info("Subscribed to OlympTrade ticks: %s", broker_pair)
-                except Exception as e:
-                    log.warning("Tick subscription failed for %s: %s", broker_pair, e)
-            log.info("OlympTrade connection established. Assets available for scanner: %s", len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS))
-            retry_delay = 5
-            attempt = 0
-            while client.connection.is_connected:
-                await asyncio.sleep(5)
-            raise ConnectionError("OlympTrade WebSocket disconnected")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.error("OlympTrade connection error: %s", e)
-            ot_client = None
-            try:
-                if client and client.connection.is_connected:
-                    await client.connection.disconnect()
-            except Exception:
-                pass
-            log.warning("OlympTrade reconnecting in %s seconds", retry_delay)
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
-
-async def get_ot_candles(pair, size=60, count=260):
-    client = ot_client
-    broker_pair = PAIR_ALIASES.get(pair, pair)
-    if client is None or not client.connection.is_connected:
-        return None, "OlympTrade WebSocket is not connected"
+async def get_ot_candles(pair, timeframe=60, count=120):
+    if ot_client is None:
+        return None, "OlympTrade client unavailable"
     try:
-        log.info("CANDLE REQUEST: pair=%s broker_pair=%s size=%s count=%s", pair, broker_pair, size, count)
-        raw = await client.market.get_candles(broker_pair, size=size, count=count)
-        df = normalize_candles(raw)
-        rows = len(df) if df is not None else 0
-        log.info("CANDLE NORMALIZED: pair=%s rows=%s", pair, rows)
-        if df is None or rows < 220:
-            return None, f"Not enough OlympTrade candles ({rows}/220)"
-        now_utc = time.time()
-        latest_ts = float(df["timestamp"].iloc[-1])
-        if latest_ts > 100000000000:
-            latest_ts /= 1000.0
-            df["timestamp"] = df["timestamp"] / 1000.0
-        age_seconds = now_utc - latest_ts
-        log.info("LIVE DATA CHECK: pair=%s latest=%s age=%.1fs UAE=%s", pair, format_uae_timestamp(latest_ts), age_seconds, now_uae().strftime("%Y-%m-%d %H:%M:%S %Z"))
-        if latest_ts > now_utc + 120:
-            return None, f"Future-dated OlympTrade candle rejected (age={age_seconds:.1f}s)"
-        if age_seconds > 180:
-            return None, f"STALE OlympTrade candles rejected (latest={format_uae_timestamp(latest_ts)}, age={age_seconds:.1f}s)"
-        log.info("LIVE CANDLES READY: %s rows for %s; latest=%s; age=%.1fs", rows, pair, format_uae_timestamp(latest_ts), age_seconds)
-        return df.tail(count).reset_index(drop=True), None
+        raw = await ot_client.get_candles(pair, timeframe, count)
     except Exception as e:
-        log.exception("Historical candle request failed for %s", pair)
-        return None, str(e)
+        return None, f"candle request failed: {e}"
+    df = normalize_candles(raw)
+    if df is None or len(df) < 40:
+        return None, "insufficient candle data"
+    now_utc = time.time()
+    latest_ts = float(df["timestamp"].iloc[-1])
+    if latest_ts > 100000000000:
+        latest_ts /= 1000.0
+        df["timestamp"] = df["timestamp"] / 1000.0
+    age_seconds = now_utc - latest_ts
+    log.info("LIVE DATA CHECK: pair=%s latest=%s age=%.1fs UAE=%s", pair, datetime.fromtimestamp(latest_ts, timezone.utc).isoformat(), age_seconds, format_uae_timestamp(latest_ts))
+    if latest_ts > now_utc + 120:
+        return None, f"Future-dated OlympTrade candle rejected ({age_seconds:.1f}s skew)"
+    if age_seconds > 180:
+        return None, f"STALE OlympTrade candles rejected ({age_seconds:.1f}s old)"
+    log.info("LIVE CANDLES READY: pair=%s rows=%s latest=%s", pair, len(df), format_uae_timestamp(latest_ts))
+    return df, None
 
 # ============================================================
-# TECHNICAL / PRICE ACTION
+# TECHNICAL ANALYSIS
 # ============================================================
-def candle_patterns(df):
-    a, b = df.iloc[-2], df.iloc[-3]
-    body = abs(a.close - a.open)
-    rng = max(a.high - a.low, 1e-12)
-    upper = a.high - max(a.open, a.close)
-    lower = min(a.open, a.close) - a.low
-    bull, bear = a.close > a.open, a.close < a.open
-    r = {}
-    r["Doji"] = body <= rng * .10
-    r["Hammer"] = lower >= body * 2 and upper <= max(body, rng * .15)
-    r["Inverted Hammer"] = upper >= body * 2 and lower <= max(body, rng * .15)
-    r["Shooting Star"] = upper >= body * 2 and lower <= max(body, rng * .15) and bear
-    r["Bullish Engulfing"] = bull and b.close < b.open and a.open <= b.close and a.close >= b.open
-    r["Bearish Engulfing"] = bear and b.close > b.open and a.open >= b.close and a.close <= b.open
-    r["Harami"] = max(a.open, a.close) <= max(b.open, b.close) and min(a.open, a.close) >= min(b.open, b.close)
-    r["Pin Bar"] = max(upper, lower) >= rng * .60
-    r["Marubozu"] = body >= rng * .80
-    r["Spinning Top"] = body <= rng * .35 and upper >= rng * .20 and lower >= rng * .20
-    c = df.iloc[-4]
-    r["Morning Star"] = c.close < c.open and abs(b.close-b.open) <= abs(c.close-c.open)*.45 and bull and a.close > (c.open+c.close)/2
-    r["Evening Star"] = c.close > c.open and abs(b.close-b.open) <= abs(c.close-c.open)*.45 and bear and a.close < (c.open+c.close)/2
-    r["Tweezer Bottom"] = abs(a.low-b.low) <= rng*.08 and bull and b.close < b.open
-    r["Tweezer Top"] = abs(a.high-b.high) <= rng*.08 and bear and b.close > b.open
-    last3 = df.iloc[-4:-1]
-    r["Three White Soldiers"] = all(x.close > x.open for _, x in last3.iterrows())
-    r["Three Black Crows"] = all(x.close < x.open for _, x in last3.iterrows())
-    r["Inside Bar"] = a.high <= b.high and a.low >= b.low
-    return [k for k, v in r.items() if v]
+def analyze_pair(pair, df):
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    ema9 = EMAIndicator(close, window=9).ema_indicator()
+    ema21 = EMAIndicator(close, window=21).ema_indicator()
+    macd_obj = MACD(close)
+    macd = macd_obj.macd()
+    macd_signal = macd_obj.macd_signal()
+    rsi = RSIIndicator(close, window=14).rsi()
+    stoch = StochasticOscillator(high, low, close).stoch()
+    adx = ADXIndicator(high, low, close).adx()
+    bb = BollingerBands(close)
+    bb_high = bb.bollinger_hband()
+    bb_low = bb.bollinger_lband()
 
-def structure(df):
-    highs, lows = df.high.tail(30).to_numpy(), df.low.tail(30).to_numpy()
-    hh = highs[-1] > highs[-6] if len(highs) >= 6 else False
-    hl = lows[-1] > lows[-6] if len(lows) >= 6 else False
-    lh = highs[-1] < highs[-6] if len(highs) >= 6 else False
-    ll = lows[-1] < lows[-6] if len(lows) >= 6 else False
-    if hh and hl: return "Bullish"
-    if lh and ll: return "Bearish"
-    return "Range / Mixed"
+    c = float(close.iloc[-1])
+    prev = float(close.iloc[-2])
+    e9 = float(ema9.iloc[-1])
+    e21 = float(ema21.iloc[-1])
+    m = float(macd.iloc[-1])
+    ms = float(macd_signal.iloc[-1])
+    rv = float(rsi.iloc[-1])
+    sv = float(stoch.iloc[-1])
+    av = float(adx.iloc[-1])
+    bh = float(bb_high.iloc[-1])
+    bl = float(bb_low.iloc[-1])
 
-def analyze(df, pair):
-    x = df.copy()
-    close, high, low = x.close, x.high, x.low
-    x["ema9"] = EMAIndicator(close, 9).ema_indicator()
-    x["ema21"] = EMAIndicator(close, 21).ema_indicator()
-    x["ema50"] = EMAIndicator(close, 50).ema_indicator()
-    x["ema200"] = EMAIndicator(close, 200).ema_indicator()
-    macd = MACD(close, 26, 12, 9)
-    x["macd"] = macd.macd(); x["macd_signal"] = macd.macd_signal(); x["macd_hist"] = macd.macd_diff()
-    x["rsi"] = RSIIndicator(close, 14).rsi()
-    bb = BollingerBands(close, 20, 2)
-    x["bb_mid"] = bb.bollinger_mavg(); x["bb_high"] = bb.bollinger_hband(); x["bb_low"] = bb.bollinger_lband()
-    st = StochasticOscillator(high, low, close, 14, 3)
-    x["stoch_k"] = st.stoch(); x["stoch_d"] = st.stoch_signal()
-    x["adx"] = ADXIndicator(high, low, close, 14).adx()
-    row = x.iloc[-2]
-    price = float(row.close)
-    pats, trend = candle_patterns(x), structure(x)
-    bull = bear = 0; reasons = []; conflicts = []
-    if row.ema9 > row.ema21: bull += 1; reasons.append("EMA 9/21 Bullish")
-    elif row.ema9 < row.ema21: bear += 1; reasons.append("EMA 9/21 Bearish")
-    if row.macd > row.macd_signal and row.macd_hist > 0: bull += 1; reasons.append("MACD Bullish")
-    elif row.macd < row.macd_signal and row.macd_hist < 0: bear += 1; reasons.append("MACD Bearish")
-    if 50 < row.rsi < 70: bull += 1; reasons.append("RSI Momentum")
-    elif 30 < row.rsi < 50: bear += 1; reasons.append("RSI Momentum")
-    elif row.rsi >= 70: conflicts.append("RSI Overbought")
-    elif row.rsi <= 30: conflicts.append("RSI Oversold")
-    if price > row.bb_mid: bull += 1; reasons.append("Above Bollinger Mid")
-    elif price < row.bb_mid: bear += 1; reasons.append("Below Bollinger Mid")
-    if row.stoch_k > row.stoch_d and row.stoch_k < 85: bull += 1; reasons.append("Stochastic Bullish")
-    elif row.stoch_k < row.stoch_d and row.stoch_k > 15: bear += 1; reasons.append("Stochastic Bearish")
-    if trend == "Bullish": bull += 1; reasons.append("Bullish Structure")
-    elif trend == "Bearish": bear += 1; reasons.append("Bearish Structure")
-    if any(p in pats for p in ("Bullish Engulfing", "Morning Star", "Three White Soldiers")): bull += 1; reasons.append("Bullish Candle Pattern")
-    if any(p in pats for p in ("Bearish Engulfing", "Evening Star", "Three Black Crows")): bear += 1; reasons.append("Bearish Candle Pattern")
-
-    adx_val = float(row.adx)
-    strength, margin = max(bull, bear), abs(bull-bear)
-    directional = "UP" if bull > bear else ("DOWN" if bear > bull else "NO SIGNAL")
-    # Balanced candidate gate: technical scoring creates a CANDIDATE and lets AI
-    # handle weaker ADX / nearby S-R / single-pattern conflicts. Do not require
-    # EMA + MACD + structure to all agree, because that produced almost no candidates.
-    # Candidate gate is intentionally broad: the technical layer should find
-    # coherent setups and let the AI validator make the final safety decision.
-    # Require at least 2 directional factors and a non-zero directional edge.
-    if directional == "NO SIGNAL" or strength < 2 or margin < 1:
-        signal, reason = "NO SIGNAL", "Directional evidence is too balanced or too weak."
-    elif len(conflicts) >= 3:
-        signal, reason = "NO SIGNAL", "Several technical conflicts remain; waiting for a cleaner setup."
-    else:
-        signal, reason = directional, "Technical candidate found; AI validation will make the final decision."
-    if adx_val < 15: conflicts.append(f"Very weak ADX ({adx_val:.1f})")
-    elif adx_val < 20: conflicts.append(f"Weak ADX ({adx_val:.1f})")
-    recent = x.iloc[-22:-2]
-    resistance, support = float(recent.high.max()), float(recent.low.min())
-    if signal == "UP" and resistance > price and (resistance-price)/max(price,1e-12) < .0008: conflicts.append("Resistance very close")
-    if signal == "DOWN" and support < price and (price-support)/max(price,1e-12) < .0008: conflicts.append("Support very close")
-    confidence = min(99, int(55 + max(bull,bear)*5 - len(conflicts)*7))
+    score_up = 0
+    score_down = 0
+    reasons = []
+    patterns = []
+    if e9 > e21:
+        score_up += 2
+        reasons.append("EMA bullish")
+    elif e9 < e21:
+        score_down += 2
+        reasons.append("EMA bearish")
+    if m > ms:
+        score_up += 2
+        reasons.append("MACD bullish")
+    elif m < ms:
+        score_down += 2
+        reasons.append("MACD bearish")
+    if rv >= 52 and rv < 70:
+        score_up += 1
+    elif rv <= 48 and rv > 30:
+        score_down += 1
+    if c > bh:
+        score_down += 1
+        reasons.append("above upper BB")
+    elif c < bl:
+        score_up += 1
+        reasons.append("below lower BB")
+    if sv > 80:
+        score_down += 1
+        reasons.append("stoch overbought")
+    elif sv < 20:
+        score_up += 1
+        reasons.append("stoch oversold")
+    if av >= 25:
+        if score_up > score_down:
+            score_up += 2
+        elif score_down > score_up:
+            score_down += 2
+    elif av >= 20:
+        if score_up > score_down:
+            score_up += 1
+        elif score_down > score_up:
+            score_down += 1
+    body = abs(c - prev)
+    if body > 0:
+        if c > prev:
+            patterns.append("bullish close")
+        else:
+            patterns.append("bearish close")
+    signal = "UP" if score_up > score_down else ("DOWN" if score_down > score_up else "NO SIGNAL")
+    confidence = int(min(99, 50 + abs(score_up - score_down) * 7 + max(0, av - 20)))
+    if av < 15:
+        confidence = min(confidence, 62)
+    candle_time = format_uae_timestamp(float(df["timestamp"].iloc[-1]))
+    reason = "; ".join(reasons[:5]) or "mixed indicators"
     return {
-        "pair": pair, "signal": signal, "price": price,
-        "candle_time": format_uae_timestamp(row.timestamp),
-        "bull": bull, "bear": bear, "trend": trend, "adx": adx_val,
-        "rsi": float(row.rsi), "macd": float(row.macd), "macd_signal": float(row.macd_signal),
-        "stoch_k": float(row.stoch_k), "stoch_d": float(row.stoch_d), "patterns": pats,
-        "reasons": reasons, "conflicts": conflicts, "support": support, "resistance": resistance,
-        "confidence": confidence, "reason": reason, "data_source": "OlympTrade live candle feed",
+        "pair": pair,
+        "signal": signal,
+        "confidence": confidence,
+        "candle_time": candle_time,
+        "patterns": patterns,
+        "trend": "BULLISH" if score_up > score_down else ("BEARISH" if score_down > score_up else "MIXED"),
+        "rsi": rv,
+        "adx": av,
+        "reason": reason,
+        "price": c,
+        "ema9": e9,
+        "ema21": e21,
+        "macd": m,
+        "macd_signal": ms,
+        "stoch": sv,
+        "bb_high": bh,
+        "bb_low": bl,
     }
+
+
+def choose_duration_min(result, ai):
+    requested = ai.get("duration_min", 5) if isinstance(ai, dict) else 5
+    try:
+        requested = int(requested)
+    except Exception:
+        requested = 5
+    allowed = [1, 2, 3, 5, 10, 15]
+    return requested if requested in allowed else 5
 
 # ============================================================
 # AI
 # ============================================================
-def choose_duration_min(result, ai=None):
-    if isinstance(ai, dict):
-        try:
-            d = int(ai.get("duration_min", 0))
-            if d in (1, 2, 3, 5, 10, 15):
-                return d
-        except Exception:
-            pass
-    adx = float(result.get("adx", 0))
-    rsi = float(result.get("rsi", 50))
-    if adx >= 35:
-        return 10 if (rsi >= 55 or rsi <= 45) else 5
-    if adx >= 25:
-        return 5
-    if adx >= 20:
-        return 5
-    if adx >= 15:
-        return 3
-    return 1
-
 def ai_prompt(result):
     return f"""You are a cautious OlympTrade market-setup validator. Do not invent data.
 Evaluate price action, candle patterns, market structure, EMA, MACD, RSI, Bollinger Bands,
@@ -525,16 +414,42 @@ Return JSON only:
 DATA:
 {json.dumps(result, ensure_ascii=False)}""".strip()
 
+
+def _json_object_from_text(text):
+    text = str(text or "").strip()
+    if not text:
+        raise ValueError("AI response contained no text content")
+    text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*```\s*$", "", text)
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            value, _ = decoder.raw_decode(text[match.start():])
+            if isinstance(value, dict):
+                return value
+        except Exception:
+            continue
+    raise ValueError(f"AI response was not valid JSON: {text[:300]}")
+
+
 def parse_ai(data):
-    """Parse OpenAI-compatible AI output, including JSON in code fences/text."""
+    """Parse provider JSON without treating reasoning text as the decision payload."""
     choices = data.get("choices") if isinstance(data, dict) else None
     if not choices:
         raise ValueError(f"AI response missing choices: {str(data)[:400]}")
     choice = choices[0] if isinstance(choices[0], dict) else {}
     msg = choice.get("message", {}) if isinstance(choice, dict) else {}
-    content = msg.get("content") or choice.get("text") or msg.get("reasoning_content") or msg.get("reasoning")
 
-    # Some providers return content as structured blocks.
+    # IMPORTANT: reasoning_content/reasoning is deliberately NOT used as the
+    # decision payload. Reasoning models can put prose there, which caused the
+    # previous JSONDecodeError even when the HTTP response was 200.
+    content = msg.get("content") or choice.get("text")
     if isinstance(content, list):
         parts = []
         for item in content:
@@ -544,39 +459,20 @@ def parse_ai(data):
                 parts.append(str(item))
         content = "".join(parts)
 
-    # Some OpenAI-compatible providers put useful JSON in another field.
-    if not content:
-        for key in ("output_text", "response", "result", "content"):
-            value = data.get(key) if isinstance(data, dict) else None
-            if value:
-                content = value
-                break
+    if content:
+        return _json_object_from_text(content)
 
-    content = str(content or "").strip()
-    if not content:
-        raise ValueError("AI response contained no text content")
+    for key in ("output_text", "response", "result", "content"):
+        value = data.get(key) if isinstance(data, dict) else None
+        if value:
+            if isinstance(value, (dict, list)):
+                if isinstance(value, dict):
+                    return value
+                value = "".join(str(x.get("text") or x.get("content") or x) if isinstance(x, dict) else str(x) for x in value)
+            return _json_object_from_text(value)
 
-    # Strip markdown fences and locate the first JSON object if the model added prose.
-    content = re.sub(r"^\s*```(?:json)?\s*", "", content, flags=re.I)
-    content = re.sub(r"\s*```\s*$", "", content)
-    if not content.startswith("{"):
-        m = re.search(r"\{.*\}", content, re.S)
-        if m:
-            content = m.group(0)
+    raise ValueError("AI response contained no decision content")
 
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError:
-        # Tolerate a single JSON object embedded between surrounding text.
-        decoder = json.JSONDecoder()
-        match = re.search(r"\{", content)
-        if not match:
-            raise
-        result, _ = decoder.raw_decode(content[match.start():])
-
-    if not isinstance(result, dict):
-        raise ValueError("AI JSON result is not an object")
-    return result
 
 def call_ai(prompt):
     """Validate a setup with independent AI providers and fail over automatically."""
@@ -618,14 +514,27 @@ def call_ai(prompt):
             if name.startswith("OpenRouter/"):
                 headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
                 headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
-            payload = {"model": model, "messages": [{"role":"system","content":"Return JSON only."},{"role":"user","content":prompt}], "temperature":0, "max_tokens":300}
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "Return exactly one valid JSON object and no reasoning/prose/markdown."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0,
+                "max_tokens": 300,
+                "response_format": {"type": "json_object"},
+            }
             started = time.time()
             r = requests.post(url, headers=headers, json=payload, timeout=15)
             elapsed = time.time() - started
             log.info("AI PROVIDER RESPONSE: %s model=%s status=%s elapsed=%.2fs bytes=%s", name, model, r.status_code, elapsed, len(r.content))
             if not r.ok:
                 raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500].replace(chr(10), ' ')}")
-            parsed = parse_ai(r.json())
+            try:
+                body = r.json()
+            except Exception as e:
+                raise RuntimeError(f"invalid provider JSON envelope: {e}; body={r.text[:300]}")
+            parsed = parse_ai(body)
             log.info("AI PROVIDER SUCCESS: %s model=%s decision=%s direction=%s confidence=%s", name, model, parsed.get("decision"), parsed.get("direction"), parsed.get("confidence"))
             return parsed, None
         except Exception as e:
@@ -648,7 +557,6 @@ def normalize_ai_decision(ai):
     if raw in ("APPROVE", "REJECT"):
         ai["decision"] = raw
         return ai
-    # Invalid/typo decision (e.g. APJECT) is unsafe to interpret as approval.
     ai["decision"] = "REJECT"
     ai["decision_error"] = f"Invalid AI decision '{raw or 'EMPTY'}'; approval not assumed."
     return ai
@@ -678,224 +586,114 @@ def format_signal(result, ai=None):
     fire = "🔥🔥🔥" if conf >= 94 else ("🔥🔥" if conf >= 91 else "🔥")
     arrow = "⬆️" if direction == "UP" else "⬇️"
     duration = f"{choose_duration_min(result, ai)} MIN"
-    confirmations = "\n".join(f"• {x}" for x in result["reasons"][-7:])
-    return (f"📈 {result['pair']}\n{arrow} TRADE {direction}\n🕐 {result['candle_time']}\n{fire}\n\n"
-            f"{confirmations}\n\n⏱ Duration: {duration}\n🤖 AI: APPROVED\n📊 Confidence: {conf}%\n\n"
-            "⚠️ Manual execution only")
+    return (f"{fire} PRIYANITHAN AI SIGNAL {fire}\n\n"
+            f"📈 {result['pair']}\n{arrow} {direction}\n💰 Entry: {result['price']}\n⏱️ Expiry: {duration}\n"
+            f"🤖 AI Confidence: {conf}%\n📊 Technical: {result['confidence']}%\n"
+            f"🕐 {result['candle_time']}\n🧠 Candice AI: APPROVED\n\n"
+            "⚠️ MANUAL TRADE — AUTO TRADE OFF")
 
 # ============================================================
-# TELEGRAM COMMANDS
+# SCAN / TELEGRAM COMMANDS
 # ============================================================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remember_chat(update)
-    await update.message.reply_text("🤖 Priyanithan AI Bot\n\nUse /access YOUR_CODE\nThen /status or /signal ASIA_X")
-
-async def access_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remember_chat(update)
-    if not context.args:
-        await update.message.reply_text("Use /access YOUR_CODE")
-        return
-    if ACCESS_CODE and context.args[0] == ACCESS_CODE:
-        authorized_users.add(update.effective_user.id)
-        await update.message.reply_text("✅ Access authorized. Automatic 5-minute scans are now enabled for this chat.")
+async def scan_cycle(application):
+    universe = sorted(discovered_assets.keys())[:MAX_ASSETS_PER_CYCLE] if AUTO_DISCOVER_ASSETS else (MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:MAX_ASSETS_PER_CYCLE])
+    candidates = []
+    for pair in universe:
+        df, err = await get_ot_candles(pair, 60, 120)
+        if df is None:
+            continue
+        try:
+            result = analyze_pair(pair, df)
+        except Exception as e:
+            log.warning("Technical analysis failed pair=%s: %s", pair, e)
+            continue
+        if result["signal"] != "NO SIGNAL":
+            candidates.append(result)
+    candidates.sort(key=lambda x: x["confidence"], reverse=True)
+    checked = candidates[:MAX_AI_CANDIDATES]
+    approved = []
+    for result in checked:
+        ai, err = call_ai(ai_prompt(result))
+        if err:
+            log.info("AI DECISION DETAIL: pair=%s decision=ERROR direction=NO SIGNAL confidence=0 duration=%s reason=%s", result["pair"], choose_duration_min(result, None), err)
+            continue
+        ai = normalize_ai_decision(ai)
+        direction = str(ai.get("direction", "NO SIGNAL")).upper()
+        try: conf = int(ai.get("confidence", 0))
+        except Exception: conf = 0
+        log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s duration=%s reason=%s", result["pair"], ai.get("decision"), direction, conf, choose_duration_min(result, ai), ai.get("reason", ""))
+        if ai.get("decision") == "APPROVE" and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE:
+            approved.append((result, ai))
+            if len(approved) >= MAX_SIGNALS_PER_CYCLE:
+                break
+    if approved:
+        for result, ai in approved:
+            await send_to_recipients(application.bot, format_signal(result, ai))
     else:
-        await update.message.reply_text("❌ Invalid access code.")
+        await send_to_recipients(application.bot, f"🚫 NO QUALIFIED SIGNAL\n\n🔎 Assets scanned: {len(universe)}\n🤖 AI candidates checked: {len(checked)}\n⏳ Waiting for a stronger setup on the next 5-minute cycle.")
+    log.info("5-minute cycle complete: %s approved signal(s); universe=%s candidates=%s", len(approved), len(universe), len(checked))
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update)
+    if not ACCESS_CODE:
+        await update.message.reply_text("ACCESS_CODE is not configured.")
+        return
+    args = context.args or []
+    if args and args[0].strip() == ACCESS_CODE:
+        user = getattr(update, "effective_user", None)
+        if user:
+            authorized_users.add(int(user.id))
+            await update.message.reply_text("✅ Access approved. This chat can receive signals.")
+        return
+    await update.message.reply_text("❌ Invalid access code.")
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update)
+    await update.message.reply_text("Priyanithan AI is online. Use /access YOUR_CODE to authorize this chat.")
+
+async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_chat(update)
     if not is_authorized(update):
-        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
+        await update.message.reply_text("❌ Not authorized. Use /access YOUR_CODE first.")
         return
-    connected = bool(ot_client and ot_client.connection.is_connected)
-    ai = "OpenRouter" if OPENROUTER_API_KEY else ("Airforce" if AIRFORCE_API_KEY else "NOT CONFIGURED")
-    await update.message.reply_text(
-        "🟢 BOT STATUS\n\n"
-        f"📡 OlympTrade Live Feed: {'CONNECTED' if connected else 'DISCONNECTED'}\n"
-        f"📊 Assets: {len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS)} (live broker catalogue)\n"
-        f"🤖 AI: {ai}\n🧠 Model: {OPENROUTER_MODEL if OPENROUTER_API_KEY else AIRFORCE_MODEL}\n"
-        f"🕐 Timezone: UAE (Asia/Dubai)\n⏱ Scan: every 5 min (:00/:05/:10...)\n\n"
-        "⚡ Auto-trade: OFF\n🛑 Martingale: OFF\n👤 Execution: MANUAL ONLY\n📡 Source: OlympTrade"
-    )
-
-async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    remember_chat(update)
-    if not is_authorized(update):
-        await update.message.reply_text("🔒 Access required. Use /access YOUR_CODE")
-        return
-    pair = context.args[0].upper() if context.args else (PAIRS[0] if PAIRS else "ASIA_X")
-    if pair not in PAIRS:
-        await update.message.reply_text(f"❌ Unsupported pair. Available: {', '.join(PAIRS)}")
-        return
-    msg = await update.message.reply_text(f"⏳ Reading OlympTrade live candles for {pair}...")
-    df, err = await get_ot_candles(pair, 60, 260)
-    if err:
-        await msg.edit_text(f"❌ LIVE DATA FAILED\n\n{err}")
-        return
-    result = analyze(df, pair)
-    latest_candles[pair], latest_signal[pair] = df, result
-    if result["signal"] == "NO SIGNAL":
-        await msg.edit_text(format_signal(result))
-        return
-    await msg.edit_text("🤖 Strong setup found. AI validation running...")
-    ai, ai_err = await asyncio.to_thread(call_ai, ai_prompt(result))
-    if ai_err:
-        await msg.edit_text(f"🚫 NO SIGNAL\n\n📈 {pair}\n❌ AI validation unavailable: {ai_err}")
-        return
-    log.info("AI DECISION DETAIL MANUAL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision"), ai.get("direction"), ai.get("confidence"), str(ai.get("decision_error", ai.get("reason","")))[:500])
-    await msg.edit_text(format_signal(result, ai))
+    await update.message.reply_text("🔎 Live scan started...")
+    await scan_cycle(context.application)
 
 # ============================================================
-# AUTOMATIC 5-MINUTE SCANNER
+# RUNTIME
 # ============================================================
-async def scan_loop(application):
-    """Every 5 minutes: scan the broker-discovered universe, rank candidates, AI-check the best, send only approved signals."""
-    await wait_until_next_5min_uae()
-    while True:
-        cycle_started = time.time()
-        try:
-            # Refresh universe from the latest instrument catalogue.
-            if AUTO_DISCOVER_ASSETS:
-                universe = sorted(discovered_assets.keys())
-            else:
-                universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]
-            universe = universe[:MAX_ASSETS_PER_CYCLE]
-            log.info("AUTO SCAN START: UAE=%s assets=%s recipients=%s", now_uae().strftime("%H:%M:%S"), len(universe), recipients())
-            if not universe:
-                await send_to_recipients(application.bot, "⚠️ 5-MINUTE SCAN\n\nNo tradable Flex assets discovered yet. Waiting for broker instrument catalogue.")
-            else:
-                # Technical scan first. Parallel requests keep the 5-minute cycle practical.
-                sem = asyncio.Semaphore(8)
-                async def scan_one(pair):
-                    async with sem:
-                        try:
-                            df, err = await get_ot_candles(pair, 60, 260)
-                            if err:
-                                return None
-                            result = analyze(df, pair)
-                            latest_candles[pair], latest_signal[pair] = df, result
-                            if result["signal"] not in ("UP", "DOWN"):
-                                return None
-                            # Technical ranking: directional confidence, factor margin, ADX, and conflict penalty.
-                            score = (result["confidence"] * 1.5 + abs(result["bull"]-result["bear"])*8 + min(result["adx"], 40) - len(result["conflicts"])*10)
-                            result["scan_score"] = score
-                            return result
-                        except Exception as e:
-                            log.warning("Asset scan failed %s: %s", pair, e)
-                            return None
-                results = await asyncio.gather(*(scan_one(p) for p in universe))
-                candidates = sorted((r for r in results if r), key=lambda r: r["scan_score"], reverse=True)
-                candidates = candidates[:MAX_AI_CANDIDATES]
-                log.info("AI CANDIDATES SELECTED: count=%s assets=%s", len(candidates), [r["pair"] for r in candidates])
-                if not candidates:
-                    log.info("AI DECISION DETAIL: decision=SKIPPED reason=No technical candidates passed the pre-filter")
-                approved = []
-                for result in candidates:
-                    pair = result["pair"]
-                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])
-                    prompt = ai_prompt(result)
-                    log.info("AI PROMPT READY: pair=%s prompt_chars=%s", pair, len(prompt))
-                    try:
-                        ai, ai_err = await asyncio.wait_for(asyncio.to_thread(call_ai, prompt), timeout=90)
-                    except asyncio.TimeoutError:
-                        ai, ai_err = None, "AI validation timed out after 90 seconds"
-                    if ai_err or not ai:
-                        log.warning("AI unavailable for %s: %s", pair, ai_err)
-                        log.info("AI DECISION DETAIL: pair=%s decision=ERROR direction=NO SIGNAL confidence=0 duration=%s reason=%s", pair, choose_duration_min(result, {}), str(ai_err or "Empty AI response")[:300])
-                        continue
-                    ai = normalize_ai_decision(ai)
-                    log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision"), ai.get("direction"), ai.get("confidence"), str(ai.get("reason", ai.get("decision_error", "")))[:300])
-                    direction = str(ai.get("direction", "NO SIGNAL")).upper()
-                    decision = str(ai.get("decision", "REJECT")).upper()
-                    try: conf = int(ai.get("confidence", 0))
-                    except Exception: conf = 0
-                    duration = choose_duration_min(result, ai)
-                    approved_flag = (decision == "APPROVE" and direction in ("UP", "DOWN") and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE and result["confidence"] >= 60 and (conf >= 70 or result["confidence"] >= 70))
-                    log.info("AI DECISION FINAL: pair=%s decision=%s direction=%s confidence=%s duration=%s approved=%s reason=%s", pair, decision, direction, conf, duration, approved_flag, str(ai.get("reason", ai.get("decision_error", "")))[:300])
-                    if approved_flag:
-                        approved.append((conf, result, ai))
-                    if len(approved) >= MAX_SIGNALS_PER_CYCLE:
-                        break
-                if approved:
-                    approved.sort(key=lambda x: (x[0], x[1]["scan_score"]), reverse=True)
-                    for _, result, ai in approved:
-                        await send_to_recipients(application.bot, format_signal(result, ai))
-                    log.info("5-minute cycle complete: approved_signals=%s candidates=%s universe=%s", len(approved), len(candidates), len(universe))
-                else:
-                    await send_to_recipients(application.bot, f"🚫 NO QUALIFIED SIGNAL\n\n🔎 Assets scanned: {len(universe)}\n🤖 AI candidates checked: {len(candidates)}\n\n⏳ Waiting for a stronger setup on the next 5-minute cycle.")
-                    log.info("5-minute cycle complete: no approved signal; universe=%s candidates=%s", len(universe), len(candidates))
-        except Exception:
-            log.exception("Scanner loop error")
-        await wait_until_next_5min_uae()
-
-# ============================================================
-# MANUAL TRADE MONITOR - READ ONLY
-# ============================================================
-async def manual_trade_monitor(application):
-    while True:
-        try:
-            client = ot_client
-            account_id = getattr(client, "account_id", None) if client else None
-            if client and client.connection.is_connected and account_id:
-                try:
-                    trades = await client.trade.get_open_trades(account_id, group="real")
-                    if isinstance(trades, list):
-                        for t in trades:
-                            if isinstance(t, dict) and t.get("id"):
-                                manual_trades.setdefault(str(t["id"]), {})["open"] = t
-                except Exception as e:
-                    log.debug("Open-trade read unavailable: %s", e)
-        except Exception:
-            log.exception("Manual monitor error")
-        await asyncio.sleep(LIVE_UPDATE_SECONDS)
-
-# ============================================================
-# MAIN
-# ============================================================
-def run_flask():
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
-
 async def telegram_runtime(application):
     global runtime_loop, telegram_application
     runtime_loop = asyncio.get_running_loop()
     telegram_application = application
     await application.initialize()
     await application.start()
-    tasks = [
-        asyncio.create_task(olymptrade_connect_loop(), name="olymptrade-connect"),
-        asyncio.create_task(scan_loop(application), name="signal-scan"),
-        asyncio.create_task(manual_trade_monitor(application), name="trade-monitor"),
-    ]
-    try:
-        webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")
-        webhook_url = f"{webhook_base}/telegram/webhook"
-        await application.bot.set_webhook(
-            url=webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=["message"],
-        )
-        log.info("Telegram webhook active: %s", webhook_url)
-        log.info("Telegram polling DISABLED; getUpdates will not be used.")
-        await asyncio.Event().wait()
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if application.running:
-            await application.stop()
-        await application.shutdown()
+    webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")
+    webhook_url = f"{webhook_base}/telegram/webhook"
+    await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True, allowed_updates=["message"])
+    log.info("Telegram webhook active: %s", webhook_url)
+    log.info("Telegram polling DISABLED; getUpdates will not be used.")
+
+    while True:
+        await wait_until_next_5min_uae()
+        try:
+            await scan_cycle(application)
+        except Exception as e:
+            log.exception("SCAN CYCLE ERROR: %s", e)
+
 
 def main():
-    if not TELEGRAM_BOT_TOKEN: raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
-    if not ACCESS_CODE: raise RuntimeError("ACCESS_CODE is missing")
-    if not OLYMPTRADE_ACCESS_TOKEN: raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is missing")
-    threading.Thread(target=run_flask, daemon=True).start()
+    global ot_client
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("access", access_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("signal", signal_command))
+    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("access", access_cmd))
+    application.add_handler(CommandHandler("scan", scan_cmd))
+    # The project-specific OlympTrade client remains read-only; AUTO_TRADE is hard-disabled.
+    ot_client = OlympTradeClient(OLYMPTRADE_ACCESS_TOKEN, parameters)
     asyncio.run(telegram_runtime(application))
+
 
 if __name__ == "__main__":
     main()
