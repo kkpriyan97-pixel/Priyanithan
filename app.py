@@ -552,7 +552,14 @@ def call_ai(prompt):
                 headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
                 headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
             payload = {"model": model, "messages": [{"role":"system","content":"Return JSON only."},{"role":"user","content":prompt}], "temperature":0, "max_tokens":300}
+            started = time.time()
+            log.info("OPENROUTER REQUEST: provider=%s model=%s prompt_chars=%s", name, model, len(prompt)) if name.startswith("OpenRouter/") else log.info("AI REQUEST: provider=%s model=%s prompt_chars=%s", name, model, len(prompt))
             r = requests.post(url, headers=headers, json=payload, timeout=15)
+            elapsed = time.time() - started
+            if name.startswith("OpenRouter/"):
+                log.info("OPENROUTER RESPONSE: model=%s status=%s elapsed=%.2fs bytes=%s", model, r.status_code, elapsed, len(r.content))
+            else:
+                log.info("AI RESPONSE: provider=%s model=%s status=%s elapsed=%.2fs bytes=%s", name, model, r.status_code, elapsed, len(r.content))
             if not r.ok: raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500].replace(chr(10),' ')}")
             parsed = parse_ai(r.json())
             log.info("AI VALIDATION OK: provider=%s model=%s", name, model)
@@ -710,16 +717,22 @@ async def scan_loop(application):
                 results = await asyncio.gather(*(scan_one(p) for p in universe))
                 candidates = sorted((r for r in results if r), key=lambda r: r["scan_score"], reverse=True)
                 candidates = candidates[:MAX_AI_CANDIDATES]
+                log.info("AI CANDIDATES SELECTED: count=%s assets=%s", len(candidates), [r["pair"] for r in candidates])
+                if not candidates:
+                    log.info("AI DECISION DETAIL: decision=SKIPPED reason=No technical candidates passed the pre-filter")
                 approved = []
                 for result in candidates:
                     pair = result["pair"]
                     log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])
+                    prompt = ai_prompt(result)
+                    log.info("AI PROMPT READY: pair=%s prompt_chars=%s", pair, len(prompt))
                     try:
-                        ai, ai_err = await asyncio.wait_for(asyncio.to_thread(call_ai, ai_prompt(result)), timeout=90)
+                        ai, ai_err = await asyncio.wait_for(asyncio.to_thread(call_ai, prompt), timeout=90)
                     except asyncio.TimeoutError:
                         ai, ai_err = None, "AI validation timed out after 90 seconds"
                     if ai_err or not ai:
                         log.warning("AI unavailable for %s: %s", pair, ai_err)
+                        log.info("AI DECISION DETAIL: pair=%s decision=ERROR direction=NO SIGNAL confidence=0 duration=%s reason=%s", pair, choose_duration_min(result, {}), str(ai_err or "Empty AI response")[:300])
                         continue
                     ai = normalize_ai_decision(ai)
                     direction = str(ai.get("direction", "NO SIGNAL")).upper()
