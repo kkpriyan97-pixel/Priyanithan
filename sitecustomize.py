@@ -1,6 +1,6 @@
 # Priyanithan runtime compatibility patch.
-# Keeps broker asset discovery incremental and limits AI requests so the
-# OpenRouter free-model quota is not exhausted by fallback retries.
+# Keeps broker asset discovery incremental, forces live-data validation,
+# and limits AI requests so the OpenRouter free-model quota is not exhausted.
 import importlib.abc
 import importlib.machinery
 import sys
@@ -21,13 +21,14 @@ class _Loader(importlib.abc.Loader):
     def exec_module(self, module):
         source = self.original.get_source(module.__name__)
 
-        # Do not erase the broker catalogue when another incremental event arrives.
+        # Keep all incremental broker instrument events instead of replacing
+        # the catalogue on every 1054 callback.
         source = source.replace(
             "            discovered_assets.clear()\n",
             "            # Preserve incremental broker catalogue updates.\n",
         )
 
-        # AUTO discovery is authoritative.
+        # Broker auto-discovery is authoritative when OLYMP_PAIRS=AUTO.
         source = source.replace(
             'AUTO_DISCOVER_ASSETS = os.getenv("AUTO_DISCOVER_ASSETS", "true").lower() in ("1", "true", "yes", "on")',
             "AUTO_DISCOVER_ASSETS = True",
@@ -37,8 +38,8 @@ class _Loader(importlib.abc.Loader):
             "        if AUTO_DISCOVER_ASSETS:\n",
         )
 
-        # Scanner: use discovered instruments first; retain fallback only when the
-        # broker exposes fewer than five instruments at startup.
+        # Never scan an invented fallback universe. Real broker-discovered
+        # instruments are required for signal analysis.
         old_universe = (
             "            universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]\n"
             "            if AUTO_DISCOVER_ASSETS and discovered_assets:\n"
@@ -46,47 +47,61 @@ class _Loader(importlib.abc.Loader):
         )
         new_universe = (
             "            if AUTO_DISCOVER_ASSETS:\n"
-            "                discovered = sorted(discovered_assets.keys())\n"
-            "                universe = discovered if len(discovered) >= 5 else sorted(set(discovered + FALLBACK_ASSETS))\n"
+            "                universe = sorted(discovered_assets.keys())\n"
             "            else:\n"
             "                universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]\n"
         )
         source = source.replace(old_universe, new_universe)
 
-        # Limit the number of AI candidates per 5-minute cycle to 2. This keeps the
-        # free OpenRouter daily quota usable while still validating the strongest
-        # technical setups.
+        # Limit AI to the strongest two candidates per 5-minute cycle.
         source = source.replace(
             'MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))',
             'MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "2")), 2)',
         )
 
-        # OpenRouter-only: do not fan out one candidate across several free models.
-        # A 429 should consume at most one request for that candidate.
+        # OpenRouter-only: one selected model per candidate, no fan-out retries.
         source = source.replace(
             'for m in (OPENROUTER_MODEL, "openrouter/free", "minimax/minimax-m3:free", "google/gemma-4-26b-a4b-it:free"):',
             'for m in (OPENROUTER_MODEL,):',
         )
 
-        # Publish each candidate immediately before AI validation.
-        old_ai_start = (
-            '                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])\n'
+        # Reject stale candle responses. A 60-second strategy must not analyze
+        # candles whose newest timestamp is materially behind the UAE wall clock.
+        old_candle = (
+            '        log.info("CANDLE NORMALIZED: pair=%s rows=%s", pair, rows)\n'
+            '        if df is None or rows < 220:\n'
+            '            return None, f"Not enough OlympTrade candles ({rows}/220)"\n'
+            '        log.info("HISTORICAL CANDLES READY: %s rows for %s", rows, pair)\n'
+            '        return df.tail(count).reset_index(drop=True), None\n'
         )
-        new_ai_start = (
-            '                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])\n'
-            '                    await send_to_recipients(application.bot, f"🔎 LIVE AI SCAN\\n\\n📌 Asset: {pair}\\n📊 Technical direction: {result[\'signal\']}\\n🎯 Technical confidence: {result[\'confidence\']}%\\n📈 Scan score: {result[\'scan_score\']:.1f}\\n🤖 AI status: ANALYZING NOW\\n\\n⏱️ 5-minute cycle")\n'
+        new_candle = (
+            '        log.info("CANDLE NORMALIZED: pair=%s rows=%s", pair, rows)\n'
+            '        if df is None or rows < 220:\n'
+            '            return None, f"Not enough OlympTrade candles ({rows}/220)"\n'
+            '        now_utc = time.time()\n'
+            '        latest_ts = float(df["timestamp"].iloc[-1])\n'
+            '        age_seconds = now_utc - latest_ts\n'
+            '        log.info("LIVE DATA CHECK: pair=%s latest=%s age=%.1fs UAE=%s", pair, format_uae_timestamp(latest_ts), age_seconds, now_uae().strftime("%Y-%m-%d %H:%M:%S %Z"))\n'
+            '        # Allow a small transport/provider delay, but never accept stale historical data.\n'
+            '        if latest_ts > now_utc + 120:\n'
+            '            return None, f"Future-dated OlympTrade candle rejected (age={age_seconds:.1f}s)"\n'
+            '        if age_seconds > 180:\n'
+            '            return None, f"STALE OlympTrade candles rejected (latest={format_uae_timestamp(latest_ts)}, age={age_seconds:.1f}s)"\n'
+            '        log.info("LIVE CANDLES READY: %s rows for %s; latest=%s; age=%.1fs", rows, pair, format_uae_timestamp(latest_ts), age_seconds)\n'
+            '        return df.tail(count).reset_index(drop=True), None\n'
         )
-        source = source.replace(old_ai_start, new_ai_start)
+        source = source.replace(old_candle, new_candle)
 
+        # Make the runtime report the actual UAE date/time used by the scanner.
         source = source.replace(
             'APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"',
-            'APP_VERSION = "5.4-ai-budgeted-live-scan"',
+            'APP_VERSION = "5.5-live-uae-data-validated"',
         )
 
         exec(compile(source, self.original.path, "exec"), module.__dict__)
         logging = __import__("logging")
         logging.getLogger("priyanithan").warning(
-            "RUNTIME PATCH ACTIVE: incremental discovery + AI max 2 candidates/cycle + OpenRouter single-model path"
+            "RUNTIME PATCH ACTIVE: incremental discovery + live candle age validation + OpenRouter single-model path"
         )
 
 class _Finder(importlib.abc.MetaPathFinder):
