@@ -27,7 +27,12 @@ class _Loader(importlib.abc.Loader):
             "            # Preserve incremental broker catalogue updates.\n",
         )
 
-        # AUTO mode must win over a stale OLYMP_PAIRS environment value.
+        # AUTO discovery is authoritative. Ignore a stale OLYMP_PAIRS value while
+        # this runtime compatibility patch is active.
+        source = source.replace(
+            'AUTO_DISCOVER_ASSETS = os.getenv("AUTO_DISCOVER_ASSETS", "true").lower() in ("1", "true", "yes", "on")',
+            "AUTO_DISCOVER_ASSETS = True",
+        )
         source = source.replace(
             "        if AUTO_DISCOVER_ASSETS and not MANUAL_PAIRS:\n",
             "        if AUTO_DISCOVER_ASSETS:\n",
@@ -50,16 +55,16 @@ class _Loader(importlib.abc.Loader):
         )
         source = source.replace(old_universe, new_universe)
 
-        # Add a small runtime marker so Render logs prove this patch is active.
+        # Runtime marker proves in Render logs that this compatibility layer loaded.
         source = source.replace(
             'APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"',
-            'APP_VERSION = "5.1-auto-universe-runtime-patch"',
+            'APP_VERSION = "5.2-auto-universe-runtime-patch"',
         )
 
         exec(compile(source, self.original.path, "exec"), module.__dict__)
         logging = __import__("logging")
         logging.getLogger("priyanithan").warning(
-            "RUNTIME PATCH ACTIVE: incremental asset discovery + fallback universe (%s assets)",
+            "RUNTIME PATCH ACTIVE: auto discovery forced; incremental catalogue + fallback universe (%s assets)",
             len(FALLBACK_ASSETS),
         )
 
