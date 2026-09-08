@@ -67,3 +67,4 @@ new = '''def call_ai(prompt):
 s = s[:start] + new + s[end:]
 p.write_text(s, encoding='utf-8')
 print('AI fallback patch applied')
+# trigger marker
