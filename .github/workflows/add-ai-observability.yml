@@ -3,6 +3,7 @@ name: Add AI observability
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,95 +17,99 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch AI observability logs
+      - name: Restore known-good production app
         shell: bash
         run: |
-          python - <<'PY'
+          git fetch origin 0d6725b41867e9d481fde545c4c6204e7720ce61 --depth=1
+          git checkout 0d6725b41867e9d481fde545c4c6204e7720ce61 -- app.py
+
+      - name: Repair OpenRouter JSON parsing
+        shell: python
+        run: |
           from pathlib import Path
           p = Path('app.py')
           s = p.read_text(encoding='utf-8')
-          original = s
 
-          # 1) Log every AI request entry without exposing API keys or prompt contents.
-          marker = 'log.info("OPENROUTER REQUEST: model=%s prompt_chars=%s", OPENROUTER_MODEL, len(str(prompt)))'
-          if marker not in s:
-              s = s.replace('def call_ai(prompt):\n    providers = []',
-                            'def call_ai(prompt):\n    log.info("OPENROUTER REQUEST: model=%s prompt_chars=%s", OPENROUTER_MODEL, len(str(prompt)))\n    providers = []', 1)
+          start = s.index('def parse_ai(data):')
+          end = s.index('\ndef call_ai(prompt):', start)
+          new_parse = '''def parse_ai(data):
+    """Parse OpenAI/OpenRouter responses including reasoning/text JSON variants."""
+    if not isinstance(data, dict):
+        raise ValueError(f"AI response is not an object: {str(data)[:400]}")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError(f"AI response missing choices: {str(data)[:600]}")
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    msg = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    candidates = []
+    for value in (msg.get("content"), msg.get("reasoning"), msg.get("reasoning_content"), choice.get("text")):
+        if value is None:
+            continue
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text", item.get("content", ""))))
+                else:
+                    parts.append(str(item))
+            value = "".join(parts)
+        elif isinstance(value, dict):
+            value = value.get("text", value.get("content", ""))
+        value = str(value).strip()
+        if value:
+            candidates.append(value)
+    last_error = None
+    for content in candidates:
+        cleaned = re.sub(r"<think>.*?</think>", " ", content, flags=re.I | re.S).strip()
+        cleaned = re.sub(r"^```(?:json)?\\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\\s*```$", "", cleaned).strip()
+        try:
+            obj = json.loads(cleaned)
+            if isinstance(obj, dict):
+                return obj
+        except Exception as e:
+            last_error = e
+        first, last = cleaned.find("{"), cleaned.rfind("}")
+        if first >= 0 and last > first:
+            try:
+                obj = json.loads(cleaned[first:last + 1])
+                if isinstance(obj, dict):
+                    return obj
+            except Exception as e:
+                last_error = e
+    raise ValueError(f"AI JSON parse failed: {last_error}; content={candidates[0][:600] if candidates else 'EMPTY'}")
+'''
+          s = s[:start] + new_parse + s[end:]
 
-          # 2) Log HTTP request/response status for OpenRouter (and fallback providers).
-          old = '            r = requests.post(url, headers=headers, json=payload, timeout=15)\n            if not r.ok:'
-          new = ('            log.info("AI HTTP REQUEST: provider=%s model=%s", name, model)\n'
-                 '            r = requests.post(url, headers=headers, json=payload, timeout=15)\n'
-                 '            log.info("OPENROUTER RESPONSE: provider=%s model=%s status=%s", name, model, r.status_code)\n'
-                 '            if not r.ok:')
-          if 'AI HTTP REQUEST: provider=%s model=%s' not in s:
+          # Request a JSON object from compatible OpenRouter models.
+          old = '"temperature":0, "max_tokens":300'
+          new = '"temperature":0, "max_tokens":300, "response_format":{"type":"json_object"}'
+          if old in s:
               s = s.replace(old, new, 1)
 
-          # 3) Log parsed AI output (safe fields only).
-          old = '            parsed = parse_ai(r.json())\n            log.info("AI VALIDATION OK: provider=%s model=%s", name, model)'
-          new = ('            parsed = parse_ai(r.json())\n'
-                 '            log.info("OPENROUTER PARSED: provider=%s model=%s decision=%s direction=%s confidence=%s", name, model, parsed.get("decision"), parsed.get("direction"), parsed.get("confidence"))\n'
-                 '            log.info("AI VALIDATION OK: provider=%s model=%s", name, model)')
-          if 'OPENROUTER PARSED: provider=%s model=%s' not in s:
-              s = s.replace(old, new, 1)
+          # Free fallbacks are currently exhausted/retired; use the configured model only.
+          old_models = 'for m in (OPENROUTER_MODEL, "openrouter/free", "minimax/minimax-m3:free", "google/gemma-4-26b-a4b-it:free"):'
+          if old_models in s:
+              s = s.replace(old_models, 'for m in (OPENROUTER_MODEL,):', 1)
 
-          # 4) Make the no-provider case explicit.
-          if 'OPENROUTER REQUEST SKIPPED: no AI provider configured' not in s:
-              s = s.replace('    if not providers: return None, "No AI provider configured"',
-                            '    if not providers:\n        log.error("OPENROUTER REQUEST SKIPPED: no AI provider configured")\n        return None, "No AI provider configured"', 1)
-
-          # 5) Log candidate selection before AI starts.
-          old = '                candidates = candidates[:MAX_AI_CANDIDATES]\n                approved = []'
-          new = ('                candidates = candidates[:MAX_AI_CANDIDATES]\n'
-                 '                log.info("AI CANDIDATES READY: technical_results=%s selected=%s pairs=%s", sum(1 for r in results if r), len(candidates), [r["pair"] for r in candidates])\n'
-                 '                approved = []')
-          if 'AI CANDIDATES READY: technical_results=' not in s:
-              s = s.replace(old, new, 1)
-
-          # 6) Log AI start/failure/complete in the automatic scanner.
-          old = '                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])\n                    try:'
-          new = '                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])\n                    log.info("OPENROUTER AI START: pair=%s score=%.1f model=%s", pair, result["scan_score"], OPENROUTER_MODEL)\n                    try:'
-          if 'OPENROUTER AI START: pair=%s' not in s:
-              s = s.replace(old, new, 1)
-
-          old = '                    if ai_err or not ai:\n                        log.warning("AI unavailable for %s: %s", pair, ai_err)\n                        continue'
-          new = ('                    if ai_err or not ai:\n'
-                 '                        log.warning("OPENROUTER AI FAILED: pair=%s error=%s", pair, ai_err)\n'
-                 '                        continue\n'
-                 '                    log.info("OPENROUTER AI COMPLETE: pair=%s raw_decision=%s raw_direction=%s raw_confidence=%s", pair, ai.get("decision"), ai.get("direction"), ai.get("confidence"))')
-          if 'OPENROUTER AI FAILED: pair=%s' not in s:
-              s = s.replace(old, new, 1)
-
-          # 7) Always log the normalized decision before approval filtering.
-          old = '                    ai = normalize_ai_decision(ai)\n                    direction = str(ai.get("direction", "NO SIGNAL")).upper()'
-          new = ('                    ai = normalize_ai_decision(ai)\n'
-                 '                    log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision"), ai.get("direction"), ai.get("confidence"), str(ai.get("reason", ai.get("decision_error", "")))[:300])\n'
-                 '                    direction = str(ai.get("direction", "NO SIGNAL")).upper()')
-          if 'AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=' not in s:
-              s = s.replace(old, new, 1)
-
-          # 8) Keep final approval result separately visible.
-          old = '                    log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s duration=%s reason=%s", pair, decision, direction, conf, duration, str(ai.get("reason", ""))[:300])'
-          new = '                    log.info("AI DECISION FINAL: pair=%s decision=%s direction=%s confidence=%s duration=%s approved=%s reason=%s", pair, decision, direction, conf, duration, approved_flag, str(ai.get("reason", ai.get("decision_error", "")))[:300])'
-          s = s.replace(old, new, 1)
+          # Restore the observability logs required to diagnose future AI decisions.
+          if 'OPENROUTER REQUEST: provider=%s model=%s' not in s:
+              s = s.replace('            r = requests.post(url, headers=headers, json=payload, timeout=15)',
+                            '            log.info("OPENROUTER REQUEST: provider=%s model=%s prompt_chars=%s", name, model, len(prompt)) if name.startswith("OpenRouter/") else log.info("AI REQUEST: provider=%s model=%s prompt_chars=%s", name, model, len(prompt))\n            r = requests.post(url, headers=headers, json=payload, timeout=15)', 1)
+          if 'OPENROUTER PARSED:' not in s:
+              s = s.replace('            parsed = parse_ai(r.json())',
+                            '            parsed = parse_ai(r.json())\n            log.info("OPENROUTER PARSED: provider=%s model=%s decision=%s direction=%s confidence=%s", name, model, parsed.get("decision"), parsed.get("direction"), parsed.get("confidence"))', 1)
 
           p.write_text(s, encoding='utf-8')
-          print('changed:', s != original)
-          print('openrouter_request_log:', 'OPENROUTER REQUEST:' in s)
-          print('openrouter_response_log:', 'OPENROUTER RESPONSE:' in s)
-          print('ai_decision_detail_log:', 'AI DECISION DETAIL:' in s)
-          PY
-          python -m py_compile app.py
+          compile(s, 'app.py', 'exec')
+          print('production parser repair compiled successfully')
 
-      - name: Commit patched app
+      - name: Commit repaired app
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add app.py
-          if git diff --cached --quiet; then
-            echo "AI observability already present"
-            exit 0
-          fi
-          git commit -m "Add OpenRouter AI decision observability"
+          git diff --cached --check
+          git commit -m "Fix OpenRouter auto JSON parsing [skip ci]" || exit 0
           git push origin main
