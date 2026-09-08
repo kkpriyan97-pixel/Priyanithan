@@ -1,7 +1,6 @@
 # Priyanithan runtime compatibility patch.
-# Keeps broker asset discovery incremental and provides a safe fallback universe
-# when the broker only exposes a single instrument in the startup catalogue.
-# Also publishes the exact assets reaching AI validation to Telegram.
+# Keeps broker asset discovery incremental and limits AI requests so the
+# OpenRouter free-model quota is not exhausted by fallback retries.
 import importlib.abc
 import importlib.machinery
 import sys
@@ -28,8 +27,7 @@ class _Loader(importlib.abc.Loader):
             "            # Preserve incremental broker catalogue updates.\n",
         )
 
-        # AUTO discovery is authoritative. Ignore a stale OLYMP_PAIRS value while
-        # this runtime compatibility patch is active.
+        # AUTO discovery is authoritative.
         source = source.replace(
             'AUTO_DISCOVER_ASSETS = os.getenv("AUTO_DISCOVER_ASSETS", "true").lower() in ("1", "true", "yes", "on")',
             "AUTO_DISCOVER_ASSETS = True",
@@ -39,9 +37,8 @@ class _Loader(importlib.abc.Loader):
             "        if AUTO_DISCOVER_ASSETS:\n",
         )
 
-        # Scanner: use all discovered instruments first; if the broker only exposes
-        # one startup instrument, use the conservative fallback list so the scanner
-        # does not remain permanently stuck at Assets scanned: 1.
+        # Scanner: use discovered instruments first; retain fallback only when the
+        # broker exposes fewer than five instruments at startup.
         old_universe = (
             "            universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]\n"
             "            if AUTO_DISCOVER_ASSETS and discovered_assets:\n"
@@ -56,9 +53,22 @@ class _Loader(importlib.abc.Loader):
         )
         source = source.replace(old_universe, new_universe)
 
-        # Publish each candidate immediately before AI validation so Telegram shows
-        # exactly which asset the AI is analyzing in real time. This is deliberately
-        # candidate-only, not every raw asset, to avoid flooding Telegram.
+        # Limit the number of AI candidates per 5-minute cycle to 2. This keeps the
+        # free OpenRouter daily quota usable while still validating the strongest
+        # technical setups.
+        source = source.replace(
+            'MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))',
+            'MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "2")), 2)',
+        )
+
+        # OpenRouter-only: do not fan out one candidate across several free models.
+        # A 429 should consume at most one request for that candidate.
+        source = source.replace(
+            'for m in (OPENROUTER_MODEL, "openrouter/free", "minimax/minimax-m3:free", "google/gemma-4-26b-a4b-it:free"):',
+            'for m in (OPENROUTER_MODEL,):',
+        )
+
+        # Publish each candidate immediately before AI validation.
         old_ai_start = (
             '                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])\n'
         )
@@ -68,17 +78,15 @@ class _Loader(importlib.abc.Loader):
         )
         source = source.replace(old_ai_start, new_ai_start)
 
-        # Runtime marker proves in Render logs that this compatibility layer loaded.
         source = source.replace(
             'APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"',
-            'APP_VERSION = "5.3-live-ai-scan-runtime-patch"',
+            'APP_VERSION = "5.4-ai-budgeted-live-scan"',
         )
 
         exec(compile(source, self.original.path, "exec"), module.__dict__)
         logging = __import__("logging")
         logging.getLogger("priyanithan").warning(
-            "RUNTIME PATCH ACTIVE: auto discovery + fallback universe + LIVE AI Telegram asset updates (%s fallback assets)",
-            len(FALLBACK_ASSETS),
+            "RUNTIME PATCH ACTIVE: incremental discovery + AI max 2 candidates/cycle + OpenRouter single-model path"
         )
 
 class _Finder(importlib.abc.MetaPathFinder):
