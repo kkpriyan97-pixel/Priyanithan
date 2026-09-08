@@ -14,7 +14,7 @@ import requests
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from flask import Flask
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from ta.trend import EMAIndicator, MACD, ADXIndicator
@@ -48,7 +48,7 @@ MANUAL_PAIRS = [x.strip().upper() for x in PAIR_ENV.split(",") if x.strip() and 
 PAIRS = MANUAL_PAIRS[:] if MANUAL_PAIRS else []
 AUTO_DISCOVER_ASSETS = os.getenv("AUTO_DISCOVER_ASSETS", "true").lower() in ("1", "true", "yes", "on")
 MAX_ASSETS_PER_CYCLE = int(os.getenv("MAX_ASSETS_PER_CYCLE", "120"))
-MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))
+MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "2")), 2)
 MAX_SIGNALS_PER_CYCLE = int(os.getenv("MAX_SIGNALS_PER_CYCLE", "3"))
 PAIR_ALIASES = {
     "ASIA_X": os.getenv("OT_ASIA_X_PAIR", "ASIA_X"),
@@ -63,7 +63,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("priyanithan")
-APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"
+APP_VERSION = "6.0-FINAL-LIVE-UAE-WEBHOOK"
 
 app = Flask(__name__)
 authorized_users = set()
@@ -87,6 +87,27 @@ def home():
 @app.get("/health")
 def health():
     return "OK"
+
+telegram_application = None
+
+@app.post("/telegram/webhook")
+def telegram_webhook():
+    """Receive Telegram updates over HTTPS without getUpdates polling."""
+    if telegram_application is None or runtime_loop is None:
+        return "Bot is starting", 503
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return "Bad Request", 400
+    try:
+        update = Update.de_json(payload, telegram_application.bot)
+        future = asyncio.run_coroutine_threadsafe(
+            telegram_application.update_queue.put(update), runtime_loop
+        )
+        future.result(timeout=5)
+        return "OK", 200
+    except Exception as e:
+        log.warning("Telegram webhook update failed: %s", e)
+        return "Webhook processing failed", 500
 
 # ============================================================
 # TIME
@@ -230,10 +251,9 @@ async def on_instruments(message):
             found[pair] = item
     if found:
         with state_lock:
-            discovered_assets.clear()
             discovered_assets.update(found)
-        if AUTO_DISCOVER_ASSETS and not MANUAL_PAIRS:
-            PAIRS = sorted(found.keys())
+        if AUTO_DISCOVER_ASSETS:
+            PAIRS = sorted(discovered_assets.keys())
             log.info("AUTO DISCOVERY: %s tradable instruments captured", len(PAIRS))
 
 async def on_trade_event(message):
@@ -294,7 +314,7 @@ async def olymptrade_connect_loop():
                     log.info("Subscribed to OlympTrade ticks: %s", broker_pair)
                 except Exception as e:
                     log.warning("Tick subscription failed for %s: %s", broker_pair, e)
-            log.info("OlympTrade connection established. Assets available for scanner: %s", len(PAIRS))
+            log.info("OlympTrade connection established. Assets available for scanner: %s", len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS))
             retry_delay = 5
             attempt = 0
             while client.connection.is_connected:
@@ -327,7 +347,18 @@ async def get_ot_candles(pair, size=60, count=260):
         log.info("CANDLE NORMALIZED: pair=%s rows=%s", pair, rows)
         if df is None or rows < 220:
             return None, f"Not enough OlympTrade candles ({rows}/220)"
-        log.info("HISTORICAL CANDLES READY: %s rows for %s", rows, pair)
+        now_utc = time.time()
+        latest_ts = float(df["timestamp"].iloc[-1])
+        if latest_ts > 100000000000:
+            latest_ts /= 1000.0
+            df["timestamp"] = df["timestamp"] / 1000.0
+        age_seconds = now_utc - latest_ts
+        log.info("LIVE DATA CHECK: pair=%s latest=%s age=%.1fs UAE=%s", pair, format_uae_timestamp(latest_ts), age_seconds, now_uae().strftime("%Y-%m-%d %H:%M:%S %Z"))
+        if latest_ts > now_utc + 120:
+            return None, f"Future-dated OlympTrade candle rejected (age={age_seconds:.1f}s)"
+        if age_seconds > 180:
+            return None, f"STALE OlympTrade candles rejected (latest={format_uae_timestamp(latest_ts)}, age={age_seconds:.1f}s)"
+        log.info("LIVE CANDLES READY: %s rows for %s; latest=%s; age=%.1fs", rows, pair, format_uae_timestamp(latest_ts), age_seconds)
         return df.tail(count).reset_index(drop=True), None
     except Exception as e:
         log.exception("Historical candle request failed for %s", pair)
@@ -605,7 +636,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🟢 BOT STATUS\n\n"
         f"📡 OlympTrade Live Feed: {'CONNECTED' if connected else 'DISCONNECTED'}\n"
-        f"📊 Assets: {len(PAIRS)} (auto-discovered)\n"
+        f"📊 Assets: {len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS)} (live broker catalogue)\n"
         f"🤖 AI: {ai}\n🧠 Model: {OPENROUTER_MODEL if OPENROUTER_API_KEY else AIRFORCE_MODEL}\n"
         f"🕐 Timezone: UAE (Asia/Dubai)\n⏱ Scan: every 5 min (:00/:05/:10...)\n\n"
         "⚡ Auto-trade: OFF\n🛑 Martingale: OFF\n👤 Execution: MANUAL ONLY\n📡 Source: OlympTrade"
@@ -648,9 +679,10 @@ async def scan_loop(application):
         cycle_started = time.time()
         try:
             # Refresh universe from the latest instrument catalogue.
-            universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]
-            if AUTO_DISCOVER_ASSETS and discovered_assets:
+            if AUTO_DISCOVER_ASSETS:
                 universe = sorted(discovered_assets.keys())
+            else:
+                universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]
             universe = universe[:MAX_ASSETS_PER_CYCLE]
             log.info("AUTO SCAN START: UAE=%s assets=%s recipients=%s", now_uae().strftime("%H:%M:%S"), len(universe), recipients())
             if not universe:
@@ -689,14 +721,6 @@ async def scan_loop(application):
                     if ai_err or not ai:
                         log.warning("AI unavailable for %s: %s", pair, ai_err)
                         continue
-                    raw_decision = str(ai.get("decision", "")).strip().upper()
-                    if raw_decision not in ("APPROVE", "REJECT"):
-                        retry_prompt = ai_prompt(result) + "\n\nCRITICAL: Return decision EXACTLY as APPROVE or REJECT."
-                        try:
-                            retry_ai, retry_err = await asyncio.wait_for(asyncio.to_thread(call_ai, retry_prompt), timeout=90)
-                        except asyncio.TimeoutError:
-                            retry_ai, retry_err = None, "AI strict-decision retry timed out"
-                        ai = retry_ai if not retry_err and retry_ai else normalize_ai_decision(ai)
                     ai = normalize_ai_decision(ai)
                     direction = str(ai.get("direction", "NO SIGNAL")).upper()
                     decision = str(ai.get("decision", "REJECT")).upper()
@@ -750,8 +774,9 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 async def telegram_runtime(application):
-    global runtime_loop
+    global runtime_loop, telegram_application
     runtime_loop = asyncio.get_running_loop()
+    telegram_application = application
     await application.initialize()
     await application.start()
     tasks = [
@@ -760,14 +785,22 @@ async def telegram_runtime(application):
         asyncio.create_task(manual_trade_monitor(application), name="trade-monitor"),
     ]
     try:
-        await application.updater.start_polling(drop_pending_updates=True)
-        log.info("Telegram polling started; background bot tasks are running.")
+        webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")
+        webhook_url = f"{webhook_base}/telegram/webhook"
+        await application.bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message"],
+        )
+        log.info("Telegram webhook active: %s", webhook_url)
+        log.info("Telegram polling DISABLED; getUpdates will not be used.")
         await asyncio.Event().wait()
     finally:
-        for task in tasks: task.cancel()
+        for task in tasks:
+            task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        if application.updater and application.updater.running: await application.updater.stop()
-        if application.running: await application.stop()
+        if application.running:
+            await application.stop()
         await application.shutdown()
 
 def main():
@@ -775,7 +808,7 @@ def main():
     if not ACCESS_CODE: raise RuntimeError("ACCESS_CODE is missing")
     if not OLYMPTRADE_ACCESS_TOKEN: raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is missing")
     threading.Thread(target=run_flask, daemon=True).start()
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("access", access_command))
     application.add_handler(CommandHandler("status", status_command))
