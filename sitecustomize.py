@@ -1,6 +1,7 @@
 # Priyanithan runtime compatibility patch.
 # Keeps broker asset discovery incremental and provides a safe fallback universe
 # when the broker only exposes a single instrument in the startup catalogue.
+# Also publishes the exact assets reaching AI validation to Telegram.
 import importlib.abc
 import importlib.machinery
 import sys
@@ -55,16 +56,28 @@ class _Loader(importlib.abc.Loader):
         )
         source = source.replace(old_universe, new_universe)
 
+        # Publish each candidate immediately before AI validation so Telegram shows
+        # exactly which asset the AI is analyzing in real time. This is deliberately
+        # candidate-only, not every raw asset, to avoid flooding Telegram.
+        old_ai_start = (
+            '                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])\n'
+        )
+        new_ai_start = (
+            '                    log.info("5-minute AI START: pair=%s score=%.1f", pair, result["scan_score"])\n'
+            '                    await send_to_recipients(application.bot, f"🔎 LIVE AI SCAN\\n\\n📌 Asset: {pair}\\n📊 Technical direction: {result[\'signal\']}\\n🎯 Technical confidence: {result[\'confidence\']}%\\n📈 Scan score: {result[\'scan_score\']:.1f}\\n🤖 AI status: ANALYZING NOW\\n\\n⏱️ 5-minute cycle")\n'
+        )
+        source = source.replace(old_ai_start, new_ai_start)
+
         # Runtime marker proves in Render logs that this compatibility layer loaded.
         source = source.replace(
             'APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"',
-            'APP_VERSION = "5.2-auto-universe-runtime-patch"',
+            'APP_VERSION = "5.3-live-ai-scan-runtime-patch"',
         )
 
         exec(compile(source, self.original.path, "exec"), module.__dict__)
         logging = __import__("logging")
         logging.getLogger("priyanithan").warning(
-            "RUNTIME PATCH ACTIVE: auto discovery forced; incremental catalogue + fallback universe (%s assets)",
+            "RUNTIME PATCH ACTIVE: auto discovery + fallback universe + LIVE AI Telegram asset updates (%s fallback assets)",
             len(FALLBACK_ASSETS),
         )
 
