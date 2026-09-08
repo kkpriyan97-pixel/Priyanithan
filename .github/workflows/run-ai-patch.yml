@@ -1,0 +1,28 @@
+name: Run AI fallback patch
+
+on:
+  push:
+    paths:
+      - 'patch_ai_fallback.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply fallback
+        run: |
+          python patch_ai_fallback.py
+          python -m py_compile app.py
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Enable automatic independent AI provider failover"
+          git push origin main
