@@ -3,62 +3,51 @@ from pathlib import Path
 p = Path('app.py')
 s = p.read_text(encoding='utf-8')
 
-# Replace parse_ai with a robust OpenAI-compatible response parser.
 start = s.index('def parse_ai(data):')
 marker = '\ndef call_ai(prompt):'
 end = s.index(marker, start)
 new_parse = r'''def parse_ai(data):
-    """Parse OpenAI-compatible AI output, including JSON in code fences/text."""
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if not choices:
-        raise ValueError(f"AI response missing choices: {str(data)[:400]}")
-    choice = choices[0] if isinstance(choices[0], dict) else {}
-    msg = choice.get("message", {}) if isinstance(choice, dict) else {}
-    content = msg.get("content") or choice.get("text") or msg.get("reasoning_content") or msg.get("reasoning")
+    """Parse OpenAI-compatible responses and find the actual decision JSON."""
+    if not isinstance(data, dict):
+        raise ValueError("AI response is not a JSON object")
+    choices = data.get("choices")
+    if not choices or not isinstance(choices[0], dict):
+        raise ValueError(f"AI response missing choices: {str(data)[:500]}")
+    choice = choices[0]
+    msg = choice.get("message") if isinstance(choice.get("message"), dict) else {}
 
-    # Some providers return content as structured blocks.
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                parts.append(str(item.get("text") or item.get("content") or ""))
-            else:
-                parts.append(str(item))
-        content = "".join(parts)
+    values = [msg.get("content"), choice.get("text"), data.get("output_text"), data.get("response"), data.get("result"), msg.get("reasoning_content"), msg.get("reasoning")]
+    candidates = []
+    for value in values:
+        if isinstance(value, list):
+            value = "".join(str(x.get("text") or x.get("content") or "") if isinstance(x, dict) else str(x) for x in value)
+        if value:
+            candidates.append(value if isinstance(value, dict) else str(value))
 
-    # Some OpenAI-compatible providers put useful JSON in another field.
-    if not content:
-        for key in ("output_text", "response", "result", "content"):
-            value = data.get(key) if isinstance(data, dict) else None
-            if value:
-                content = value
-                break
+    for value in candidates:
+        if isinstance(value, dict) and "decision" in value:
+            return value
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```\s*$", "", text)
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and "decision" in obj:
+                return obj
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Reasoning may contain several {...} fragments; only accept one with decision.
+        for match in re.finditer(r'\{', text):
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(text[match.start():])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(obj, dict) and "decision" in obj:
+                return obj
 
-    content = str(content or "").strip()
-    if not content:
-        raise ValueError("AI response contained no text content")
-
-    # Strip markdown fences and locate the first JSON object if the model added prose.
-    content = re.sub(r"^\s*```(?:json)?\s*", "", content, flags=re.I)
-    content = re.sub(r"\s*```\s*$", "", content)
-    if not content.startswith("{"):
-        m = re.search(r"\{.*\}", content, re.S)
-        if m:
-            content = m.group(0)
-
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError:
-        # Tolerate a single JSON object embedded between surrounding text.
-        decoder = json.JSONDecoder()
-        match = re.search(r"\{", content)
-        if not match:
-            raise
-        result, _ = decoder.raw_decode(content[match.start():])
-
-    if not isinstance(result, dict):
-        raise ValueError("AI JSON result is not an object")
-    return result
+    raise ValueError("AI response contained no valid decision JSON")
 '''
 s = s[:start] + new_parse + s[end:]
 
@@ -88,6 +77,5 @@ new_send = r'''async def send_to_recipients(bot, text):
     return sent
 '''
 s = s[:start] + new_send + s[end:]
-
 p.write_text(s, encoding='utf-8')
-print('Robust AI parser + Telegram self-recipient guard applied')
+print('Hardened AI decision parser + Telegram self-recipient guard applied')
