@@ -9,23 +9,22 @@ on:
 
 jobs:
   fix:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Restore production app from last good commit
+      - name: Restore last known good production app
         shell: bash
         run: |
           git fetch origin 0d6725b41867e9d481fde545c4c6204e7720ce61 --depth=1
           git checkout 0d6725b41867e9d481fde545c4c6204e7720ce61 -- app.py
 
-      - name: Patch OpenRouter parsing
+      - name: Patch OpenRouter response parsing
         shell: python
         run: |
           from pathlib import Path
@@ -34,8 +33,8 @@ jobs:
 
           start = s.index('def parse_ai(data):')
           end = s.index('\ndef call_ai(prompt):', start)
-          new_parse = r'''def parse_ai(data):
-    """Parse OpenAI/OpenRouter chat responses, including reasoning/text variants."""
+          new_parse = '''def parse_ai(data):
+    """Parse OpenAI/OpenRouter responses including reasoning/text JSON variants."""
     if not isinstance(data, dict):
         raise ValueError(f"AI response is not an object: {str(data)[:400]}")
     choices = data.get("choices")
@@ -45,12 +44,7 @@ jobs:
     msg = choice.get("message") if isinstance(choice.get("message"), dict) else {}
 
     candidates = []
-    for value in (
-        msg.get("content"),
-        msg.get("reasoning"),
-        msg.get("reasoning_content"),
-        choice.get("text"),
-    ):
+    for value in (msg.get("content"), msg.get("reasoning"), msg.get("reasoning_content"), choice.get("text")):
         if value is None:
             continue
         if isinstance(value, list):
@@ -70,22 +64,18 @@ jobs:
     last_error = None
     for content in candidates:
         cleaned = re.sub(r"<think>.*?</think>", " ", content, flags=re.I | re.S).strip()
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
-        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-        for candidate in (cleaned,):
-            try:
-                obj = json.loads(candidate)
-                if isinstance(obj, dict):
-                    return obj
-            except Exception as e:
-                last_error = e
-        # Models sometimes put short reasoning before the JSON object.
-        first = cleaned.find("{")
-        last = cleaned.rfind("}")
+        cleaned = re.sub(r"^```(?:json)?\\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\\s*```$", "", cleaned).strip()
+        try:
+            obj = json.loads(cleaned)
+            if isinstance(obj, dict):
+                return obj
+        except Exception as e:
+            last_error = e
+        first, last = cleaned.find("{"), cleaned.rfind("}")
         if first >= 0 and last > first:
-            fragment = cleaned[first:last + 1]
             try:
-                obj = json.loads(fragment)
+                obj = json.loads(cleaned[first:last + 1])
                 if isinstance(obj, dict):
                     return obj
             except Exception as e:
@@ -95,24 +85,20 @@ jobs:
 '''
           s = s[:start] + new_parse + s[end:]
 
-          # Ask OpenRouter for a JSON object when supported. The parser above remains
-          # compatible with models that ignore response_format and return fenced/prose JSON.
           old = '"temperature":0, "max_tokens":300'
           new = '"temperature":0, "max_tokens":300, "response_format":{"type":"json_object"}'
           if old in s:
               s = s.replace(old, new, 1)
 
-          # Do not waste the whole cycle on known exhausted/retired free fallbacks.
           old_models = 'for m in (OPENROUTER_MODEL, "openrouter/free", "minimax/minimax-m3:free", "google/gemma-4-26b-a4b-it:free"):'
-          new_models = 'for m in (OPENROUTER_MODEL,):'
           if old_models in s:
-              s = s.replace(old_models, new_models, 1)
+              s = s.replace(old_models, 'for m in (OPENROUTER_MODEL,):', 1)
 
           p.write_text(s, encoding='utf-8')
           compile(s, 'app.py', 'exec')
-          print('Patched app.py successfully')
+          print('Production app restored and parser patched')
 
-      - name: Commit repaired production app
+      - name: Commit and push repaired app
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
