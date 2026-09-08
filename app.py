@@ -534,6 +534,7 @@ def parse_ai(data):
     return json.loads(content)
 
 def call_ai(prompt):
+    log.info("OPENROUTER REQUEST: model=%s prompt_chars=%s", OPENROUTER_MODEL, len(str(prompt)))
     providers = []
     if OPENROUTER_API_KEY:
         models = []
@@ -543,7 +544,9 @@ def call_ai(prompt):
             providers.append((f"OpenRouter/{m}", "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_API_KEY, m))
     if AIRFORCE_API_KEY:
         providers.append(("Airforce", "https://api.airforce/v1/chat/completions", AIRFORCE_API_KEY, AIRFORCE_MODEL))
-    if not providers: return None, "No AI provider configured"
+    if not providers:
+        log.error("OPENROUTER REQUEST SKIPPED: no AI provider configured")
+        return None, "No AI provider configured"
     last_error = None
     for name, url, key, model in providers:
         try:
@@ -562,6 +565,7 @@ def call_ai(prompt):
                 log.info("AI RESPONSE: provider=%s model=%s status=%s elapsed=%.2fs bytes=%s", name, model, r.status_code, elapsed, len(r.content))
             if not r.ok: raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500].replace(chr(10),' ')}")
             parsed = parse_ai(r.json())
+            log.info("OPENROUTER PARSED: provider=%s model=%s decision=%s direction=%s confidence=%s", name, model, parsed.get("decision"), parsed.get("direction"), parsed.get("confidence"))
             log.info("AI VALIDATION OK: provider=%s model=%s", name, model)
             return parsed, None
         except Exception as e:
@@ -735,13 +739,14 @@ async def scan_loop(application):
                         log.info("AI DECISION DETAIL: pair=%s decision=ERROR direction=NO SIGNAL confidence=0 duration=%s reason=%s", pair, choose_duration_min(result, {}), str(ai_err or "Empty AI response")[:300])
                         continue
                     ai = normalize_ai_decision(ai)
+                    log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s reason=%s", pair, ai.get("decision"), ai.get("direction"), ai.get("confidence"), str(ai.get("reason", ai.get("decision_error", "")))[:300])
                     direction = str(ai.get("direction", "NO SIGNAL")).upper()
                     decision = str(ai.get("decision", "REJECT")).upper()
                     try: conf = int(ai.get("confidence", 0))
                     except Exception: conf = 0
                     duration = choose_duration_min(result, ai)
                     approved_flag = (decision == "APPROVE" and direction in ("UP", "DOWN") and direction == result["signal"] and conf >= AI_MIN_CONFIDENCE and result["confidence"] >= 60 and (conf >= 70 or result["confidence"] >= 70))
-                    log.info("AI DECISION DETAIL: pair=%s decision=%s direction=%s confidence=%s duration=%s reason=%s", pair, decision, direction, conf, duration, str(ai.get("reason", ""))[:300])
+                    log.info("AI DECISION FINAL: pair=%s decision=%s direction=%s confidence=%s duration=%s approved=%s reason=%s", pair, decision, direction, conf, duration, approved_flag, str(ai.get("reason", ai.get("decision_error", "")))[:300])
                     if approved_flag:
                         approved.append((conf, result, ai))
                     if len(approved) >= MAX_SIGNALS_PER_CYCLE:
