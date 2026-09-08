@@ -1,0 +1,122 @@
+name: Finalize Priyanithan runtime
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch app.py to final live webhook runtime
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("app.py")
+          s = p.read_text(encoding="utf-8")
+          original = s
+
+          s = s.replace('from flask import Flask\n', 'from flask import Flask, request\n')
+          s = s.replace(
+              'MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))',
+              'MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "2")), 2)'
+          )
+          s = s.replace(
+              'APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"',
+              'APP_VERSION = "6.0-FINAL-LIVE-UAE-WEBHOOK"'
+          )
+
+          # Accumulate all broker instrument callbacks instead of clearing the catalogue.
+          s = s.replace(
+              '        with state_lock:\n'
+              '            discovered_assets.clear()\n'
+              '            discovered_assets.update(found)\n'
+              '        if AUTO_DISCOVER_ASSETS and not MANUAL_PAIRS:\n'
+              '            PAIRS = sorted(found.keys())\n'
+              '            log.info("AUTO DISCOVERY: %s tradable instruments captured", len(PAIRS))',
+              '        with state_lock:\n'
+              '            discovered_assets.update(found)\n'
+              '        if AUTO_DISCOVER_ASSETS:\n'
+              '            PAIRS = sorted(discovered_assets.keys())\n'
+              '            log.info("AUTO DISCOVERY: %s tradable instruments captured", len(PAIRS))'
+          )
+
+          # Use only the real broker catalogue when AUTO discovery is enabled.
+          s = s.replace(
+              '            universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]\n'
+              '            if AUTO_DISCOVER_ASSETS and discovered_assets:\n'
+              '                universe = sorted(discovered_assets.keys())',
+              '            if AUTO_DISCOVER_ASSETS:\n'
+              '                universe = sorted(discovered_assets.keys())\n'
+              '            else:\n'
+              '                universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]'
+          )
+
+          s = s.replace(
+              '            log.info("OlympTrade connection established. Assets available for scanner: %s", len(PAIRS))',
+              '            log.info("OlympTrade connection established. Assets available for scanner: %s", len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS))'
+          )
+          s = s.replace(
+              'f"📊 Assets: {len(PAIRS)} (auto-discovered)\\n"',
+              'f"📊 Assets: {len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS)} (live broker catalogue)\\n"'
+          )
+
+          # Reject materially stale broker candles so historical data can never become a signal.
+          old_candle = '''        log.info("CANDLE NORMALIZED: pair=%s rows=%s", pair, rows)\n        if df is None or rows < 220:\n            return None, f"Not enough OlympTrade candles ({rows}/220)"\n        log.info("HISTORICAL CANDLES READY: %s rows for %s", rows, pair)\n        return df.tail(count).reset_index(drop=True), None'''
+          new_candle = '''        log.info("CANDLE NORMALIZED: pair=%s rows=%s", pair, rows)\n        if df is None or rows < 220:\n            return None, f"Not enough OlympTrade candles ({rows}/220)"\n        now_utc = time.time()\n        latest_ts = float(df["timestamp"].iloc[-1])\n        if latest_ts > 100000000000:\n            latest_ts /= 1000.0\n            df["timestamp"] = df["timestamp"] / 1000.0\n        age_seconds = now_utc - latest_ts\n        log.info("LIVE DATA CHECK: pair=%s latest=%s age=%.1fs UAE=%s", pair, format_uae_timestamp(latest_ts), age_seconds, now_uae().strftime("%Y-%m-%d %H:%M:%S %Z"))\n        if latest_ts > now_utc + 120:\n            return None, f"Future-dated OlympTrade candle rejected (age={age_seconds:.1f}s)"\n        if age_seconds > 180:\n            return None, f"STALE OlympTrade candles rejected (latest={format_uae_timestamp(latest_ts)}, age={age_seconds:.1f}s)"\n        log.info("LIVE CANDLES READY: %s rows for %s; latest=%s; age=%.1fs", rows, pair, format_uae_timestamp(latest_ts), age_seconds)\n        return df.tail(count).reset_index(drop=True), None'''
+          s = s.replace(old_candle, new_candle)
+
+          # Remove the second AI request; malformed decisions are safely normalized/rejected.
+          retry = '''                    raw_decision = str(ai.get("decision", "")).strip().upper()\n                    if raw_decision not in ("APPROVE", "REJECT"):\n                        retry_prompt = ai_prompt(result) + "\\n\\nCRITICAL: Return decision EXACTLY as APPROVE or REJECT."\n                        try:\n                            retry_ai, retry_err = await asyncio.wait_for(asyncio.to_thread(call_ai, retry_prompt), timeout=90)\n                        except asyncio.TimeoutError:\n                            retry_ai, retry_err = None, "AI strict-decision retry timed out"\n                        ai = retry_ai if not retry_err and retry_ai else normalize_ai_decision(ai)\n                    ai = normalize_ai_decision(ai)'''
+          s = s.replace(retry, '                    ai = normalize_ai_decision(ai)')
+
+          # Replace polling runtime with a Flask HTTPS webhook feeding PTB's update queue.
+          if 'def telegram_webhook()' not in s:
+              anchor = '@app.get("/health")\ndef health():\n    return "OK"\n'
+              route = '''@app.get("/health")\ndef health():\n    return "OK"\n\ntelegram_application = None\n\n@app.post("/telegram/webhook")\ndef telegram_webhook():\n    """Receive Telegram updates over HTTPS without getUpdates polling."""\n    if telegram_application is None or runtime_loop is None:\n        return "Bot is starting", 503\n    payload = request.get_json(silent=True)\n    if not isinstance(payload, dict):\n        return "Bad Request", 400\n    try:\n        update = Update.de_json(payload, telegram_application.bot)\n        future = asyncio.run_coroutine_threadsafe(\n            telegram_application.update_queue.put(update), runtime_loop\n        )\n        future.result(timeout=5)\n        return "OK", 200\n    except Exception as e:\n        log.warning("Telegram webhook update failed: %s", e)\n        return "Webhook processing failed", 500\n'''
+              if anchor not in s:
+                  raise SystemExit('health anchor not found')
+              s = s.replace(anchor, route, 1)
+
+          start = s.index('async def telegram_runtime(application):')
+          end = s.index('\ndef main():', start)
+          runtime = '''async def telegram_runtime(application):\n    global runtime_loop, telegram_application\n    runtime_loop = asyncio.get_running_loop()\n    telegram_application = application\n    await application.initialize()\n    await application.start()\n    tasks = [\n        asyncio.create_task(olymptrade_connect_loop(), name="olymptrade-connect"),\n        asyncio.create_task(scan_loop(application), name="signal-scan"),\n        asyncio.create_task(manual_trade_monitor(application), name="trade-monitor"),\n    ]\n    try:\n        webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")\n        webhook_url = f"{webhook_base}/telegram/webhook"\n        await application.bot.set_webhook(\n            url=webhook_url,\n            drop_pending_updates=True,\n            allowed_updates=["message"],\n        )\n        log.info("Telegram webhook active: %s", webhook_url)\n        log.info("Telegram polling DISABLED; getUpdates will not be used.")\n        await asyncio.Event().wait()\n    finally:\n        for task in tasks:\n            task.cancel()\n        await asyncio.gather(*tasks, return_exceptions=True)\n        if application.running:\n            await application.stop()\n        await application.shutdown()\n'''
+          s = s[:start] + runtime + s[end:]
+          s = s.replace(
+              'application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()',
+              'application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()'
+          )
+
+          p.write_text(s, encoding="utf-8")
+          print("changed:", s != original)
+          print("polling_calls:", s.count("start_polling"), s.count("get_updates"))
+          print("webhook_route:", "def telegram_webhook()" in s)
+          print("live_check:", "LIVE DATA CHECK" in s)
+          print("auto_discovery_update:", "discovered_assets.update(found)" in s and "discovered_assets.clear()" not in s)
+          PY
+
+          python -m py_compile app.py
+
+      - name: Commit final runtime patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          if git diff --cached --quiet; then
+            echo "app.py already finalized"
+            exit 0
+          fi
+          git commit -m "Finalize live UAE webhook runtime"
+          git push origin main
