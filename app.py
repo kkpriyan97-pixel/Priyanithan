@@ -439,40 +439,47 @@ def _json_object_from_text(text):
 
 
 def parse_ai(data):
-    """Parse provider JSON without treating reasoning text as the decision payload."""
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if not choices:
-        raise ValueError(f"AI response missing choices: {str(data)[:400]}")
-    choice = choices[0] if isinstance(choices[0], dict) else {}
-    msg = choice.get("message", {}) if isinstance(choice, dict) else {}
+    """Parse OpenAI-compatible responses and find the actual decision JSON."""
+    if not isinstance(data, dict):
+        raise ValueError("AI response is not a JSON object")
+    choices = data.get("choices")
+    if not choices or not isinstance(choices[0], dict):
+        raise ValueError(f"AI response missing choices: {str(data)[:500]}")
+    choice = choices[0]
+    msg = choice.get("message") if isinstance(choice.get("message"), dict) else {}
 
-    # IMPORTANT: reasoning_content/reasoning is deliberately NOT used as the
-    # decision payload. Reasoning models can put prose there, which caused the
-    # previous JSONDecodeError even when the HTTP response was 200.
-    content = msg.get("content") or choice.get("text")
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                parts.append(str(item.get("text") or item.get("content") or ""))
-            else:
-                parts.append(str(item))
-        content = "".join(parts)
-
-    if content:
-        return _json_object_from_text(content)
-
-    for key in ("output_text", "response", "result", "content"):
-        value = data.get(key) if isinstance(data, dict) else None
+    values = [msg.get("content"), choice.get("text"), data.get("output_text"), data.get("response"), data.get("result"), msg.get("reasoning_content"), msg.get("reasoning")]
+    candidates = []
+    for value in values:
+        if isinstance(value, list):
+            value = "".join(str(x.get("text") or x.get("content") or "") if isinstance(x, dict) else str(x) for x in value)
         if value:
-            if isinstance(value, (dict, list)):
-                if isinstance(value, dict):
-                    return value
-                value = "".join(str(x.get("text") or x.get("content") or x) if isinstance(x, dict) else str(x) for x in value)
-            return _json_object_from_text(value)
+            candidates.append(value if isinstance(value, dict) else str(value))
 
-    raise ValueError("AI response contained no decision content")
+    for value in candidates:
+        if isinstance(value, dict) and "decision" in value:
+            return value
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```\s*$", "", text)
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and "decision" in obj:
+                return obj
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Reasoning may contain several {...} fragments; only accept one with decision.
+        for match in re.finditer(r'\{', text):
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(text[match.start():])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(obj, dict) and "decision" in obj:
+                return obj
 
+    raise ValueError("AI response contained no valid decision JSON")
 
 def call_ai(prompt):
     """Validate a setup with independent AI providers and fail over automatically."""
