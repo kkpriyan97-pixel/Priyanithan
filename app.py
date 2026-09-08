@@ -668,19 +668,29 @@ async def telegram_runtime(application):
     telegram_application = application
     await application.initialize()
     await application.start()
-    webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")
-    webhook_url = f"{webhook_base}/telegram/webhook"
-    await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True, allowed_updates=["message"])
-    log.info("Telegram webhook active: %s", webhook_url)
-    log.info("Telegram polling DISABLED; getUpdates will not be used.")
-
-    while True:
-        await wait_until_next_5min_uae()
-        try:
-            await scan_cycle(application)
-        except Exception as e:
-            log.exception("SCAN CYCLE ERROR: %s", e)
-
+    tasks = [
+        asyncio.create_task(olymptrade_connect_loop(), name="olymptrade-connect"),
+        asyncio.create_task(scan_loop(application), name="signal-scan"),
+        asyncio.create_task(manual_trade_monitor(application), name="trade-monitor"),
+    ]
+    try:
+        webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")
+        webhook_url = f"{webhook_base}/telegram/webhook"
+        await application.bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message"],
+        )
+        log.info("Telegram webhook active: %s", webhook_url)
+        log.info("Telegram polling DISABLED; getUpdates will not be used.")
+        await asyncio.Event().wait()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if application.running:
+            await application.stop()
+        await application.shutdown()
 
 def main():
     global ot_client
