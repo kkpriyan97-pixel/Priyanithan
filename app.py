@@ -227,6 +227,11 @@ async def on_tick(message):
             latest_ticks[pair] = item
 
 
+async def on_balance(message):
+    """Read-only OlympTrade balance callback; never places or modifies trades."""
+    log.debug("OlympTrade balance update received (read-only).")
+
+
 def extract_instruments(message):
     found = {}
     data = message.get("d") if isinstance(message, dict) else None
@@ -250,6 +255,25 @@ async def on_instruments(message):
         if AUTO_DISCOVER_ASSETS:
             PAIRS[:] = sorted(discovered_assets.keys())[:MAX_ASSETS_PER_CYCLE]
             log.info("AUTO DISCOVERY: %s tradable assets available", len(PAIRS))
+
+async def on_trade_event(message):
+    """Record broker trade events for read-only monitoring; never executes trades."""
+    event = message.get("e") if isinstance(message, dict) else None
+    data = message.get("d", []) if isinstance(message, dict) else []
+    if not isinstance(data, list):
+        return
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        trade_id = item.get("id")
+        if not trade_id:
+            continue
+        manual_trades.setdefault(str(trade_id), {}).update({
+            "event": event,
+            "data": item,
+            "updated_at": time.time(),
+        })
+
 
 async def olymptrade_connect_loop():
     global ot_client, PAIRS
@@ -729,6 +753,19 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("🔎 Live scan started...")
     await scan_cycle(context.application)
+
+async def scan_loop(application):
+    """Run the existing scan_cycle on UAE-aligned 5-minute boundaries."""
+    await wait_until_next_5min_uae()
+    while True:
+        try:
+            await scan_cycle(application)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Scanner loop error")
+        await wait_until_next_5min_uae()
+
 
 # ============================================================
 # RUNTIME
