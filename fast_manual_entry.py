@@ -1,251 +1,222 @@
-"""Reliable web trade selector for Priyanithan.
-
-The first Telegram button opens a small Render-hosted web selector instead of
-relying on Telegram callback_query delivery. The selector gives the user 10
-seconds to choose DEMO or REAL, then opens the official Olymptrade web
-platform. The bot never places a broker order and AUTO_TRADE remains OFF.
-"""
-import html
-import re
-import sys
-import threading
-import time
-from urllib.parse import quote
-
+"""Final Priyanithan workflow: START -> ACCESS -> DEMO/REAL -> AI scan -> 5-min signals -> TRADE NOW -> manual web trade."""
+import hashlib, hmac, html, os, re, sys, threading, time
+from urllib.parse import urlencode
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-_INSTALLED = False
-_BOT_SEND_PATCHED = False
-_OLYMPTRADE_URL = "https://olymptrade.com/pages/trading/"
-_OLYMPTRADE_DEMO_URL = "https://olymptrade.com/pages/trading/account/free-demo/"
-_SIGNAL_RE = re.compile(
+MODES = {}
+LOCK = threading.Lock()
+PATCHED = False
+START_PATCHED = False
+BOT_PATCHED = False
+BASE = "https://priyanithan.onrender.com"
+DEMO_URL = "https://olymptrade.com/pages/trading/account/free-demo/"
+REAL_URL = "https://olymptrade.com/pages/trading/"
+EXPIRIES = (1, 2, 3, 5, 10, 15)
+SIGNAL_RE = re.compile(
     r"🔥?\s*PRIYANITHAN AI SIGNAL\s*🔥?.*?"
-    r"📈\s*([^\n]+).*?"
-    r"(⬆️\s*UP|⬇️\s*DOWN).*?"
-    r"💰\s*Entry:\s*([^\n]+).*?"
-    r"⏱️\s*Expiry:\s*(\d+)\s*MIN",
+    r"📈\s*([^\n]+).*?(⬆️\s*UP|⬇️\s*DOWN).*?"
+    r"💰\s*Entry:\s*([^\n]+).*?⏱️\s*Expiry:\s*(\d+)\s*MIN",
     re.S | re.I,
 )
 
+def app():
+    m = sys.modules.get("__main__")
+    return m if m is not None and getattr(m, "__file__", "").endswith("app.py") else sys.modules.get("app")
 
-def _get_app():
-    module = sys.modules.get("__main__")
-    if module is not None and getattr(module, "__file__", "").endswith("app.py"):
-        return module
-    return sys.modules.get("app")
+def secret():
+    return (os.getenv("ACCESS_CODE") or os.getenv("TELEGRAM_BOT_TOKEN") or "priyanithan-final").encode()
 
+def sign(v):
+    return hmac.new(secret(), v.encode(), hashlib.sha256).hexdigest()[:24]
 
-def _parse_signal(text):
-    m = _SIGNAL_RE.search(str(text or ""))
-    if not m:
-        return None
-    pair = m.group(1).strip()
-    direction = "UP" if "UP" in m.group(2).upper() else "DOWN"
-    entry = m.group(3).strip()
-    try:
-        expiry = int(m.group(4))
-    except (TypeError, ValueError):
-        return None
-    if not pair or not entry or expiry not in (1, 2, 3, 5, 10, 15):
-        return None
-    return pair, direction, entry, expiry
+def pack(v):
+    return v + "." + sign(v)
 
+def unpack(v):
+    try: raw, sig = str(v).rsplit(".", 1)
+    except ValueError: return None
+    return raw if hmac.compare_digest(sig, sign(raw)) else None
 
-def _selector_url(pair, direction, entry, expiry):
-    appmod = _get_app()
-    # This is the actual Render service hostname shown by the user's Telegram browser.
-    base = "https://priyanithan.onrender.com"
-    if appmod is not None:
-        try:
-            import os
-            configured = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
-            if configured:
-                base = configured
-        except Exception:
-            pass
-    return (
-        f"{base}/trade/select?pair={quote(pair, safe='')}&direction={quote(direction, safe='')}"
-        f"&entry={quote(entry, safe='')}&expiry={int(expiry)}"
-    )
+def mode(cid):
+    with LOCK: return MODES.get(int(cid))
 
+def set_mode(cid, value):
+    with LOCK: MODES[int(cid)] = value
 
-def _button_for(text):
-    """Open the reliable web selector; do not depend on Telegram callbacks."""
-    data = _parse_signal(text)
-    if data is None:
-        return None
-    pair, direction, entry, expiry = data
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⚡ SELECT DEMO / REAL (10s)", url=_selector_url(pair, direction, entry, expiry))]]
-    )
+def authorized_ids(a):
+    try: return {int(x) for x in a.authorized_users}
+    except Exception: return set()
 
+def parse_signal(text):
+    m = SIGNAL_RE.search(str(text or ""))
+    if not m: return None
+    try: expiry = int(m.group(4))
+    except Exception: return None
+    pair, direction, entry = m.group(1).strip(), ("UP" if "UP" in m.group(2).upper() else "DOWN"), m.group(3).strip()
+    return (pair, direction, entry, expiry) if pair and entry and expiry in EXPIRIES else None
 
-def _install_selector_route(appmod):
-    if getattr(appmod, "_PRIYANITHAN_WEB_SELECTOR", False):
-        return
-    flask_app = getattr(appmod, "app", None)
-    if flask_app is None:
-        return
+def base_url():
+    return os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/") or BASE
 
-    def trade_select_page():
-        from flask import request
+def mode_url(cid, value):
+    raw = f"{int(cid)}|{value}|{int(time.time())//600}"
+    return base_url() + "/trade/mode?" + urlencode({"token": pack(raw)})
 
-        pair = str(request.args.get("pair", "")).strip()
-        direction = str(request.args.get("direction", "")).strip().upper()
-        entry = str(request.args.get("entry", "")).strip()
-        try:
-            expiry = int(request.args.get("expiry", "0"))
-        except ValueError:
-            expiry = 0
-        if not pair or direction not in ("UP", "DOWN") or not entry or expiry not in (1, 2, 3, 5, 10, 15):
-            return "Invalid or expired trade signal", 400
+def trade_url(cid, pair, direction, entry, expiry):
+    raw = f"{int(cid)}|{pair}|{direction}|{entry}|{expiry}|{int(time.time())//300}"
+    return base_url() + "/trade/select?" + urlencode({"token": pack(raw)})
 
-        e_pair = html.escape(pair)
-        e_dir = html.escape(direction)
-        e_entry = html.escape(entry)
-        demo_url = html.escape(_OLYMPTRADE_DEMO_URL, quote=True)
-        real_url = html.escape(_OLYMPTRADE_URL, quote=True)
-        arrow = "⬆️" if direction == "UP" else "⬇️"
+def mode_markup(cid):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🧪 DEMO", url=mode_url(cid, "DEMO")), InlineKeyboardButton("🔴 REAL", url=mode_url(cid, "REAL"))]])
 
-        return f'''<!doctype html>
-<html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Priyanithan Trade Selection</title>
-<style>
-body{{font-family:system-ui,-apple-system,sans-serif;background:#111827;color:#fff;margin:0;padding:24px}}
-.card{{max-width:520px;margin:auto;background:#1f2937;border-radius:18px;padding:22px;box-shadow:0 10px 30px #0005}}
-h1{{font-size:22px;margin:0 0 8px}} .muted{{color:#9ca3af}}
-.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}}
-a{{display:block;text-decoration:none;color:#fff;text-align:center;padding:16px 8px;border-radius:14px;font-weight:800}}
-.demo{{background:#166534}} .real{{background:#991b1b}}
-.warn{{margin-top:18px;padding:12px;border-radius:12px;background:#374151;font-size:13px}}
-#timer{{font-size:28px;font-weight:900;text-align:center;margin:14px 0;color:#fbbf24}}
-</style></head><body>
-<div class="card">
-<h1>🎯 TRADE MODE SELECTION</h1>
-<div class="muted">Choose within <b>10 seconds</b>. This page opens the web platform only.</div>
-<div id="timer">10</div>
-<p>📈 <b>Asset:</b> {e_pair}</p>
-<p>{arrow} <b>Direction:</b> {e_dir}</p>
-<p>💰 <b>Entry reference:</b> {e_entry}</p>
-<p>⏱️ <b>Expiry:</b> {expiry} MIN</p>
-<div class="grid" id="choices">
-<a class="demo" href="{demo_url}">🧪 DEMO — OPEN WEB</a>
-<a class="real" href="{real_url}" onclick="return confirmReal(event)">🔴 REAL — OPEN WEB</a>
-</div>
-<div class="warn">⚠️ AUTO TRADE: OFF. The bot does not place the order. On Olymptrade, verify the exact asset, direction, amount and expiry before manual entry.</div>
-</div>
-<script>
-let left=10;
-const timer=document.getElementById('timer');
-const choices=document.getElementById('choices');
-const iv=setInterval(()=>{{left--;timer.textContent=left;if(left<=0){{clearInterval(iv);choices.style.opacity='.45';document.body.dataset.expired='1';timer.textContent='EXPIRED';}}}},1000);
-function confirmReal(e){{
- if(document.body.dataset.expired==='1'){{e.preventDefault();return false;}}
- return confirm('REAL mode uses your own funds. Continue to the Olymptrade web platform?');
-}}
-</script></body></html>'''
+def signal_markup(cid, text):
+    d = parse_signal(text)
+    if not d or mode(cid) not in ("DEMO", "REAL"): return None
+    p, direction, entry, expiry = d
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⚡ TRADE NOW", url=trade_url(cid, p, direction, entry, expiry))]])
 
-    # Use Flask's explicit add_url_rule so the route is registered immediately
-    # during app import and does not depend on a later background-thread tick.
-    if "/trade/select" not in {rule.rule for rule in flask_app.url_map.iter_rules()}:
-        flask_app.add_url_rule("/trade/select", endpoint="priyanithan_trade_select", view_func=trade_select_page, methods=["GET"])
-    appmod._PRIYANITHAN_WEB_SELECTOR = True
-    if hasattr(appmod, "log"):
-        appmod.log.info("WEB TRADE SELECTOR ACTIVE: /trade/select registered on Render app")
-
-
-def _wrap_send(appmod):
-    current = getattr(appmod, "send_to_recipients", None)
-    if current is None or getattr(current, "_FAST_MANUAL_WRAPPER", False):
-        return False
-
-    async def patched_send(bot, text):
-        markup = _button_for(text)
-        if markup is None:
-            return await current(bot, text)
-        ids = appmod.recipients()
-        if not ids:
-            return await current(bot, text)
-        try:
-            bot_id = int((await bot.get_me()).id)
-        except Exception:
-            bot_id = None
-        sent = False
-        for chat_id in ids:
-            if bot_id is not None and int(chat_id) == bot_id:
-                continue
+def start_scan(cid):
+    a = app()
+    loop = getattr(a, "runtime_loop", None) if a else None
+    application = getattr(a, "telegram_application", None) if a else None
+    if not a or not loop or not application or mode(cid) not in ("DEMO", "REAL"): return False
+    current = getattr(a, "manual_scan_task", None)
+    if current is not None and not current.done(): return True
+    def kick():
+        current = getattr(a, "manual_scan_task", None)
+        if current is None or current.done():
             try:
-                await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
-                sent = True
-            except Exception as exc:
-                appmod.log.warning("Fast manual signal send failed chat_id=%s: %s", chat_id, exc)
-        return sent
-
-    patched_send._FAST_MANUAL_WRAPPER = True
-    patched_send._FAST_MANUAL_INNER = current
-    appmod.send_to_recipients = patched_send
-    appmod.log.info("FAST MANUAL ENTRY SEND WRAPPER ACTIVE: web selector enabled")
+                import asyncio
+                a.manual_scan_task = asyncio.create_task(a.scan_cycle(application), name="manual-scan")
+            except Exception as e:
+                a.log.warning("FINAL FLOW scan start failed: %s", e)
+    loop.call_soon_threadsafe(kick)
     return True
 
+def patch_start(a):
+    global START_PATCHED
+    application = getattr(a, "telegram_application", None)
+    if not application: return False
+    for hs in getattr(application, "handlers", {}).values():
+        for h in hs:
+            if "start" not in getattr(h, "commands", set()): continue
+            if getattr(h.callback, "_FINAL_START", False): START_PATCHED=True; return True
+            async def final_start(update, context):
+                user=getattr(update,"effective_user",None); chat=getattr(update,"effective_chat",None)
+                uid=getattr(user,"id",getattr(chat,"id",None)); cid=getattr(chat,"id",None)
+                if cid is None: return
+                try: a.remember_chat(update)
+                except Exception: pass
+                if uid not in authorized_ids(a):
+                    await update.message.reply_text("🔐 ACCESS REQUIRED\n\nSend /access YOUR_ACCESS_CODE first, then /start again.")
+                    return
+                if mode(uid) not in ("DEMO","REAL"):
+                    await update.message.reply_text(
+                        "🎯 PRIYANITHAN AI TRADING\n\nACCESS: VERIFIED ✅\nChoose DEMO or REAL before the scan.\n🤖 AI confirmation is required.\n⏱️ Signals run every 5 minutes.\n⚠️ AUTO TRADE: OFF — manual trade only.",
+                        reply_markup=mode_markup(uid),
+                    )
+                    return
+                await update.message.reply_text(f"✅ ACCESS OK | MODE: {mode(uid)}\n🔎 Fresh scan started.\n🤖 AI confirmation required.\n⏱️ Next signal cycle: every 5 minutes.")
+                start_scan(uid)
+            final_start._FINAL_START=True
+            h.callback=final_start
+            START_PATCHED=True
+            a.log.info("FINAL FLOW: /start -> access -> DEMO/REAL -> scan")
+            return True
+    return False
 
-def _patch_bot_send_message(appmod):
-    """Final fail-safe: attach the web selector to every approved signal."""
-    global _BOT_SEND_PATCHED
-    if _BOT_SEND_PATCHED:
-        return False
-    original = getattr(Bot, "send_message", None)
-    if original is None or getattr(original, "_PRIYANITHAN_BUTTON_PATCH", False):
-        _BOT_SEND_PATCHED = True
-        return False
+def install_routes(a):
+    flask=getattr(a,"app",None)
+    if flask is None: return
+    rules={r.rule for r in flask.url_map.iter_rules()}
+    if "/trade/mode" not in rules:
+        def trade_mode():
+            from flask import request
+            raw=unpack(request.args.get("token",""))
+            if not raw: return "Invalid mode link",403
+            parts=raw.split("|")
+            if len(parts)!=3 or parts[1] not in ("DEMO","REAL"): return "Invalid mode link",400
+            try: cid=int(parts[0]); bucket=int(parts[2])
+            except: return "Invalid mode link",400
+            now=int(time.time())//600
+            if abs(bucket-now)>1: return "Mode link expired. Send /start again.",410
+            if cid not in authorized_ids(a): return "Access not authorized. Send /access first.",403
+            value=parts[1]; set_mode(cid,value)
+            appx=getattr(a,"telegram_application",None)
+            if appx is not None:
+                async def notify():
+                    await appx.bot.send_message(chat_id=cid,text=f"✅ MODE SELECTED: {value}\n🔎 Fresh scan started.\n🤖 AI confirmation required.\n⏱️ Signals every 5 minutes.\n⚠️ AUTO TRADE: OFF — manual trade only.")
+                try:
+                    import asyncio
+                    asyncio.run_coroutine_threadsafe(notify(),a.runtime_loop)
+                except Exception: pass
+            start_scan(cid)
+            return f"<meta name='viewport' content='width=device-width,initial-scale=1'><body style='font-family:system-ui;padding:28px'><h2>{'🧪' if value=='DEMO' else '🔴'} {value} MODE SELECTED</h2><p>Fresh scan started.</p><p>AI confirmation → qualified signal → TRADE NOW.</p><b>AUTO TRADE: OFF</b></body>"
+        flask.add_url_rule("/trade/mode",endpoint="final_trade_mode",view_func=trade_mode)
+    if "/trade/select" not in {r.rule for r in flask.url_map.iter_rules()}:
+        def trade_select():
+            from flask import request
+            raw=unpack(request.args.get("token",""))
+            if not raw: return "Invalid trade link",403
+            parts=raw.split("|")
+            if len(parts)!=6: return "Invalid trade link",400
+            cid,pair,direction,entry,expiry_s,bucket_s=parts
+            try: cid=int(cid); expiry=int(expiry_s); bucket=int(bucket_s)
+            except: return "Invalid trade link",400
+            if direction not in ("UP","DOWN") or expiry not in EXPIRIES: return "Invalid trade signal",400
+            if abs(bucket-int(time.time())//300)>1: return "Trade link expired. Wait for the next signal.",410
+            value=mode(cid)
+            if value not in ("DEMO","REAL"): return "Select DEMO or REAL from /start first.",403
+            url=DEMO_URL if value=="DEMO" else REAL_URL
+            return f"""<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:system-ui;background:#111827;color:white;padding:22px}}.c{{max-width:520px;margin:auto;background:#1f2937;padding:24px;border-radius:18px}}.o{{display:block;background:#166534;color:white;padding:17px;border-radius:14px;text-align:center;text-decoration:none;font-weight:900;margin-top:20px}}</style><div class="c"><h2>⚡ TRADE NOW</h2><p>Mode: <b>{html.escape(value)}</b></p><p>Asset: <b>{html.escape(pair)}</b></p><p>Direction: <b>{html.escape(direction)}</b></p><p>Entry reference: <b>{html.escape(entry)}</b></p><p>Expiry: <b>{expiry} MIN</b></p><a class="o" href="{html.escape(url,quote=True)}">OPEN OLYMPTRADE WEB</a><p>⚠️ AUTO TRADE: OFF. Verify the exact asset, current price, direction and expiry, then place the trade manually.</p></div>"""
+        flask.add_url_rule("/trade/select",endpoint="final_trade_select",view_func=trade_select)
 
-    async def patched_bot_send(self, *args, **kwargs):
-        text = kwargs.get("text")
-        if text is None and len(args) >= 2:
-            text = args[1]
-        markup = _button_for(text)
-        if markup is not None and kwargs.get("reply_markup") is None:
-            kwargs["reply_markup"] = markup
-        return await original(self, *args, **kwargs)
+def patch_senders(a):
+    global BOT_PATCHED
+    original=getattr(Bot,"send_message",None)
+    if original and not getattr(original,"_FINAL_BOT_SEND",False):
+        async def final_send(self,*args,**kwargs):
+            text=kwargs.get("text", args[1] if len(args)>=2 else "")
+            d=parse_signal(text)
+            if d:
+                cid=kwargs.get("chat_id", args[0] if args else None)
+                if mode(cid) not in ("DEMO","REAL"): return None
+                if kwargs.get("reply_markup") is None: kwargs["reply_markup"]=signal_markup(cid,text)
+            return await original(self,*args,**kwargs)
+        final_send._FINAL_BOT_SEND=True
+        Bot.send_message=final_send
+    BOT_PATCHED=True
+    current=getattr(a,"send_to_recipients",None)
+    if current and not getattr(current,"_FINAL_RECIPIENTS",False):
+        async def final_recipients(bot,text):
+            d=parse_signal(text)
+            if not d: return await current(bot,text)
+            sent=False
+            for cid in a.recipients():
+                if mode(cid) not in ("DEMO","REAL"): continue
+                try:
+                    await bot.send_message(chat_id=cid,text=text,reply_markup=signal_markup(cid,text)); sent=True
+                except Exception as e: a.log.warning("FINAL signal send failed %s: %s",cid,e)
+            return sent
+        final_recipients._FINAL_RECIPIENTS=True
+        a.send_to_recipients=final_recipients
 
-    patched_bot_send._PRIYANITHAN_BUTTON_PATCH = True
-    Bot.send_message = patched_bot_send
-    _BOT_SEND_PATCHED = True
-    appmod.log.info("TELEGRAM BOT-LAYER PATCH ACTIVE: approved signals use web DEMO/REAL selector")
+def install():
+    global PATCHED
+    a=app()
+    if not a: return False
+    install_routes(a); patch_senders(a); patch_start(a); PATCHED=True
     return True
 
-
-def _install():
-    global _INSTALLED
-    appmod = _get_app()
-    if appmod is None:
-        return False
-    _install_selector_route(appmod)
-    _patch_bot_send_message(appmod)
-    changed = _wrap_send(appmod)
-    if changed:
-        _INSTALLED = True
-    return True
-
-
-# Register once immediately while app.py is still importing, then keep the
-# background retry as a safety net for alternate Render/Gunicorn startup paths.
-try:
-    _install()
-except Exception:
-    appmod = _get_app()
-    if appmod is not None and hasattr(appmod, "log"):
-        appmod.log.exception("WEB TRADE SELECTOR INITIAL INSTALL FAILED")
-
+try: install()
+except Exception: pass
 
 def bootstrap():
     for _ in range(1800):
-        try:
-            _install()
+        try: install()
         except Exception:
-            appmod = _get_app()
-            if appmod is not None and hasattr(appmod, "log"):
-                appmod.log.exception("WEB TRADE SELECTOR BOOTSTRAP FAILED")
-        time.sleep(1.0)
+            a=app()
+            if a and hasattr(a,"log"): a.log.exception("FINAL FLOW bootstrap failed")
+        time.sleep(1)
 
-
-threading.Thread(target=bootstrap, name="web-trade-selector-bootstrap", daemon=True).start()
+threading.Thread(target=bootstrap,name="priyanithan-final-flow",daemon=True).start()
