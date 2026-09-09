@@ -1,4 +1,4 @@
-name: Verify Priyanithan
+name: Verify Priyanithan Final
 
 on:
   push:
@@ -15,25 +15,40 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python -m py_compile app.py fast_manual_entry.py sitecustomize.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
-      - run: |
+      - name: Compile all runtime Python
+        run: python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
+      - name: Verify final flow invariants
+        run: |
           python - <<'PY'
           from pathlib import Path
           app = Path("app.py").read_text(encoding="utf-8")
           fast = Path("fast_manual_entry.py").read_text(encoding="utf-8")
           site = Path("sitecustomize.py").read_text(encoding="utf-8")
+          result = Path("trade_result_monitor.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
+          assert "MARTINGALE = False" in app
           assert "1, 2, 3, 5, 10, 15" in app
-          assert "global ot_client, PAIRS" in app
           assert "1054" in app
+          assert "LIVE DATA CHECK" in app
+          assert "STALE OlympTrade candles rejected" in app
 
-          assert "SELECT DEMO / REAL (10s)" in fast
+          assert "ACCESS REQUIRED" in fast
+          assert "Choose DEMO or REAL before the scan" in fast
+          assert '"/trade/mode"' in fast
+          assert '"/trade/select"' in fast
+          assert "⚡ TRADE NOW" in fast
+          assert "Signals run every 5 minutes" in fast
           assert "AUTO TRADE: OFF" in fast
-          assert "/trade/select" in fast
-          assert "10 seconds" in fast
-          assert "reply_markup=markup" in fast
-          assert "callback_query" in site
+          assert "Verify the exact asset, current price, direction and expiry" in fast
+          assert "olymptrade.com/pages/trading/account/free-demo/" in fast
+          assert "olymptrade.com/pages/trading/" in fast
 
-          print("Verification OK: core runtime, 10-second web DEMO/REAL selector, webhook support, and AUTO_TRADE safety checks passed")
+          assert "callback_query" in site
+          assert "ALLOWED_EXPIRIES=(1,2,3,5,10,15)" in result
+          assert "SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF" in result
+
+          print("FINAL FLOW VERIFY OK")
+          print("START -> ACCESS CODE -> DEMO/REAL -> AI scan -> 5-min signal -> TRADE NOW -> manual web trade")
+          print("AUTO_TRADE=False; MARTINGALE=False; no broker order execution")
           PY
