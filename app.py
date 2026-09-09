@@ -895,7 +895,7 @@ async def telegram_runtime(application):
         await application.bot.set_webhook(
             url=webhook_url,
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
+            allowed_updates=["message"],
         )
         log.info("Telegram webhook active: %s", webhook_url)
         log.info("Telegram polling DISABLED; getUpdates will not be used.")
