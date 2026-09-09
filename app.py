@@ -342,13 +342,16 @@ async def olymptrade_connect_loop():
 async def get_ot_candles(pair, timeframe=60, count=120):
     if ot_client is None:
         return None, "OlympTrade client unavailable"
+    log.info("CANDLE REQUEST START: pair=%s timeframe=%s count=%s", pair, timeframe, count)
     try:
         raw = await ot_client.get_candles(pair, timeframe, count)
+        log.info("CANDLE RESPONSE RECEIVED: pair=%s raw_type=%s", pair, type(raw).__name__)
     except Exception as e:
+        log.warning("CANDLE REQUEST FAILED: pair=%s error=%s", pair, e)
         return None, f"candle request failed: {e}"
     df = normalize_candles(raw)
     if df is None or len(df) < 40:
-        return None, "insufficient candle data"
+        return None, f"insufficient candle data rows={0 if df is None else len(df)}"
     now_utc = time.time()
     latest_ts = float(df["timestamp"].iloc[-1])
     if latest_ts > 100000000000:
@@ -693,17 +696,30 @@ def format_signal(result, ai=None):
 async def scan_cycle(application):
     universe = sorted(discovered_assets.keys())[:MAX_ASSETS_PER_CYCLE] if AUTO_DISCOVER_ASSETS else (MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:MAX_ASSETS_PER_CYCLE])
     candidates = []
-    for pair in universe:
+    candle_ready = 0
+    candle_failed = 0
+    technical_no_signal = 0
+    log.info("SCAN START: universe=%s auto_discovery=%s", len(universe), AUTO_DISCOVER_ASSETS)
+    for idx, pair in enumerate(universe, start=1):
+        log.info("CANDLE SCAN %s/%s: requesting %s", idx, len(universe), pair)
         df, err = await get_ot_candles(pair, 60, 120)
         if df is None:
+            candle_failed += 1
+            log.warning("CANDLE SKIP: pair=%s reason=%s", pair, err or "unknown candle failure")
             continue
+        candle_ready += 1
         try:
             result = analyze_pair(pair, df)
         except Exception as e:
             log.warning("Technical analysis failed pair=%s: %s", pair, e)
             continue
+        log.info("TECHNICAL RESULT: pair=%s signal=%s confidence=%s", pair, result.get("signal"), result.get("confidence"))
         if result["signal"] != "NO SIGNAL":
             candidates.append(result)
+            log.info("TECHNICAL CANDIDATE: pair=%s signal=%s confidence=%s", pair, result["signal"], result["confidence"])
+        else:
+            technical_no_signal += 1
+    log.info("CANDLE/TECHNICAL SUMMARY: universe=%s candle_ready=%s candle_failed=%s technical_candidates=%s technical_no_signal=%s", len(universe), candle_ready, candle_failed, len(candidates), technical_no_signal)
     candidates.sort(key=lambda x: x["confidence"], reverse=True)
     checked = candidates[:MAX_AI_CANDIDATES]
     approved = []
