@@ -767,6 +767,25 @@ async def scan_loop(application):
         await wait_until_next_5min_uae()
 
 
+async def manual_trade_monitor(application):
+    while True:
+        try:
+            client = ot_client
+            account_id = getattr(client, "account_id", None) if client else None
+            if client and client.connection.is_connected and account_id:
+                try:
+                    trades = await client.trade.get_open_trades(account_id, group="real")
+                    if isinstance(trades, list):
+                        for t in trades:
+                            if isinstance(t, dict) and t.get("id"):
+                                manual_trades.setdefault(str(t["id"]), {})["open"] = t
+                except Exception as e:
+                    log.debug("Open-trade read unavailable: %s", e)
+        except Exception:
+            log.exception("Manual monitor error")
+        await asyncio.sleep(LIVE_UPDATE_SECONDS)
+
+
 # ============================================================
 # RUNTIME
 # ============================================================
