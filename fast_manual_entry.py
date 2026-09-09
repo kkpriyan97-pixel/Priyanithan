@@ -1,8 +1,8 @@
 """Fast Manual Entry UI for Priyanithan.
 
-Adds a Telegram inline button to approved signal messages. The button never
-places a broker order; it only prepares the exact signal details for immediate
-manual entry and preserves AUTO_TRADE=False.
+Adds a Telegram inline button to approved signal messages. The button opens
+Olymptrade's official trading platform for manual entry; it never places a
+broker order and preserves AUTO_TRADE=False.
 """
 import re
 import sys
@@ -18,6 +18,7 @@ _INSTALLED = False
 _HANDLER_INSTALLED = False
 _BOT_SEND_PATCHED = False
 _UAE = ZoneInfo("Asia/Dubai")
+_OLYMPTRADE_URL = "https://olymptrade.com/pages/trading/"
 _SIGNAL_RE = re.compile(
     r"🔥?\s*PRIYANITHAN AI SIGNAL\s*🔥?.*?"
     r"📈\s*([^\n]+).*?"
@@ -36,7 +37,7 @@ def _get_app():
 
 
 def _button_for(text):
-    """Return the manual-entry keyboard only for a valid approved signal."""
+    """Return an OPEN OLYMPTRADE URL button only for a valid signal."""
     m = _SIGNAL_RE.search(str(text or ""))
     if not m:
         return None
@@ -49,11 +50,8 @@ def _button_for(text):
         return None
     if not pair or not entry or expiry not in (1, 2, 3, 5, 10, 15):
         return None
-    callback = f"FAST|{pair}|{direction}|{entry}|{expiry}"
-    if len(callback.encode("utf-8")) > 64:
-        return None
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⚡ OPEN TRADE", callback_data=callback)]]
+        [[InlineKeyboardButton("⚡ OPEN OLYMPTRADE", url=_OLYMPTRADE_URL)]]
     )
 
 
@@ -66,49 +64,15 @@ async def _running_callback(update, context):
         )
 
 
-async def _fast_manual_callback(update, context):
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer("⚡ Manual entry ready", show_alert=False)
-    data = str(query.data or "")
-    parts = data.split("|", 4)
-    if len(parts) != 5 or parts[0] != "FAST":
-        return
-    _, pair, direction, entry, expiry = parts
-    try:
-        expiry_min = int(expiry)
-    except (TypeError, ValueError):
-        return
-    if direction not in ("UP", "DOWN") or expiry_min not in (1, 2, 3, 5, 10, 15):
-        return
-    expiry_ts = time.time() + expiry_min * 60
-    expiry_uae = datetime.fromtimestamp(expiry_ts, _UAE).strftime("%H:%M:%S UAE")
-    text = (
-        "⚡ FAST MANUAL ENTRY READY\n\n"
-        f"📈 {pair}\n"
-        f"{'⬆️' if direction == 'UP' else '⬇️'} {direction}\n"
-        f"💰 Entry: {entry}\n"
-        f"⏱️ Expiry: {expiry_min} MIN\n\n"
-        "👤 Execute Buy/Sell manually in OlympTrade.\n"
-        "🔒 AUTO TRADE: OFF\n"
-        "🤖 Broker order automation: OFF\n\n"
-        f"⏳ Target expiry: {expiry_uae}"
-    )
-    if query.message is not None:
-        await query.message.reply_text(text)
-
-
 def _ensure_handler(application, appmod):
     global _HANDLER_INSTALLED
     if _HANDLER_INSTALLED or getattr(application, "_FAST_MANUAL_ENTRY_HANDLER", False):
         _HANDLER_INSTALLED = True
         return
-    application.add_handler(CallbackQueryHandler(_fast_manual_callback, pattern=r"^FAST\|"))
     application.add_handler(CallbackQueryHandler(_running_callback, pattern=r"^RUNNING\|"))
     application._FAST_MANUAL_ENTRY_HANDLER = True
     _HANDLER_INSTALLED = True
-    appmod.log.info("FAST MANUAL ENTRY CALLBACK ACTIVE: ⚡ OPEN TRADE")
+    appmod.log.info("FAST MANUAL ENTRY CALLBACK ACTIVE: Olymptrade URL button")
 
 
 def _wrap_send(appmod):
@@ -141,16 +105,12 @@ def _wrap_send(appmod):
     patched_send._FAST_MANUAL_WRAPPER = True
     patched_send._FAST_MANUAL_INNER = current
     appmod.send_to_recipients = patched_send
-    appmod.log.info("FAST MANUAL ENTRY SEND WRAPPER ACTIVE: signal buttons enabled")
+    appmod.log.info("FAST MANUAL ENTRY SEND WRAPPER ACTIVE: Olymptrade URL button enabled")
     return True
 
 
 def _patch_bot_send_message(appmod):
-    """Final fail-safe: add the button at the Telegram Bot layer.
-
-    This catches signal sends even if another runtime wrapper replaces
-    appmod.send_to_recipients after fast_manual_entry has installed itself.
-    """
+    """Final fail-safe: add the official Olymptrade URL button at Telegram Bot layer."""
     global _BOT_SEND_PATCHED
     if _BOT_SEND_PATCHED:
         return False
@@ -171,7 +131,7 @@ def _patch_bot_send_message(appmod):
     patched_bot_send._PRIYANITHAN_BUTTON_PATCH = True
     Bot.send_message = patched_bot_send
     _BOT_SEND_PATCHED = True
-    appmod.log.info("TELEGRAM BOT-LAYER BUTTON PATCH ACTIVE: every approved signal gets ⚡ OPEN TRADE")
+    appmod.log.info("TELEGRAM BOT-LAYER BUTTON PATCH ACTIVE: approved signals open official Olymptrade")
     return True
 
 
