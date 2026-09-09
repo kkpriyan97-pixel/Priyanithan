@@ -8,10 +8,14 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
 
 _INSTALLED = False
+_UAE = ZoneInfo("Asia/Dubai")
 _SIGNAL_RE = re.compile(
     r"PRIYANITHAN AI SIGNAL.*?📈\s*([^\n]+).*?"
     r"(⬆️\s*UP|⬇️\s*DOWN).*?"
@@ -50,8 +54,8 @@ async def _fast_manual_callback(update, context):
     if len(parts) != 5 or parts[0] != "FAST":
         return
     _, pair, direction, entry, expiry = parts
-    now = time.time()
-    expiry_ts = now + int(expiry) * 60
+    expiry_ts = time.time() + int(expiry) * 60
+    expiry_uae = datetime.fromtimestamp(expiry_ts, _UAE).strftime("%H:%M:%S UAE")
     text = (
         "⚡ FAST MANUAL ENTRY READY\n\n"
         f"📈 {pair}\n"
@@ -61,7 +65,7 @@ async def _fast_manual_callback(update, context):
         "👤 Execute Buy/Sell manually in OlympTrade.\n"
         "🔒 AUTO TRADE: OFF\n"
         "🤖 Broker order automation: OFF\n\n"
-        f"⏳ Target expiry: {time.strftime('%H:%M:%S UAE', time.localtime(expiry_ts))}"
+        f"⏳ Target expiry: {expiry_uae}"
     )
     await query.message.reply_text(text)
 
@@ -122,5 +126,6 @@ def bootstrap():
             if appmod is not None and hasattr(appmod, "log"):
                 appmod.log.exception("FAST MANUAL ENTRY BOOTSTRAP FAILED")
         time.sleep(0.1)
+
 
 threading.Thread(target=bootstrap, name="fast-manual-entry-bootstrap", daemon=True).start()
