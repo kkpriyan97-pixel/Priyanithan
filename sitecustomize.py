@@ -231,8 +231,7 @@ sys.meta_path.insert(0, _Finder())
 
 # ============================================================
 # READ-ONLY SIGNAL RESULT + SEND-TIME CLOCK PATCH
-# Result monitoring itself is owned exclusively by trade_result_monitor.py.
-# This layer only keeps the Telegram signal timestamp accurate.
+# Result monitoring is owned exclusively by trade_result_monitor.py.
 import re as _rm_re
 import threading as _rm_threading
 import time as _rm_time
@@ -249,7 +248,6 @@ def _install_result_clock_patch():
         module = sys.modules.get("app")
     if module is None or getattr(module, "_RESULT_CLOCK_PATCH_INSTALLED", False):
         return False
-
     original_format_signal = getattr(module, "format_signal", None)
     if original_format_signal is None:
         return False
@@ -273,9 +271,7 @@ def _bootstrap_result_clock():
 
 
 def _bootstrap_result_monitor_module():
-    # Importing trade_result_monitor starts its own fail-safe bootstrap thread.
-    # Do this from sitecustomize only after the runtime has started so the
-    # monitor module is guaranteed to be loaded in the Render process.
+    # Import the sole result-monitor owner after app.py is available.
     for _ in range(1800):
         try:
             import trade_result_monitor  # noqa: F401
