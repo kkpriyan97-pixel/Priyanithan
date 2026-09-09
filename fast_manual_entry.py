@@ -1,23 +1,21 @@
-"""Fast Manual Entry UI for Priyanithan.
+"""Reliable web trade selector for Priyanithan.
 
-Adds a Telegram inline button to approved signal messages. The user must
-choose DEMO or REAL before opening Olymptrade. The bot never places a broker
-order and preserves AUTO_TRADE=False.
+The first Telegram button opens a small Render-hosted web selector instead of
+relying on Telegram callback_query delivery. The selector gives the user 10
+seconds to choose DEMO or REAL, then opens the official Olymptrade web
+platform. The bot never places a broker order and AUTO_TRADE remains OFF.
 """
+import html
 import re
 import sys
 import threading
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from urllib.parse import quote
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackQueryHandler
 
 _INSTALLED = False
-_HANDLER_INSTALLED = False
 _BOT_SEND_PATCHED = False
-_UAE = ZoneInfo("Asia/Dubai")
 _OLYMPTRADE_URL = "https://olymptrade.com/pages/trading/"
 _OLYMPTRADE_DEMO_URL = "https://olymptrade.com/pages/trading/account/free-demo/"
 _SIGNAL_RE = re.compile(
@@ -53,152 +51,101 @@ def _parse_signal(text):
     return pair, direction, entry, expiry
 
 
+def _selector_url(pair, direction, entry, expiry):
+    appmod = _get_app()
+    base = "https://priyanithan-ai.onrender.com"
+    if appmod is not None:
+        try:
+            import os
+            base = os.getenv("RENDER_EXTERNAL_URL", base).rstrip("/")
+        except Exception:
+            pass
+    return (
+        f"{base}/trade/select?pair={quote(pair, safe='')}&direction={quote(direction, safe='')}"
+        f"&entry={quote(entry, safe='')}&expiry={int(expiry)}"
+    )
+
+
 def _button_for(text):
-    """Initial button: require explicit DEMO/REAL choice before redirect."""
+    """Open the reliable web selector; do not depend on Telegram callbacks."""
     data = _parse_signal(text)
     if data is None:
         return None
     pair, direction, entry, expiry = data
-    callback = f"MODE|{pair}|{direction}|{entry}|{expiry}"
-    if len(callback.encode("utf-8")) > 64:
-        return None
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⚡ OPEN TRADE", callback_data=callback)]]
+        [[InlineKeyboardButton("⚡ SELECT DEMO / REAL (10s)", url=_selector_url(pair, direction, entry, expiry))]]
     )
 
 
-def _mode_keyboard(pair, direction, entry, expiry):
-    base = f"MODESEL|{pair}|{direction}|{entry}|{expiry}"
-    demo = f"DEMO|{pair}|{direction}|{entry}|{expiry}"
-    real = f"REAL|{pair}|{direction}|{entry}|{expiry}"
-    if max(len(x.encode("utf-8")) for x in (demo, real)) > 64:
-        return None
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧪 DEMO", callback_data=demo),
-         InlineKeyboardButton("🔴 REAL", callback_data=real)]
-    ])
-
-
-async def _running_callback(update, context):
-    query = update.callback_query
-    if query is not None:
-        await query.answer(
-            "⏳ Trade is already running; final market result will be sent automatically.",
-            show_alert=False,
-        )
-
-
-async def _mode_callback(update, context):
-    query = update.callback_query
-    if query is None:
+def _install_selector_route(appmod):
+    if getattr(appmod, "_PRIYANITHAN_WEB_SELECTOR", False):
         return
-    await query.answer("Select DEMO or REAL", show_alert=False)
-    parts = str(query.data or "").split("|", 4)
-    if len(parts) != 5 or parts[0] != "MODE":
+    flask_app = getattr(appmod, "app", None)
+    if flask_app is None:
         return
-    _, pair, direction, entry, expiry = parts
-    keyboard = _mode_keyboard(pair, direction, entry, expiry)
-    if keyboard is None or query.message is None:
-        return
-    await query.message.reply_text(
-        "🎯 TRADE MODE SELECTION\n\n"
-        f"📈 Asset: {pair}\n"
-        f"{'⬆️' if direction == 'UP' else '⬇️'} Direction: {direction}\n"
-        f"💰 Entry reference: {entry}\n"
-        f"⏱️ Expiry: {expiry} MIN\n\n"
-        "Choose the account mode before opening Olymptrade:",
-        reply_markup=keyboard,
-    )
 
+    @flask_app.get("/trade/select")
+    def trade_select_page():
+        from flask import request
 
-async def _demo_callback(update, context):
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer("🧪 DEMO selected", show_alert=False)
-    parts = str(query.data or "").split("|", 4)
-    if len(parts) != 5:
-        return
-    _, pair, direction, entry, expiry = parts
-    expiry_ts = time.time() + int(expiry) * 60
-    expiry_uae = datetime.fromtimestamp(expiry_ts, _UAE).strftime("%H:%M:%S UAE")
-    text = (
-        "🧪 DEMO TRADE READY\n\n"
-        f"📈 Asset: {pair}\n"
-        f"{'⬆️' if direction == 'UP' else '⬇️'} Direction: {direction}\n"
-        f"💰 Entry reference: {entry}\n"
-        f"⏱️ Expiry: {expiry} MIN\n"
-        f"⏳ Target expiry: {expiry_uae}\n\n"
-        "⚠️ AUTO TRADE: OFF\n"
-        "🤖 Broker order automation: OFF\n\n"
-        "Open DEMO, then verify the exact asset and expiry on the platform "
-        "before entering manually."
-    )
-    if query.message is not None:
-        await query.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🧪 OPEN DEMO PLATFORM", url=_OLYMPTRADE_DEMO_URL)]
-            ]),
-        )
+        pair = str(request.args.get("pair", "")).strip()
+        direction = str(request.args.get("direction", "")).strip().upper()
+        entry = str(request.args.get("entry", "")).strip()
+        try:
+            expiry = int(request.args.get("expiry", "0"))
+        except ValueError:
+            expiry = 0
+        if not pair or direction not in ("UP", "DOWN") or not entry or expiry not in (1, 2, 3, 5, 10, 15):
+            return "Invalid or expired trade signal", 400
 
+        e_pair = html.escape(pair)
+        e_dir = html.escape(direction)
+        e_entry = html.escape(entry)
+        demo_url = html.escape(_OLYMPTRADE_DEMO_URL, quote=True)
+        real_url = html.escape(_OLYMPTRADE_URL, quote=True)
+        arrow = "⬆️" if direction == "UP" else "⬇️"
 
-async def _real_callback(update, context):
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer("REAL mode selected — confirm before opening", show_alert=True)
-    parts = str(query.data or "").split("|", 4)
-    if len(parts) != 5 or query.message is None:
-        return
-    _, pair, direction, entry, expiry = parts
-    await query.message.reply_text(
-        "🔴 REAL ACCOUNT CONFIRMATION\n\n"
-        f"📈 Asset: {pair}\n"
-        f"{'⬆️' if direction == 'UP' else '⬇️'} Direction: {direction}\n"
-        f"💰 Entry reference: {entry}\n"
-        f"⏱️ Expiry: {expiry} MIN\n\n"
-        "⚠️ REAL trading uses your own funds.\n"
-        "The bot will NOT place the order. Verify the asset, account mode, "
-        "amount and expiry yourself before any manual trade.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔴 CONFIRM & OPEN REAL", callback_data=f"REALCONF|{pair}|{direction}|{entry}|{expiry}")]
-        ]),
-    )
+        return f'''<!doctype html>
+<html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Priyanithan Trade Selection</title>
+<style>
+body{{font-family:system-ui,-apple-system,sans-serif;background:#111827;color:#fff;margin:0;padding:24px}}
+.card{{max-width:520px;margin:auto;background:#1f2937;border-radius:18px;padding:22px;box-shadow:0 10px 30px #0005}}
+h1{{font-size:22px;margin:0 0 8px}} .muted{{color:#9ca3af}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}}
+a{{display:block;text-decoration:none;color:#fff;text-align:center;padding:16px 8px;border-radius:14px;font-weight:800}}
+.demo{{background:#166534}} .real{{background:#991b1b}}
+.warn{{margin-top:18px;padding:12px;border-radius:12px;background:#374151;font-size:13px}}
+#timer{{font-size:28px;font-weight:900;text-align:center;margin:14px 0;color:#fbbf24}}
+</style></head><body>
+<div class="card">
+<h1>🎯 TRADE MODE SELECTION</h1>
+<div class="muted">Choose within <b>10 seconds</b>. This page opens the web platform only.</div>
+<div id="timer">10</div>
+<p>📈 <b>Asset:</b> {e_pair}</p>
+<p>{arrow} <b>Direction:</b> {e_dir}</p>
+<p>💰 <b>Entry reference:</b> {e_entry}</p>
+<p>⏱️ <b>Expiry:</b> {expiry} MIN</p>
+<div class="grid" id="choices">
+<a class="demo" href="{demo_url}">🧪 DEMO — OPEN WEB</a>
+<a class="real" href="{real_url}" onclick="return confirmReal(event)">🔴 REAL — OPEN WEB</a>
+</div>
+<div class="warn">⚠️ AUTO TRADE: OFF. The bot does not place the order. On Olymptrade, verify the exact asset, direction, amount and expiry before manual entry.</div>
+</div>
+<script>
+let left=10;
+const timer=document.getElementById('timer');
+const choices=document.getElementById('choices');
+const iv=setInterval(()=>{{left--;timer.textContent=left;if(left<=0){{clearInterval(iv);choices.style.opacity='.45';document.body.dataset.expired='1';timer.textContent='EXPIRED';}}}},1000);
+function confirmReal(e){{
+ if(document.body.dataset.expired==='1'){{e.preventDefault();return false;}}
+ return confirm('REAL mode uses your own funds. Continue to the Olymptrade web platform?');
+}}
+</script></body></html>'''
 
-
-async def _real_confirm_callback(update, context):
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer("Opening official Olymptrade platform", show_alert=False)
-    parts = str(query.data or "").split("|", 4)
-    if len(parts) != 5 or query.message is None:
-        return
-    _, pair, direction, entry, expiry = parts
-    await query.message.reply_text(
-        "🔴 REAL MODE — MANUAL ONLY\n\n"
-        f"Asset: {pair}\nDirection: {direction}\nEntry reference: {entry}\nExpiry: {expiry} MIN\n\n"
-        "⚠️ Verify everything on Olymptrade before entering. AUTO TRADE: OFF.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔴 OPEN OLYMPTRADE", url=_OLYMPTRADE_URL)]
-        ]),
-    )
-
-
-def _ensure_handler(application, appmod):
-    global _HANDLER_INSTALLED
-    if _HANDLER_INSTALLED or getattr(application, "_FAST_MANUAL_ENTRY_HANDLER", False):
-        _HANDLER_INSTALLED = True
-        return
-    application.add_handler(CallbackQueryHandler(_mode_callback, pattern=r"^MODE\|"))
-    application.add_handler(CallbackQueryHandler(_demo_callback, pattern=r"^DEMO\|"))
-    application.add_handler(CallbackQueryHandler(_real_callback, pattern=r"^REAL\|"))
-    application.add_handler(CallbackQueryHandler(_real_confirm_callback, pattern=r"^REALCONF\|"))
-    application.add_handler(CallbackQueryHandler(_running_callback, pattern=r"^RUNNING\|"))
-    application._FAST_MANUAL_ENTRY_HANDLER = True
-    _HANDLER_INSTALLED = True
-    appmod.log.info("FAST MANUAL ENTRY CALLBACK ACTIVE: DEMO/REAL selector enabled")
+    appmod._PRIYANITHAN_WEB_SELECTOR = True
+    if hasattr(appmod, "log"):
+        appmod.log.info("WEB TRADE SELECTOR ACTIVE: 10-second DEMO/REAL page enabled")
 
 
 def _wrap_send(appmod):
@@ -231,12 +178,12 @@ def _wrap_send(appmod):
     patched_send._FAST_MANUAL_WRAPPER = True
     patched_send._FAST_MANUAL_INNER = current
     appmod.send_to_recipients = patched_send
-    appmod.log.info("FAST MANUAL ENTRY SEND WRAPPER ACTIVE: DEMO/REAL selector enabled")
+    appmod.log.info("FAST MANUAL ENTRY SEND WRAPPER ACTIVE: web selector enabled")
     return True
 
 
 def _patch_bot_send_message(appmod):
-    """Final fail-safe: attach the DEMO/REAL selector to every approved signal."""
+    """Final fail-safe: attach the web selector to every approved signal."""
     global _BOT_SEND_PATCHED
     if _BOT_SEND_PATCHED:
         return False
@@ -257,7 +204,7 @@ def _patch_bot_send_message(appmod):
     patched_bot_send._PRIYANITHAN_BUTTON_PATCH = True
     Bot.send_message = patched_bot_send
     _BOT_SEND_PATCHED = True
-    appmod.log.info("TELEGRAM BOT-LAYER BUTTON PATCH ACTIVE: approved signals require DEMO/REAL choice")
+    appmod.log.info("TELEGRAM BOT-LAYER PATCH ACTIVE: approved signals use web DEMO/REAL selector")
     return True
 
 
@@ -266,11 +213,8 @@ def _install():
     appmod = _get_app()
     if appmod is None:
         return False
+    _install_selector_route(appmod)
     _patch_bot_send_message(appmod)
-    application = getattr(appmod, "telegram_application", None)
-    if application is None:
-        return True
-    _ensure_handler(application, appmod)
     changed = _wrap_send(appmod)
     if changed:
         _INSTALLED = True
@@ -284,8 +228,8 @@ def bootstrap():
         except Exception:
             appmod = _get_app()
             if appmod is not None and hasattr(appmod, "log"):
-                appmod.log.exception("FAST MANUAL ENTRY BOOTSTRAP FAILED")
+                appmod.log.exception("WEB TRADE SELECTOR BOOTSTRAP FAILED")
         time.sleep(1.0)
 
 
-threading.Thread(target=bootstrap, name="fast-manual-entry-bootstrap", daemon=True).start()
+threading.Thread(target=bootstrap, name="web-trade-selector-bootstrap", daemon=True).start()
