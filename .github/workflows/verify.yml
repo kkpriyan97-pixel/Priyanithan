@@ -34,7 +34,8 @@ jobs:
           # Safety / trading mode
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
-          assert "1, 2, 3, 5, 10, 15" in app
+          assert "[1,2,3,5,10,15]" in app or "[1, 2, 3, 5, 10, 15]" in app or "1,2,3,5,10,15" in app or "1, 2, 3, 5, 10, 15" in app
+          assert "requested if requested in [1,2,3,5,10,15] else 5" in app
 
           # Live-data safeguards live in sitecustomize runtime patch.
           assert "1054" in site
