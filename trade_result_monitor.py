@@ -77,6 +77,112 @@ async def monitor_signal(signal, get_price, send_result):
     return outcome
 
 
+async def _ensure_direct_monitor(module, bot, pair, direction, entry, expiry):
+    """Start a result monitor even if another send-wrapper was bypassed.
+
+    This is intentionally idempotent: if the normal result wrapper already
+    registered the same signal, no second monitor is created.
+    """
+    pending = getattr(module, "pending_signals", None)
+    if pending is None:
+        pending = {}
+        module.pending_signals = pending
+    now = time.time()
+    pair = str(pair).upper()
+    direction = str(direction).upper()
+    entry = float(entry)
+    expiry = int(expiry)
+
+    for signal in pending.values():
+        try:
+            if (
+                signal.get("status") == "PENDING"
+                and str(signal.get("pair", "")).upper() == pair
+                and str(signal.get("direction", "")).upper() == direction
+                and abs(float(signal.get("entry")) - entry) < 1e-12
+                and abs(now - float(signal.get("signal_time"))) <= 5
+            ):
+                module.log.info("SIGNAL RESULT MONITOR ALREADY REGISTERED: pair=%s direction=%s", pair, direction)
+                return False
+        except Exception:
+            continue
+
+    async def get_expiry_price(target_pair):
+        ticks = getattr(module, "latest_ticks", {})
+        item = ticks.get(str(target_pair).upper()) if isinstance(ticks, dict) else None
+        if isinstance(item, dict):
+            for key in ("price", "p", "last", "close", "value", "ask", "bid"):
+                try:
+                    value = item.get(key)
+                    if value is not None and float(value) > 0:
+                        return float(value)
+                except (TypeError, ValueError):
+                    pass
+        getter = getattr(module, "get_ot_candles", None)
+        if getter is None:
+            return None
+        df, err = await getter(target_pair, 60, 120)
+        if df is None or getattr(df, "empty", True):
+            module.log.warning("SIGNAL RESULT PRICE UNAVAILABLE: pair=%s reason=%s", target_pair, err)
+            return None
+        try:
+            return float(df["close"].iloc[-1])
+        except Exception:
+            return None
+
+    async def send_result(signal, outcome):
+        icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖", "UNRESOLVED": "⚠️"}.get(outcome, "⚠️")
+        expiry_price = signal.get("expiry_price", "N/A")
+        text = (
+            f"{icon} PRIYANITHAN SIGNAL RESULT\n\n"
+            f"📈 {signal['pair']}\n"
+            f"↕️ {signal['direction']}\n"
+            f"💰 Entry: {signal['entry']}\n"
+            f"🏁 Expiry Price: {expiry_price}\n"
+            f"⏱️ Expiry: {signal['expiry_min']} MIN\n"
+            f"📊 Market Result: {outcome}\n\n"
+            f"⚠️ SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF"
+        )
+        target_bot = signal.get("_bot") or bot
+        if target_bot is None:
+            app_obj = getattr(module, "telegram_application", None)
+            target_bot = getattr(app_obj, "bot", None) if app_obj is not None else None
+        if target_bot is None:
+            module.log.error("SIGNAL RESULT SEND FAILED: Telegram bot object unavailable")
+            return False
+        sender = getattr(module, "send_to_recipients", None)
+        if sender is None:
+            module.log.error("SIGNAL RESULT SEND FAILED: send_to_recipients unavailable")
+            return False
+        sent = await sender(target_bot, text)
+        module.log.info("SIGNAL RESULT SENT: pair=%s outcome=%s sent=%s entry=%s expiry_price=%s", signal.get("pair"), outcome, sent, signal.get("entry"), expiry_price)
+        return sent
+
+    signal_id = register_signal(
+        pending,
+        {"pair": pair, "price": entry},
+        {"direction": direction, "duration_min": expiry},
+        signal_time=now,
+    )
+    signal = pending[signal_id]
+    signal["_bot"] = bot
+    tasks = getattr(module, "pending_signal_tasks", None)
+    if tasks is None:
+        tasks = set()
+        module.pending_signal_tasks = tasks
+    app_obj = getattr(module, "telegram_application", None)
+    create_task = getattr(app_obj, "create_task", None) if app_obj is not None else None
+    coro = monitor_signal(signal, get_expiry_price, send_result)
+    if callable(create_task):
+        task = create_task(coro, name=f"signal-result-{pair}-{int(now)}")
+    else:
+        task = asyncio.create_task(coro)
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+    module.log.info("SIGNAL RESULT MONITOR STARTED (DIRECT): pair=%s direction=%s expiry=%s min signal_time=%s", pair, direction, expiry, datetime.now(_UAE).strftime("%H:%M:%S UAE"))
+    return True
+
+
 # ============================================================
 # SINGLE-CONFIRMED-SIGNAL DELIVERY POLICY
 # ============================================================
@@ -119,7 +225,21 @@ def _install_single_confirmed_signal_policy():
                     if signal_items:
                         signal_items.sort(key=lambda x: (x["ai_conf"], x["tech_conf"]), reverse=True)
                         chosen = signal_items[0]
-                        await module.send_to_recipients(chosen["bot"], chosen["text"])
+                        sent = await module.send_to_recipients(chosen["bot"], chosen["text"])
+                        if sent:
+                            # Critical race-proof path: even if the send wrapper was
+                            # bypassed/replaced, explicitly register the chosen signal.
+                            try:
+                                await _ensure_direct_monitor(
+                                    module,
+                                    chosen["bot"],
+                                    chosen["pair"],
+                                    chosen["direction"],
+                                    chosen["entry"],
+                                    chosen["expiry"],
+                                )
+                            except Exception:
+                                module.log.exception("DIRECT SIGNAL RESULT MONITOR INSTALL FAILED")
                         for item in signal_items[1:]:
                             module.log.info(
                                 "SIGNAL SUPPRESSED: pair=%s direction=%s AI=%s%% Technical=%s%%; selected=%s AI=%s%% Technical=%s%%",
