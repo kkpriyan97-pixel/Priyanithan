@@ -15,14 +15,24 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python -m py_compile app.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
+      - run: python -m py_compile app.py fast_manual_entry.py sitecustomize.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
       - run: |
           python - <<'PY'
           from pathlib import Path
-          s = Path("app.py").read_text(encoding="utf-8")
-          assert "AUTO_TRADE = False" in s
-          assert "1, 2, 3, 5, 10, 15" in s
-          assert "global ot_client, PAIRS" in s
-          assert "1054" in s
-          print("Verification OK")
+          app = Path("app.py").read_text(encoding="utf-8")
+          fast = Path("fast_manual_entry.py").read_text(encoding="utf-8")
+          site = Path("sitecustomize.py").read_text(encoding="utf-8")
+
+          assert "AUTO_TRADE = False" in app
+          assert "1, 2, 3, 5, 10, 15" in app
+          assert "global ot_client, PAIRS" in app
+          assert "1054" in app
+
+          assert "⚡ OPEN TRADE" in fast
+          assert "AUTO TRADE: OFF" in fast
+          assert "CallbackQueryHandler" in fast
+          assert "reply_markup=markup" in fast
+          assert "callback_query" in site
+
+          print("Verification OK: core runtime, manual-entry UI, callback webhook, and AUTO_TRADE safety checks passed")
           PY
