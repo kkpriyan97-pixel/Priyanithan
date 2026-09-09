@@ -539,11 +539,22 @@ def parse_ai(data):
     choice = choices[0]
     msg = choice.get("message") if isinstance(choice.get("message"), dict) else {}
 
-    values = [msg.get("content"), choice.get("text"), data.get("output_text"), data.get("response"), data.get("result"), msg.get("reasoning_content"), msg.get("reasoning")]
+    values = [
+        msg.get("content"),
+        choice.get("text"),
+        data.get("output_text"),
+        data.get("response"),
+        data.get("result"),
+        msg.get("reasoning_content"),
+        msg.get("reasoning"),
+    ]
     candidates = []
     for value in values:
         if isinstance(value, list):
-            value = "".join(str(x.get("text") or x.get("content") or "") if isinstance(x, dict) else str(x) for x in value)
+            value = "".join(
+                str(x.get("text") or x.get("content") or "") if isinstance(x, dict) else str(x)
+                for x in value
+            )
         if value:
             candidates.append(value if isinstance(value, dict) else str(value))
 
@@ -561,7 +572,6 @@ def parse_ai(data):
                 return obj
         except (json.JSONDecodeError, TypeError):
             pass
-        # Reasoning may contain several {...} fragments; only accept one with decision.
         for match in re.finditer(r'\{', text):
             try:
                 obj, _ = json.JSONDecoder().raw_decode(text[match.start():])
@@ -573,7 +583,7 @@ def parse_ai(data):
     raise ValueError("AI response contained no valid decision JSON")
 
 def call_ai(prompt):
-    """Validate a setup with independent AI providers and fail over automatically."""
+    """Validate a setup with independent AI providers and robust failover."""
     log.info("AI FALLBACK CHAIN START: prompt_chars=%s", len(str(prompt)))
     providers = []
 
@@ -604,6 +614,19 @@ def call_ai(prompt):
         log.error("AI FALLBACK CHAIN SKIPPED: no AI provider configured")
         return None, "No AI provider configured"
 
+    schema = {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string", "enum": ["APPROVE", "REJECT"]},
+            "direction": {"type": "string", "enum": ["UP", "DOWN", "NO SIGNAL"]},
+            "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+            "duration_min": {"type": "integer", "enum": [1, 2, 3, 5, 10, 15]},
+            "reason": {"type": "string"},
+        },
+        "required": ["decision", "direction", "confidence", "duration_min", "reason"],
+        "additionalProperties": False,
+    }
+
     last_error = None
     for index, (name, url, key, model) in enumerate(providers, start=1):
         try:
@@ -612,20 +635,56 @@ def call_ai(prompt):
             if name.startswith("OpenRouter/"):
                 headers["HTTP-Referer"] = "https://priyanithan-ai.onrender.com"
                 headers["X-Title"] = "Priyanithan AI OlympTrade Signal Bot"
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "Return exactly one valid JSON object and no reasoning/prose/markdown."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-                "max_tokens": 300,
-                "response_format": {"type": "json_object"},
-            }
+
+            is_groq = name == "Groq"
+            if is_groq:
+                messages = [{"role": "user", "content": str(prompt) + "\n\nReturn exactly one JSON object matching the required fields. No markdown and no extra text."}]
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0,
+                    "max_completion_tokens": 512,
+                    "reasoning_effort": "low",
+                    "include_reasoning": False,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "trading_signal_decision",
+                            "strict": True,
+                            "schema": schema,
+                        },
+                    },
+                }
+            else:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "Return exactly one valid JSON object and no reasoning/prose/markdown."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 300,
+                    "response_format": {"type": "json_object"},
+                }
+
             started = time.time()
-            r = requests.post(url, headers=headers, json=payload, timeout=15)
+            r = requests.post(url, headers=headers, json=payload, timeout=20)
             elapsed = time.time() - started
             log.info("AI PROVIDER RESPONSE: %s model=%s status=%s elapsed=%.2fs bytes=%s", name, model, r.status_code, elapsed, len(r.content))
+
+            # Groq JSON-schema validation can reject a generation. Retry once in
+            # plain JSON-object mode before moving to the next independent provider.
+            if is_groq and r.status_code == 400:
+                log.warning("GROQ STRUCTURED OUTPUT RETRY: switching to JSON object mode")
+                retry_payload = dict(payload)
+                retry_payload["response_format"] = {"type": "json_object"}
+                retry_payload.pop("reasoning_effort", None)
+                retry_payload.pop("include_reasoning", None)
+                retry_payload["max_completion_tokens"] = 768
+                retry = requests.post(url, headers=headers, json=retry_payload, timeout=20)
+                log.info("AI PROVIDER RETRY RESPONSE: %s model=%s status=%s bytes=%s", name, model, retry.status_code, len(retry.content))
+                r = retry
+
             if not r.ok:
                 raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500].replace(chr(10), ' ')}")
             try:
