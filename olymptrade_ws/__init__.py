@@ -15,8 +15,12 @@ __all__ = [
     "TradeAPI"
 ]
 
-# Start the final dual-AI signal engine after app.py becomes available.
+# Start final runtime layers after app.py becomes available.
 try:
     import signal_engine  # noqa: F401
+except Exception:
+    pass
+try:
+    import signal_logo  # noqa: F401
 except Exception:
     pass
