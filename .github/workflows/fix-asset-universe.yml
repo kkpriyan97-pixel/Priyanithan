@@ -1,0 +1,156 @@
+name: Fix asset universe persistence
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Fix asset universe persistence and scan race'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch asset discovery and scanner state
+        shell: python
+        run: |
+          from pathlib import Path
+          import ast
+          p = Path('app.py')
+          s = p.read_text()
+          original = s
+
+          # Add a persistent last-known asset cache.
+          s = s.replace(
+              'discovered_assets = {}\nstate_lock = threading.Lock()',
+              'discovered_assets = {}\nlast_known_assets = []\nstate_lock = threading.Lock()',
+              1,
+          )
+
+          # Replace instrument callback with a persistent, non-destructive cache.
+          old = '''async def on_instruments(message):
+    found = extract_instruments(message)
+    if found:
+        discovered_assets.update(found)
+        if AUTO_DISCOVER_ASSETS:
+            PAIRS[:] = sorted(discovered_assets.keys())[:MAX_ASSETS_PER_CYCLE]
+            log.info("AUTO DISCOVERY: %s tradable assets available", len(PAIRS))
+'''
+          new = '''async def on_instruments(message):
+    """Persist the broker catalogue; never empty the scanner universe on partial updates."""
+    global last_known_assets
+    found = extract_instruments(message)
+    if not found:
+        return
+
+    # Keep the full last-known catalogue.  The broker may send partial/late
+    # catalogue events, so replacing the cache would create universe=0 races.
+    discovered_assets.update(found)
+
+    # Prefer explicitly tradable instruments when the broker exposes lock flags.
+    tradable = []
+    for pair, item in discovered_assets.items():
+        if not isinstance(item, dict):
+            tradable.append(pair)
+            continue
+        locked = any(bool(item.get(k)) for k in (
+            "locked", "locked_trading", "locked_buy", "locked_sell"
+        ))
+        if not locked:
+            tradable.append(pair)
+
+    if not tradable:
+        tradable = list(discovered_assets.keys())
+
+    tradable = sorted(set(tradable))[:MAX_ASSETS_PER_CYCLE]
+    if tradable:
+        last_known_assets = tradable[:]
+        if AUTO_DISCOVER_ASSETS:
+            PAIRS[:] = tradable
+        log.info("AUTO DISCOVERY CACHE: received=%s cached=%s scanner_assets=%s", len(found), len(discovered_assets), len(tradable))
+'''
+          if old not in s:
+              raise SystemExit('Expected on_instruments block not found')
+          s = s.replace(old, new, 1)
+
+          # Add a single source of truth for the scanner universe immediately before scan_cycle.
+          marker = 'async def scan_cycle(application):'
+          helper = '''def get_scanner_universe():
+    """Return a stable scanner universe even when the latest catalogue event is late/partial."""
+    if AUTO_DISCOVER_ASSETS:
+        assets = list(discovered_assets.keys())
+        if not assets:
+            assets = list(last_known_assets)
+        if not assets and PAIRS:
+            assets = list(PAIRS)
+    else:
+        assets = list(PAIRS)
+    return sorted(set(str(x).upper() for x in assets if str(x).strip()))[:MAX_ASSETS_PER_CYCLE]
+
+
+'''
+          if marker not in s:
+              raise SystemExit('scan_cycle marker not found')
+          if 'def get_scanner_universe()' not in s:
+              s = s.replace(marker, helper + marker, 1)
+
+          # Inject a stable-universe guard at the beginning of scan_cycle without
+          # replacing the rest of the function.
+          needle = marker + '\n'
+          injection = '''async def scan_cycle(application):
+    global PAIRS
+    scanner_assets = get_scanner_universe()
+    if scanner_assets and AUTO_DISCOVER_ASSETS:
+        PAIRS[:] = scanner_assets
+    log.info("AUTO SCAN: assets available=%s", len(scanner_assets))
+    if not scanner_assets:
+        log.warning("AUTO SCAN: instrument catalogue not ready; preserving last-known universe and skipping this cycle")
+        return
+'''
+          if 'scanner_assets = get_scanner_universe()' not in s:
+              s = s.replace(needle, injection, 1)
+
+          # Replace common universe assignments inside scan_cycle so the actual
+          # candidate loop consumes the same stable list.
+          s = s.replace(
+              'assets = list(discovered_assets.keys()) if AUTO_DISCOVER_ASSETS else PAIRS[:]',
+              'assets = scanner_assets',
+          )
+          s = s.replace(
+              'assets = list(discovered_assets.keys()) if AUTO_DISCOVER_ASSETS else list(PAIRS)',
+              'assets = scanner_assets',
+          )
+          s = s.replace(
+              'assets = discovered_assets.keys() if AUTO_DISCOVER_ASSETS else PAIRS',
+              'assets = scanner_assets',
+          )
+
+          # Keep the connection startup from scanning an empty PAIRS list while
+          # the catalogue arrives a moment later.
+          s = s.replace(
+              'if not PAIRS and AUTO_DISCOVER_ASSETS:\n                log.info("Waiting briefly for broker instrument catalogue...")\n                await asyncio.sleep(2)',
+              'if not PAIRS and AUTO_DISCOVER_ASSETS:\n                log.info("Waiting briefly for broker instrument catalogue...")\n                for _ in range(10):\n                    if discovered_assets:\n                        break\n                    await asyncio.sleep(1)',
+              1,
+          )
+
+          if s == original:
+              raise SystemExit('No changes made')
+
+          ast.parse(s)
+          p.write_text(s)
+      - name: Verify
+        run: python -m py_compile app.py
+      - name: Commit patch and remove workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git rm .github/workflows/fix-asset-universe.yml
+          git commit -m 'Fix asset universe persistence and scan race'
+          git push
