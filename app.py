@@ -242,7 +242,7 @@ def extract_instruments(message):
     for item in data:
         if not isinstance(item, dict):
             continue
-        pair = str(item.get("pair") or item.get("symbol") or item.get("name") or "").upper().strip()
+        pair = str(item.get("pair") or item.get("symbol") or item.get("name") or item.get("id") or "").upper().strip()
         if not pair:
             continue
         found[pair] = item
