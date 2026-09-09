@@ -15,6 +15,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
 
 _INSTALLED = False
+_HANDLER_INSTALLED = False
 _UAE = ZoneInfo("Asia/Dubai")
 _SIGNAL_RE = re.compile(
     r"PRIYANITHAN AI SIGNAL.*?📈\s*([^\n]+).*?"
@@ -70,29 +71,29 @@ async def _fast_manual_callback(update, context):
     await query.message.reply_text(text)
 
 
-def _install():
-    global _INSTALLED
-    if _INSTALLED:
-        return True
-    appmod = _get_app()
-    if appmod is None or getattr(appmod, "telegram_application", None) is None:
-        return False
-    application = appmod.telegram_application
-    if getattr(application, "_FAST_MANUAL_ENTRY_HANDLER", False):
-        _INSTALLED = True
-        return True
+def _ensure_handler(application, appmod):
+    global _HANDLER_INSTALLED
+    if _HANDLER_INSTALLED or getattr(application, "_FAST_MANUAL_ENTRY_HANDLER", False):
+        _HANDLER_INSTALLED = True
+        return
+    application.add_handler(CallbackQueryHandler(_fast_manual_callback, pattern=r"^FAST\|"))
+    application._FAST_MANUAL_ENTRY_HANDLER = True
+    _HANDLER_INSTALLED = True
+    appmod.log.info("FAST MANUAL ENTRY CALLBACK ACTIVE: ⚡ OPEN TRADE")
 
-    original_send = getattr(appmod, "send_to_recipients", None)
-    if original_send is None:
+
+def _wrap_send(appmod):
+    current = getattr(appmod, "send_to_recipients", None)
+    if current is None or getattr(current, "_FAST_MANUAL_WRAPPER", False):
         return False
 
     async def patched_send(bot, text):
         markup = _button_for(text)
         if markup is None:
-            return await original_send(bot, text)
+            return await current(bot, text)
         ids = appmod.recipients()
         if not ids:
-            return await original_send(bot, text)
+            return await current(bot, text)
         try:
             bot_id = int((await bot.get_me()).id)
         except Exception:
@@ -108,24 +109,38 @@ def _install():
                 appmod.log.warning("Fast manual signal send failed chat_id=%s: %s", chat_id, exc)
         return sent
 
+    patched_send._FAST_MANUAL_WRAPPER = True
+    patched_send._FAST_MANUAL_INNER = current
     appmod.send_to_recipients = patched_send
-    application.add_handler(CallbackQueryHandler(_fast_manual_callback, pattern=r"^FAST\|"))
-    application._FAST_MANUAL_ENTRY_HANDLER = True
-    _INSTALLED = True
-    appmod.log.info("FAST MANUAL ENTRY UI ACTIVE: ⚡ OPEN TRADE button; broker automation remains OFF")
+    appmod.log.info("FAST MANUAL ENTRY SEND WRAPPER ACTIVE: signal buttons enabled")
+    return True
+
+
+def _install():
+    global _INSTALLED
+    appmod = _get_app()
+    if appmod is None or getattr(appmod, "telegram_application", None) is None:
+        return False
+    application = appmod.telegram_application
+    _ensure_handler(application, appmod)
+    changed = _wrap_send(appmod)
+    if changed:
+        _INSTALLED = True
     return True
 
 
 def bootstrap():
+    # Keep checking because trade_result_monitor/single-signal wrappers can
+    # replace send_to_recipients after startup. Re-wrap the latest sender so the
+    # button cannot disappear after a restart or wrapper race.
     for _ in range(1800):
         try:
-            if _install():
-                return
+            _install()
         except Exception:
             appmod = _get_app()
             if appmod is not None and hasattr(appmod, "log"):
                 appmod.log.exception("FAST MANUAL ENTRY BOOTSTRAP FAILED")
-        time.sleep(0.1)
+        time.sleep(1.0)
 
 
 threading.Thread(target=bootstrap, name="fast-manual-entry-bootstrap", daemon=True).start()
