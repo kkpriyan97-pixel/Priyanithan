@@ -2,6 +2,7 @@
 
 Cerebras + Groq independently analyze live candles/indicators/price structure.
 Both must approve the same direction before a signal is delivered.
+Telegram output uses a 3D-style Unicode dashboard card (no generated image).
 Also provides 30s status updates and a 10-signal result report.
 AUTO TRADE remains OFF.
 """
@@ -10,10 +11,12 @@ import requests
 
 EXPIRIES=(1,2,3,5,10,15)
 
+
 def _app():
     m=sys.modules.get("__main__")
     if m is not None and getattr(m,"__file__","").endswith("app.py"): return m
     return sys.modules.get("app")
+
 
 def _parse_ai(body):
     choices=body.get("choices") or [] if isinstance(body,dict) else []
@@ -36,6 +39,7 @@ def _parse_ai(body):
             except Exception: pass
     raise ValueError("No decision JSON")
 
+
 def _snapshot(result,df):
     rows=df.tail(20); last=rows.iloc[-1]; prev=rows.iloc[-2]
     body=abs(float(last.close)-float(last.open)); rng=max(float(last.high)-float(last.low),1e-12)
@@ -46,8 +50,10 @@ def _snapshot(result,df):
     high=float(rows.high.max()); low=float(rows.low.min()); price=float(last.close); span=max(high-low,1e-12)
     return {"asset":result["pair"],"price":price,"direction_hint":result.get("signal"),"technical_confidence":result.get("confidence",0),"trend":result.get("trend"),"rsi":round(float(result.get("rsi",50)),2),"adx":round(float(result.get("adx",0)),2),"candle_pattern":pattern,"previous_close":float(prev.close),"support":low,"resistance":high,"near_support":abs(price-low)/span<=.20,"near_resistance":abs(high-price)/span<=.20,"binary_fixed_time_only":True,"no_forex_math":True}
 
+
 def _prompt(s):
     return ("You are a conservative binary/fixed-time market analyst. Analyze ONLY this live snapshot. Use indicators, candle pattern, trend, support/resistance and price structure. Do not use forex pip math, leverage, position sizing or invented data. Select best duration only from 1,2,3,5,10,15 minutes. Reject weak, mixed or overextended setups. Return JSON only: decision APPROVE/REJECT, direction UP/DOWN/NO SIGNAL, confidence 0-100, duration_min 1/2/3/5/10/15, reason.\nSNAPSHOT:\n"+json.dumps(s,default=str))
+
 
 def _call(name,url,key,model,prompt):
     r=requests.post(url,headers={"Authorization":"Bearer "+key.strip(),"Content-Type":"application/json"},json={"model":model,"messages":[{"role":"system","content":"Return exactly one JSON object. Be conservative."},{"role":"user","content":prompt}],"temperature":0,"max_tokens":350},timeout=20)
@@ -57,6 +63,7 @@ def _call(name,url,key,model,prompt):
     x=_parse_ai(r.json()); d=str(x.get("decision","")).upper(); direction=str(x.get("direction","")).upper(); c=int(x.get("confidence",0)); dur=int(x.get("duration_min",5))
     if d not in ("APPROVE","REJECT") or direction not in ("UP","DOWN","NO SIGNAL") or not 0<=c<=100 or dur not in EXPIRIES: raise ValueError("invalid AI output")
     x.update(decision=d,direction=direction,confidence=c,duration_min=dur,provider=name); return x
+
 
 def _confirm(s):
     a=_app(); ck=os.getenv("CEREBRAS_API_KEY"); gk=os.getenv("GROQ_API_KEY")
@@ -75,35 +82,86 @@ def _confirm(s):
     if conf<int(os.getenv("AI_MIN_CONFIDENCE","60")): return None
     return {"decision":"APPROVE","direction":x["direction"],"confidence":conf,"duration_min":min(x["duration_min"],y["duration_min"]),"reason":"Cerebras + Groq agreed","analysts":results}
 
+
 def _signal_text(result,c):
     cs=next((x["confidence"] for x in c["analysts"] if x["provider"]=="Cerebras"),0); gs=next((x["confidence"] for x in c["analysts"] if x["provider"]=="Groq"),0)
     arrow="⬆️" if c["direction"]=="UP" else "⬇️"
-    return ("🔥 PRIYANITHAN AI SIGNAL 🔥\n\n" f"📈 {result['pair']}\n{arrow} {c['direction']}\n💰 Entry: {result['price']}\n" f"⏱️ Expiry: {c['duration_min']} MIN\n🤖 Dual AI Confidence: {c['confidence']}%\n" f"🧠 Cerebras: {cs}% | Groq: {gs}%\n📊 Technical: {result.get('confidence',0)}%\n" f"🕐 {time.strftime('%H:%M:%S')} UAE\n\n✅ FINAL CONFIRMATION: APPROVED\n⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF")
+    direction_label="BUY / UP" if c["direction"]=="UP" else "SELL / DOWN"
+    mode=os.getenv("TRADING_MODE","DEMO").upper()
+    return (
+        "╔══════════════════════════════════════╗\n"
+        "║ 👑  𝗣𝗥𝗜𝗬𝗔𝗡𝗜𝗧𝗛𝗔𝗡 𝗔𝗜 𝗧𝗥𝗔𝗗𝗜𝗡𝗚  ║\n"
+        "║        ◈ 3D SIGNAL CENTER ◈         ║\n"
+        "╠══════════════════════════════════════╣\n"
+        "║ 🔥 𝗡𝗘𝗪 𝗦𝗜𝗚𝗡𝗔𝗟 — 𝗔𝗣𝗣𝗥𝗢𝗩𝗘𝗗 🔥    ║\n"
+        "╠══════════════════════════════════════╣\n"
+        f"║ 📈 Asset      : {result['pair']}\n"
+        f"║ {arrow} Direction  : {direction_label}\n"
+        f"║ 💰 Entry      : {result['price']}\n"
+        f"║ ⏱️ Duration   : {c['duration_min']} MIN\n"
+        f"║ 🤖 Confidence : {c['confidence']}%\n"
+        f"║ 🧠 Cerebras   : {cs}%\n"
+        f"║ ⚡ Groq       : {gs}%\n"
+        f"║ 📊 Technical  : {result.get('confidence',0)}%\n"
+        "╠══════════════════════════════════════╣\n"
+        "║ 🟢 DUAL CONFIRMATION                ║\n"
+        "║    CEREBRAS  ✓    GROQ  ✓            ║\n"
+        "║    SAME DIRECTION ✓                   ║\n"
+        "╠══════════════════════════════════════╣\n"
+        f"║ 🧪 MODE        : {mode}\n"
+        f"║ 🕐 UAE TIME    : {time.strftime('%H:%M:%S')}\n"
+        "╚══════════════════════════════════════╝\n\n"
+        "⚡ 𝗧𝗥𝗔𝗗𝗘 𝗡𝗢𝗪 → manual confirmation\n"
+        "⚠️ SIGNAL ONLY • AUTO TRADE OFF"
+    )
+
 
 def _parse_signal(text):
-    m=re.search(r"📈\s*([^\n]+).*?(⬆️\s*UP|⬇️\s*DOWN).*?💰\s*Entry:\s*([^\n]+).*?⏱️\s*Expiry:\s*(\d+)\s*MIN",str(text),re.S)
-    if not m:return None
-    return m.group(1).strip(),("UP" if "UP" in m.group(2) else "DOWN"),m.group(3).strip(),int(m.group(4))
+    m=re.search(r"📈\s*Asset\s*:\s*([^\n]+).*?Direction\s*:\s*(?:BUY / UP|SELL / DOWN|⬆️\s*UP|⬇️\s*DOWN).*?💰\s*Entry\s*:\s*([^\n]+).*?Duration\s*:\s*(\d+)\s*MIN",str(text),re.S)
+    if not m:
+        m=re.search(r"📈\s*([^\n]+).*?(⬆️\s*UP|⬇️\s*DOWN).*?💰\s*Entry:\s*([^\n]+).*?⏱️\s*Expiry:\s*(\d+)\s*MIN",str(text),re.S)
+        if not m:return None
+        return m.group(1).strip(),("UP" if "UP" in m.group(2) else "DOWN"),m.group(3).strip(),int(m.group(4))
+    direction="UP" if "UP" in m.group(0).upper() else "DOWN"
+    return m.group(1).strip(),direction,m.group(2).strip(),int(m.group(3))
+
 
 async def _status(bot,text):
     data=_parse_signal(text)
     if not data:return
-    pair,direction,entry,expiry=data; a=_app(); start=time.time(); total=expiry*60
+    pair,direction,entry,expiry=data; a=_app(); start=time.time(); total=expiry*60; update_no=0
     while True:
         left=total-(time.time()-start)
         if left<=0:return
         await asyncio.sleep(min(30,max(1,left)))
         left=total-(time.time()-start)
         if left<=0:return
-        current=None; ticks=getattr(a,"latest_ticks",{}) if a else {}; item=ticks.get(pair.upper()) if isinstance(ticks,dict) else None
+        update_no+=1; current=None; ticks=getattr(a,"latest_ticks",{}) if a else {}; item=ticks.get(pair.upper()) if isinstance(ticks,dict) else None
         if isinstance(item,dict):
             for k in ("price","p","last","close","value","ask","bid"):
                 try:
                     if item.get(k) is not None: current=float(item[k]); break
                 except Exception:pass
         for cid in (a.recipients() if a else []):
-            try: await bot.send_message(chat_id=cid,text=("⏱️ PRIYANITHAN 30s LIVE UPDATE\n\n" f"📈 {pair}\n↕️ {direction}\n💰 Entry: {entry}\n📍 Current: {current if current is not None else 'LIVE'}\n" f"⏳ Time left: {int(left)//60:02d}:{int(left)%60:02d}\n📡 Status: SIGNAL ACTIVE\n⚠️ MANUAL TRADE ONLY"))
+            try:
+                status="🟢 IN TRADE" if left>0 else "🏁 EXPIRY"
+                text2=(
+                    "╔══════════════════════════════════════╗\n"
+                    "║ ⏱️ 𝗣𝗥𝗜𝗬𝗔𝗡𝗜𝗧𝗛𝗔𝗡 𝗟𝗜𝗩𝗘 𝗨𝗣𝗗𝗔𝗧𝗘 ║\n"
+                    "╠══════════════════════════════════════╣\n"
+                    f"║ 🔢 Update       : #{update_no}\n"
+                    f"║ 📈 Asset        : {pair}\n"
+                    f"║ ↕️ Direction    : {direction}\n"
+                    f"║ 💰 Entry        : {entry}\n"
+                    f"║ 📍 Current      : {current if current is not None else 'LIVE'}\n"
+                    f"║ ⏳ Time Left    : {int(left)//60:02d}:{int(left)%60:02d}\n"
+                    f"║ {status:<27} ║\n"
+                    "╚══════════════════════════════════════╝\n\n"
+                    "⚠️ MANUAL TRADE ONLY • AUTO TRADE OFF"
+                )
+                await bot.send_message(chat_id=cid,text=text2)
             except Exception:pass
+
 
 def _install():
     a=_app()
@@ -128,9 +186,10 @@ def _install():
                 try:asyncio.create_task(_status(application.bot,text),name="signal-30s-status")
                 except Exception:pass
                 return
-        await a.send_to_recipients(application.bot,"🚫 NO DUAL-AI QUALIFIED SIGNAL\n\nCerebras + Groq did not both confirm the setup.\n⏱️ Next scan: automatic 5-minute cycle.")
-    a.scan_cycle=dual_scan; a._DUAL_AI_ENGINE=True; a.log.warning("FINAL DUAL AI ENGINE ACTIVE: Cerebras + Groq")
+        await a.send_to_recipients(application.bot,"╔══════════════════════════════════════╗\n║ 🚫 𝗡𝗢 𝗤𝗨𝗔𝗟𝗜𝗙𝗜𝗘𝗗 𝗦𝗜𝗚𝗡𝗔𝗟              ║\n╠══════════════════════════════════════╣\n║ Cerebras + Groq did not both confirm. ║\n║ ⏱️ Next scan: automatic 5-minute cycle║\n╚══════════════════════════════════════╝")
+    a.scan_cycle=dual_scan; a._DUAL_AI_ENGINE=True; a.log.warning("FINAL DUAL AI ENGINE ACTIVE: Cerebras + Groq + 3D TELEGRAM CARD")
     return True
+
 
 def _boot():
     for _ in range(1800):
@@ -147,6 +206,7 @@ try:
     threading.Thread(target=_boot,name="dual-ai-engine",daemon=True).start()
 except Exception:pass
 
+
 def _install_ten_report():
     for _ in range(1800):
         a=_app()
@@ -162,7 +222,7 @@ def _install_ten_report():
                     if len(h)==10:
                         wins=sum(x["result"]=="WIN" for x in h); losses=sum(x["result"]=="LOSS" for x in h); draws=sum(x["result"]=="DRAW" for x in h); unresolved=sum(x["result"]=="UNRESOLVED" for x in h)
                         lines="\n".join(f"{i+1}. {x['pair']} {x['direction']} → {x['result']}" for i,x in enumerate(h))
-                        report=("📊 PRIYANITHAN — 10 SIGNAL FULL REPORT\n\n" f"Signals: 10\n✅ WIN: {wins}\n❌ LOSS: {losses}\n➖ DRAW: {draws}\n⚠️ UNRESOLVED: {unresolved}\n📈 Win Rate: {wins*10:.1f}%\n\n"+lines+"\n\n🔄 10-signal cycle complete.\n⏱️ Next signal scan continues automatically every 5 minutes.\n⚠️ SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF")
+                        report=("╔══════════════════════════════════════╗\n║ 📊 𝗣𝗥𝗜𝗬𝗔𝗡𝗜𝗧𝗛𝗔𝗡 — 𝟭𝟬 𝗦𝗜𝗚𝗡𝗔𝗟 𝗥𝗘𝗣𝗢𝗥𝗧 ║\n╠══════════════════════════════════════╣\n" f"║ Total Signals : 10\n║ ✅ WIN         : {wins}\n║ ❌ LOSS        : {losses}\n║ ➖ DRAW        : {draws}\n║ ⚠️ UNRESOLVED  : {unresolved}\n║ 📈 Win Rate    : {wins*10:.1f}%\n╠══════════════════════════════════════╣\n"+lines+"\n╠══════════════════════════════════════╣\n║ 🔄 Cycle complete. Next scan: 5 min. ║\n╚══════════════════════════════════════╝\n⚠️ SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF")
                         await sender(bot,report); a.signal_history=[]
                     return sent
                 wrapped._TEN_SIGNAL_REPORT=True; a.send_to_recipients=wrapped; a.signal_history=[]; a._TEN_SIGNAL_REPORT=True; return
