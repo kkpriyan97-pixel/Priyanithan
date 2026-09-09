@@ -1,0 +1,35 @@
+name: Restore full runtime
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'Restore full runtime for clean Render redeploy')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore app.py from known-good runtime
+        shell: bash
+        run: |
+          git restore --source=e9f13431bb0656722fff6bd43dec7f0e50fdffdd -- app.py
+          python -m py_compile app.py
+
+      - name: Commit restored runtime and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git rm .github/workflows/restore-full-runtime.yml
+          git commit -m "Restore full runtime for clean Render redeploy"
+          git push origin main
