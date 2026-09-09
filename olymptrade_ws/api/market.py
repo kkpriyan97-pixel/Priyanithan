@@ -14,22 +14,19 @@ class MarketAPI:
         self._client = client
 
     async def subscribe_ticks(self, pair: str) -> None:
-        """Keep compatibility with callers without sending the obsolete tick-subscription frames.
-
-        The current OlympTrade WebSocket session already delivers tick events (e:1), while
-        the old e:12/e:280 request format returns server-side ``invalid_request`` for the
-        discovered instrument catalogue. Historical candles are requested independently by
-        get_candles(), so sending these rejected subscription frames is unnecessary and only
-        creates noise/errors in the connection log.
-        """
+        """Compatibility method; live tick events are already delivered by the session."""
         logger.info("Tick subscription skipped for %s; using broker live tick stream/candle polling.", pair)
 
     async def unsubscribe_ticks(self, pair: str) -> None:
-        """No-op counterpart for the obsolete tick subscription protocol."""
         logger.info("Tick unsubscription skipped for %s.", pair)
 
     async def get_candles(self, pair: str, size: int, count: int, end_time: Optional[Union[datetime, int]] = None) -> Optional[List[Dict[str, Any]]]:
-        """Requests historical candle data."""
+        """Request recent historical candles with an explicit range/count.
+
+        The previous request sent only pair/size/to/solid. The broker was then returning
+        very old cached candles for otherwise-live instruments. Include count and from so
+        the server receives an explicit recent window ending at the current time.
+        """
         if end_time is None:
             to_ts = int(time.time())
         elif isinstance(end_time, datetime):
@@ -39,19 +36,33 @@ class MarketAPI:
         else:
             to_ts = int(end_time)
 
+        try:
+            size = max(1, int(size))
+            count = max(1, int(count))
+        except (TypeError, ValueError):
+            size, count = 60, 120
+
+        from_ts = max(0, to_ts - (size * count))
         logger.info(
-            "Requesting %s candles for %s (size: %ss) ending around %s",
-            count, pair, size, datetime.fromtimestamp(to_ts, tz=timezone.utc)
+            "Requesting %s candles for %s (size: %ss) from=%s to=%s",
+            count, pair, size,
+            datetime.fromtimestamp(from_ts, tz=timezone.utc),
+            datetime.fromtimestamp(to_ts, tz=timezone.utc),
         )
 
-        # Current observed OlympTrade response is event e:10 with candles nested under
-        # d[0]["candles"]. The request shape below matches that observed response.
-        data = [{"pair": pair, "size": size, "to": to_ts, "solid": True}]
+        data = [{
+            "pair": pair,
+            "size": size,
+            "count": count,
+            "from": from_ts,
+            "to": to_ts,
+            "solid": True,
+        }]
 
         try:
             response = await self._client.send_request(10, data, requires_response=True)
             if not response:
-                logger.error("Empty candle response for %s.", pair)
+                logger.warning("Empty candle response for %s.", pair)
                 return None
 
             response_event = response.get("e")
@@ -72,21 +83,23 @@ class MarketAPI:
                         logger.info("Received %s historical candles for %s (e:10).", len(normalized), pair)
                         return normalized or None
 
-            # Backward compatibility with the legacy e:1003 response.
             if response_event == 1003:
                 candles_data = response.get("d")
                 if isinstance(candles_data, list):
                     logger.info("Received %s candles for %s (legacy e:1003).", len(candles_data), pair)
                     return candles_data or None
 
-            logger.error(
-                "Unexpected candle response for %s: e:%s keys:%s",
-                pair, response_event,
-                list(response.keys()) if isinstance(response, dict) else type(response),
-            )
+            if response.get("err"):
+                logger.warning("Candle request unavailable for %s: e:%s err=%s", pair, response_event, response.get("err"))
+            else:
+                logger.warning(
+                    "Unexpected candle response for %s: e:%s keys:%s",
+                    pair, response_event,
+                    list(response.keys()) if isinstance(response, dict) else type(response),
+                )
             return None
         except Exception as e:
-            logger.error("Failed to get candles for %s: %s", pair, e)
+            logger.warning("Failed to get candles for %s: %s", pair, e)
             return None
 
     async def get_profitability(self, account_id: int) -> Optional[List[Dict[str, Any]]]:
