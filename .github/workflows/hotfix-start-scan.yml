@@ -1,0 +1,103 @@
+name: Hotfix Telegram start scan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app.py'
+      - '.github/workflows/hotfix-start-scan.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch start, background scan, and webhook updates
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+
+          # Track one user-triggered scan so repeated /start commands cannot
+          # create overlapping expensive AI/candle scans.
+          if 'manual_scan_task = None' not in s:
+              s = s.replace(
+                  'telegram_application = None\n',
+                  'telegram_application = None\nmanual_scan_task = None\n',
+                  1,
+              )
+
+          old_start = '''async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update)
+    await update.message.reply_text("Priyanithan AI is online. Use /access YOUR_CODE to authorize this chat.")
+'''
+          new_start = '''async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global manual_scan_task
+    remember_chat(update)
+    if not is_authorized(update):
+        await update.message.reply_text(
+            "Priyanithan AI is online. Use /access YOUR_CODE first; then /start again to begin a live scan."
+        )
+        return
+
+    if manual_scan_task is not None and not manual_scan_task.done():
+        await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+        return
+
+    # Acknowledge immediately. The candle/AI scan runs in the background so
+    # Telegram never waits for market data or an AI provider before replying.
+    await update.message.reply_text("⚡ LIVE SCAN STARTED — analysing fresh market data now...")
+    manual_scan_task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
+'''
+          if old_start in s:
+              s = s.replace(old_start, new_start, 1)
+          elif 'async def start_cmd' in s and 'manual_scan_task = asyncio.create_task(scan_cycle' not in s:
+              raise SystemExit('start_cmd found but expected original body was not found')
+
+          # /scan gets the same non-blocking behavior.
+          old_scan = '''    await update.message.reply_text("🔎 Live scan started...")
+    await scan_cycle(context.application)
+'''
+          new_scan = '''    global manual_scan_task
+    if manual_scan_task is not None and not manual_scan_task.done():
+        await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+        return
+    await update.message.reply_text("🔎 Live scan started — analysing fresh market data now...")
+    manual_scan_task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
+'''
+          if old_scan in s:
+              s = s.replace(old_scan, new_scan, 1)
+
+          # Telegram must deliver button clicks as well as messages.
+          s = s.replace(
+              'allowed_updates=["message"],',
+              'allowed_updates=["message", "callback_query"],',
+          )
+
+          p.write_text(s, encoding='utf-8')
+
+      - name: Verify Python syntax and required safety flags
+        run: |
+          python -m py_compile app.py sitecustomize.py fast_manual_entry.py
+          grep -q 'AUTO_TRADE = False' app.py
+          grep -q 'allowed_updates=["message", "callback_query"]' app.py
+          grep -q 'manual_scan_task = asyncio.create_task(scan_cycle' app.py
+
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No hotfix changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Fix delayed Telegram start scan'
+          git push
