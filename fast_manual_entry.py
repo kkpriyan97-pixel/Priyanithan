@@ -18,11 +18,12 @@ _INSTALLED = False
 _HANDLER_INSTALLED = False
 _UAE = ZoneInfo("Asia/Dubai")
 _SIGNAL_RE = re.compile(
-    r"PRIYANITHAN AI SIGNAL.*?📈\s*([^\n]+).*?"
+    r"🔥?\s*PRIYANITHAN AI SIGNAL\s*🔥?.*?"
+    r"📈\s*([^\n]+).*?"
     r"(⬆️\s*UP|⬇️\s*DOWN).*?"
     r"💰\s*Entry:\s*([^\n]+).*?"
     r"⏱️\s*Expiry:\s*(\d+)\s*MIN",
-    re.S,
+    re.S | re.I,
 )
 
 
@@ -34,15 +35,27 @@ def _get_app():
 
 
 def _button_for(text):
+    """Return the manual-entry keyboard only for a valid approved signal."""
     m = _SIGNAL_RE.search(str(text or ""))
     if not m:
         return None
     pair = m.group(1).strip()
-    direction = "UP" if "UP" in m.group(2) else "DOWN"
+    direction = "UP" if "UP" in m.group(2).upper() else "DOWN"
     entry = m.group(3).strip()
-    expiry = int(m.group(4))
+    try:
+        expiry = int(m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not pair or not entry or expiry not in (1, 2, 3, 5, 10, 15):
+        return None
     callback = f"FAST|{pair}|{direction}|{entry}|{expiry}"
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⚡ OPEN TRADE", callback_data=callback)]])
+    # Telegram callback_data has a 64-byte limit. Reject rather than creating
+    # a button that can never be delivered/clicked.
+    if len(callback.encode("utf-8")) > 64:
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⚡ OPEN TRADE", callback_data=callback)]]
+    )
 
 
 async def _fast_manual_callback(update, context):
@@ -55,20 +68,27 @@ async def _fast_manual_callback(update, context):
     if len(parts) != 5 or parts[0] != "FAST":
         return
     _, pair, direction, entry, expiry = parts
-    expiry_ts = time.time() + int(expiry) * 60
+    try:
+        expiry_min = int(expiry)
+    except (TypeError, ValueError):
+        return
+    if direction not in ("UP", "DOWN") or expiry_min not in (1, 2, 3, 5, 10, 15):
+        return
+    expiry_ts = time.time() + expiry_min * 60
     expiry_uae = datetime.fromtimestamp(expiry_ts, _UAE).strftime("%H:%M:%S UAE")
     text = (
         "⚡ FAST MANUAL ENTRY READY\n\n"
         f"📈 {pair}\n"
         f"{'⬆️' if direction == 'UP' else '⬇️'} {direction}\n"
         f"💰 Entry: {entry}\n"
-        f"⏱️ Expiry: {expiry} MIN\n\n"
+        f"⏱️ Expiry: {expiry_min} MIN\n\n"
         "👤 Execute Buy/Sell manually in OlympTrade.\n"
         "🔒 AUTO TRADE: OFF\n"
         "🤖 Broker order automation: OFF\n\n"
         f"⏳ Target expiry: {expiry_uae}"
     )
-    await query.message.reply_text(text)
+    if query.message is not None:
+        await query.message.reply_text(text)
 
 
 def _ensure_handler(application, appmod):
@@ -130,9 +150,9 @@ def _install():
 
 
 def bootstrap():
-    # Keep checking because trade_result_monitor/single-signal wrappers can
-    # replace send_to_recipients after startup. Re-wrap the latest sender so the
-    # button cannot disappear after a restart or wrapper race.
+    # Keep checking because runtime patches may replace send_to_recipients after
+    # startup. Re-wrap the latest sender so the button cannot disappear after a
+    # restart or wrapper race.
     for _ in range(1800):
         try:
             _install()
