@@ -33,7 +33,7 @@ jobs:
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
-          assert "1, 2, 3, 5, 10, 15" in app
+          assert "[1,2,3,5,10,15]" in app
           assert "1054" in site
           assert "LIVE DATA CHECK" in site
           assert "STALE OlympTrade candles rejected" in site
