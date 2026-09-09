@@ -45,11 +45,11 @@ def evaluate_outcome(entry, expiry_price, direction):
 
 
 async def monitor_signal(signal, get_price, send_result):
-    """Wait until the signal expiry, read fresh market data, then report the result."""
+    """Wait until signal expiry, read fresh market data, then report the result."""
     wait_seconds = max(1, int(signal["expiry_min"] * 60 - (time.time() - signal["signal_time"])))
     await asyncio.sleep(wait_seconds)
 
-    # Retry briefly because the exact expiry candle can be unavailable for a few seconds.
+    # Retry briefly because the exact expiry price can be unavailable for a few seconds.
     expiry_price = None
     for attempt in range(4):
         try:
@@ -93,7 +93,7 @@ _SIGNAL_RE = re.compile(
 
 
 def _install_single_confirmed_signal_policy():
-    for _ in range(300):
+    for _ in range(1800):  # allow up to 3 minutes for app.py startup/patching
         module = sys.modules.get("__main__")
         if module is None or not getattr(module, "__file__", "").endswith("app.py"):
             module = sys.modules.get("app")
@@ -135,8 +135,6 @@ def _install_single_confirmed_signal_policy():
                         })
 
                     if signal_items:
-                        # Primary confirmation = AI confidence; technical confidence
-                        # is the tie-breaker. Only ONE signal leaves Telegram per cycle.
                         signal_items.sort(
                             key=lambda x: (x["ai_conf"], x["tech_conf"]),
                             reverse=True,
@@ -154,7 +152,6 @@ def _install_single_confirmed_signal_policy():
                             chosen["pair"], chosen["direction"], chosen["ai_conf"], chosen["tech_conf"], chosen["expiry"], len(signal_items),
                         )
                     else:
-                        # Preserve the existing NO QUALIFIED SIGNAL notification.
                         for bot, text in collected:
                             if "NO QUALIFIED SIGNAL" in text:
                                 await original_send(bot, text)
