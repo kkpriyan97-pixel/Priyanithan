@@ -87,3 +87,5 @@ jobs:
             git commit -m 'Fix delayed Telegram start scan v2'
             git push
           fi
+
+# Trigger execution on the current main revision.
