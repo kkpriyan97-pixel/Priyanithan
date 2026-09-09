@@ -4,6 +4,7 @@ Adds a Telegram inline button to approved signal messages. The button never
 places a broker order; it only prepares the exact signal details for immediate
 manual entry and preserves AUTO_TRADE=False.
 """
+import asyncio
 import re
 import sys
 import threading
@@ -16,6 +17,7 @@ from telegram.ext import CallbackQueryHandler
 
 _INSTALLED = False
 _HANDLER_INSTALLED = False
+_COMMANDS_PATCHED = False
 _UAE = ZoneInfo("Asia/Dubai")
 _SIGNAL_RE = re.compile(
     r"🔥?\s*PRIYANITHAN AI SIGNAL\s*🔥?.*?"
@@ -109,6 +111,70 @@ async def _fast_manual_callback(update, context):
         await query.message.reply_text(text)
 
 
+def _patch_command_handlers(application, appmod):
+    """Replace already-registered /start and /scan callbacks after app import."""
+    global _COMMANDS_PATCHED
+    if _COMMANDS_PATCHED:
+        return
+    original_start = getattr(appmod, "start_cmd", None)
+    original_scan = getattr(appmod, "scan_cmd", None)
+    scan_cycle = getattr(appmod, "scan_cycle", None)
+    if original_start is None or original_scan is None or scan_cycle is None:
+        return
+
+    async def patched_start(update, context):
+        remember = getattr(appmod, "remember_chat", None)
+        if callable(remember):
+            remember(update)
+        authorized = getattr(appmod, "is_authorized", lambda _u: False)(update)
+        if not authorized:
+            await update.message.reply_text(
+                "Priyanithan AI is online. Use /access YOUR_CODE first; then /start again to begin a live scan."
+            )
+            return
+        task = getattr(appmod, "manual_scan_task", None)
+        if task is not None and not task.done():
+            await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+            return
+        await update.message.reply_text("⚡ LIVE SCAN STARTED — analysing fresh market data now...")
+        task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
+        appmod.manual_scan_task = task
+
+    async def patched_scan(update, context):
+        remember = getattr(appmod, "remember_chat", None)
+        if callable(remember):
+            remember(update)
+        authorized = getattr(appmod, "is_authorized", lambda _u: False)(update)
+        if not authorized:
+            await update.message.reply_text("❌ Not authorized. Use /access YOUR_CODE first.")
+            return
+        task = getattr(appmod, "manual_scan_task", None)
+        if task is not None and not task.done():
+            await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+            return
+        await update.message.reply_text("🔎 Live scan started — analysing fresh market data now...")
+        task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
+        appmod.manual_scan_task = task
+
+    # PTB keeps handlers in application.handlers as groups of Handler objects.
+    replaced = 0
+    for handlers in getattr(application, "handlers", {}).values():
+        for handler in handlers:
+            callback = getattr(handler, "callback", None)
+            command = getattr(handler, "commands", None)
+            commands = {str(x).lower() for x in command} if command else set()
+            if callback is original_start or "start" in commands:
+                handler.callback = patched_start
+                replaced += 1
+            elif callback is original_scan or "scan" in commands:
+                handler.callback = patched_scan
+                replaced += 1
+    if replaced:
+        appmod.manual_scan_task = getattr(appmod, "manual_scan_task", None)
+        _COMMANDS_PATCHED = True
+        appmod.log.info("COMMAND HOTFIX ACTIVE: /start and /scan launch background live scans")
+
+
 def _ensure_handler(application, appmod):
     global _HANDLER_INSTALLED
     if _HANDLER_INSTALLED or getattr(application, "_FAST_MANUAL_ENTRY_HANDLER", False):
@@ -158,9 +224,12 @@ def _wrap_send(appmod):
 def _install():
     global _INSTALLED
     appmod = _get_app()
-    if appmod is None or getattr(appmod, "telegram_application", None) is None:
+    if appmod is None:
         return False
-    application = appmod.telegram_application
+    application = getattr(appmod, "telegram_application", None)
+    if application is None:
+        return False
+    _patch_command_handlers(application, appmod)
     _ensure_handler(application, appmod)
     changed = _wrap_send(appmod)
     if changed:
