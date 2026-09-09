@@ -36,11 +36,14 @@ jobs:
           assert "ACCESS REQUIRED" in fast
           assert "Choose DEMO or REAL before the scan" in fast
           assert '"/trade/mode"' in fast
-          assert '"/trade/select"' in fast
+          assert '"/trade/app"' in fast
           assert "⚡ TRADE NOW" in fast
+          assert "WebAppInfo" in fast
           assert "Signals every 5 minutes" in fast
           assert "AUTO TRADE: OFF" in fast
-          assert "Verify the exact asset, current price, direction and expiry" in fast
+          assert "ASSET" in fast
+          assert "ENTRY / PRICE REF" in fast
+          assert "EXPIRY / TIME" in fast
           assert "olymptrade.com/pages/trading/account/free-demo/" in fast
           assert "olymptrade.com/pages/trading/" in fast
           assert "RENDER_EXTERNAL_URL" in fast
@@ -50,6 +53,6 @@ jobs:
           assert "SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF" in result
 
           print("FINAL FLOW VERIFY OK")
-          print("START -> ACCESS CODE -> DEMO/REAL -> AI scan -> 5-min signal -> TRADE NOW -> manual web trade")
+          print("START -> ACCESS CODE -> DEMO/REAL -> AI scan -> 5-min signal -> Telegram Mini App -> auto-prepared asset/time/price/direction -> manual Olymp Trade")
           print("AUTO_TRADE=False; MARTINGALE=False; no broker order execution")
           PY
