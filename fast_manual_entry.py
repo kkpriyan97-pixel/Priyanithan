@@ -49,8 +49,6 @@ def _button_for(text):
     if not pair or not entry or expiry not in (1, 2, 3, 5, 10, 15):
         return None
     callback = f"FAST|{pair}|{direction}|{entry}|{expiry}"
-    # Telegram callback_data has a 64-byte limit. Reject rather than creating
-    # a button that can never be delivered/clicked.
     if len(callback.encode("utf-8")) > 64:
         return None
     return InlineKeyboardMarkup(
@@ -58,12 +56,14 @@ def _button_for(text):
     )
 
 
-
-
 async def _running_callback(update, context):
     query = update.callback_query
     if query is not None:
-        await query.answer("⏳ Trade is already running; final market result will be sent automatically.", show_alert=False)
+        await query.answer(
+            "⏳ Trade is already running; the final market result will be sent automatically.",
+            show_alert=False,
+        )
+
 
 async def _fast_manual_callback(update, context):
     query = update.callback_query
@@ -95,6 +95,17 @@ async def _fast_manual_callback(update, context):
         f"⏳ Target expiry: {expiry_uae}"
     )
     if query.message is not None:
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(
+                        "⏳ TRADE RUNNING — MANUAL",
+                        callback_data=f"RUNNING|{pair}|{direction}|{entry}|{expiry_min}",
+                    )]]
+                )
+            )
+        except Exception:
+            pass
         await query.message.reply_text(text)
 
 
@@ -107,7 +118,7 @@ def _ensure_handler(application, appmod):
     application.add_handler(CallbackQueryHandler(_running_callback, pattern=r"^RUNNING\|"))
     application._FAST_MANUAL_ENTRY_HANDLER = True
     _HANDLER_INSTALLED = True
-    appmod.log.info("FAST MANUAL ENTRY CALLBACK ACTIVE: ⚡ OPEN TRADE")
+    appmod.log.info("FAST MANUAL ENTRY CALLBACK ACTIVE: ⚡ OPEN TRADE -> ⏳ TRADE RUNNING")
 
 
 def _wrap_send(appmod):
@@ -158,9 +169,6 @@ def _install():
 
 
 def bootstrap():
-    # Keep checking because runtime patches may replace send_to_recipients after
-    # startup. Re-wrap the latest sender so the button cannot disappear after a
-    # restart or wrapper race.
     for _ in range(1800):
         try:
             _install()
