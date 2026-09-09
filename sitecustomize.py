@@ -289,3 +289,10 @@ def _bootstrap_result_monitor_module():
 
 _rm_threading.Thread(target=_bootstrap_result_clock, name="signal-clock-bootstrap", daemon=True).start()
 _rm_threading.Thread(target=_bootstrap_result_monitor_module, name="signal-result-monitor-bootstrap", daemon=True).start()
+
+# FAST MANUAL ENTRY UI BOOTSTRAP
+try:
+    import fast_manual_entry  # noqa: F401
+except Exception:
+    import logging as _fme_logging
+    _fme_logging.getLogger("priyanithan").exception("FAST MANUAL ENTRY IMPORT FAILED")
