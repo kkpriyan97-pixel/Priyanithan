@@ -832,5 +832,13 @@ def main():
     asyncio.run(telegram_runtime(application))
 
 
+def start_web_server():
+    """Keep the Render Web Service port open for health checks while the bot runs."""
+    port = int(os.getenv("PORT", "10000"))
+    log.info("Render health server starting on 0.0.0.0:%s", port)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
 if __name__ == "__main__":
+    threading.Thread(target=start_web_server, daemon=True, name="render-health").start()
     main()
