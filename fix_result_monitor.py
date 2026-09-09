@@ -5,9 +5,8 @@ s = p.read_text(encoding="utf-8")
 
 # Permanent architecture fix:
 # trade_result_monitor.py is the single owner of signal registration, expiry
-# tasks, and WIN/LOSS delivery. sitecustomize.py must NOT install a second
-# result-monitor wrapper. The old duplicate wrapper also called
-# asyncio.create_task() without importing asyncio and caused REGISTER FAILED.
+# tasks, and WIN/LOSS delivery. sitecustomize.py must not install a second
+# result-monitor wrapper. The old duplicate wrapper caused REGISTER FAILED.
 marker = "# READ-ONLY SIGNAL RESULT + SEND-TIME CLOCK PATCH"
 if marker not in s:
     raise SystemExit("sitecustomize.py result-monitor marker not found")
@@ -55,11 +54,31 @@ def _bootstrap_result_clock():
         _rm_time.sleep(0.1)
 
 
+def _bootstrap_result_monitor_module():
+    # Importing trade_result_monitor starts its own fail-safe bootstrap thread.
+    # Do this from sitecustomize only after the runtime has started so the
+    # monitor module is guaranteed to be loaded in the Render process.
+    for _ in range(1800):
+        try:
+            import trade_result_monitor  # noqa: F401
+            module = sys.modules.get("__main__")
+            if module is None or not getattr(module, "__file__", "").endswith("app.py"):
+                module = sys.modules.get("app")
+            if module is not None and getattr(module, "_RESULT_MONITOR_INSTALLED", False):
+                return
+        except Exception:
+            module = sys.modules.get("__main__") or sys.modules.get("app")
+            if module is not None and hasattr(module, "log"):
+                module.log.exception("RESULT MONITOR BOOTSTRAP IMPORT FAILED")
+        _rm_time.sleep(0.1)
+
+
 _rm_threading.Thread(target=_bootstrap_result_clock, name="signal-clock-bootstrap", daemon=True).start()
+_rm_threading.Thread(target=_bootstrap_result_monitor_module, name="signal-result-monitor-bootstrap", daemon=True).start()
 '''
 
 s = head + clean_tail
 p.write_text(s, encoding="utf-8")
 compile(s, "sitecustomize.py", "exec")
-print("FIXED: removed duplicate sitecustomize result monitor; trade_result_monitor is now the sole monitor owner")
+print("FIXED: duplicate sitecustomize result monitor removed and sole trade_result_monitor bootstrap restored")
 print("OK: sitecustomize.py compiles")
