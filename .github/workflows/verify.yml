@@ -16,7 +16,9 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
       - name: Compile all runtime Python
-        run: python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
+        run: |
+          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py signal_logo.py
+          python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify final flow invariants
         run: |
           python - <<'PY'
@@ -25,24 +27,30 @@ jobs:
           fast = Path("fast_manual_entry.py").read_text(encoding="utf-8")
           site = Path("sitecustomize.py").read_text(encoding="utf-8")
           result = Path("trade_result_monitor.py").read_text(encoding="utf-8")
+          engine = Path("signal_engine.py").read_text(encoding="utf-8")
+          logo = Path("signal_logo.py").read_text(encoding="utf-8")
+          init = Path("olymptrade_ws/__init__.py").read_text(encoding="utf-8")
 
+          # Safety / trading mode
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
           assert "1, 2, 3, 5, 10, 15" in app
-          assert "1054" in app
-          assert "LIVE DATA CHECK" in app
-          assert "STALE OlympTrade candles rejected" in app
 
+          # Live-data safeguards live in sitecustomize runtime patch.
+          assert "1054" in site
+          assert "LIVE DATA CHECK" in site
+          assert "STALE OlympTrade candles rejected" in site
+
+          # Access + Demo/Real + Trade Now layer
           assert "LIVE AI PATCH ACTIVE" in fast
           assert "def patch_ai(a):" in fast
           assert "OPENROUTER_API_KEY" in fast
-          assert "https://openrouter.ai/api/v1/chat/completions" in fast
+          assert "CEREBRAS_API_KEY" in fast
           assert "GROQ_API_KEY" in fast
           assert "AIRFORCE_API_KEY" in fast
           assert '"APPROVE"' in fast
           assert '"REJECT"' in fast
           assert "AI DECISION:" in fast
-
           assert "ACCESS REQUIRED" in fast
           assert "Choose DEMO or REAL before the scan" in fast
           assert "_FINAL_ACCESS" in fast
@@ -59,11 +67,28 @@ jobs:
           assert "olymptrade.com/pages/trading/" in fast
           assert "RENDER_EXTERNAL_URL" in fast
 
-          assert "callback_query" in site
+          # Dual confirmation engine
+          assert "Cerebras + Groq independently analyze" in engine
+          assert "CEREBRAS_API_KEY" in engine
+          assert "GROQ_API_KEY" in engine
+          assert "https://api.cerebras.ai/v1/chat/completions" in engine
+          assert "https://api.groq.com/openai/v1/chat/completions" in engine
+          assert "x[\"direction\"]!=y[\"direction\"]" in engine
+          assert "x[\"decision\"]!=\"APPROVE\"" in engine
+          assert "30s" in engine
+          assert "10-signal" in engine
+          assert "AUTO TRADE OFF" in engine
+
+          # 3D-style Telegram message/logo layer is code, not an uploaded/generated image.
+          assert "3D SIGNAL CENTER" in engine
+          assert "signal_logo" in init
+          assert "PRIYANITHAN AI SIGNAL" in logo
+
+          # Result monitoring
           assert "ALLOWED_EXPIRIES = (1, 2, 3, 5, 10, 15)" in result
           assert "SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF" in result
 
           print("FINAL FLOW VERIFY OK")
-          print("START -> ACCESS -> DEMO/REAL -> LIVE AI + technical scan -> qualified signal -> TRADE NOW -> manual Olymp Trade")
+          print("START -> ACCESS -> DEMO/REAL -> LIVE MARKET -> Cerebras + Groq -> DUAL CONFIRMATION -> SIGNAL -> TRADE NOW -> 30s updates -> RESULT -> 10-signal report -> next 5-minute cycle")
           print("AUTO_TRADE=False; MARTINGALE=False; no broker order execution")
           PY
