@@ -119,7 +119,10 @@ def _install_single_confirmed_signal_policy():
                     if signal_items:
                         signal_items.sort(key=lambda x: (x["ai_conf"], x["tech_conf"]), reverse=True)
                         chosen = signal_items[0]
-                        await original_send(chosen["bot"], chosen["text"])
+                        # Call the send wrapper that is active after restoration.
+                        # If result monitoring is installed, this registers the
+                        # selected signal before its expiry timer starts.
+                        await module.send_to_recipients(chosen["bot"], chosen["text"])
                         for item in signal_items[1:]:
                             module.log.info(
                                 "SIGNAL SUPPRESSED: pair=%s direction=%s AI=%s%% Technical=%s%%; selected=%s AI=%s%% Technical=%s%%",
@@ -133,7 +136,7 @@ def _install_single_confirmed_signal_policy():
                     else:
                         for bot, text in collected:
                             if "NO QUALIFIED SIGNAL" in text:
-                                await original_send(bot, text)
+                                await module.send_to_recipients(bot, text)
                                 break
                 module.scan_cycle = single_confirmed_scan
                 module._SINGLE_CONFIRMED_SIGNAL_POLICY = True
@@ -157,7 +160,6 @@ def _install_result_monitor():
     if original_format_signal is None or original_send is None:
         return False
 
-    # Claim the installation before wrapping so the sitecustomize installer cannot double-wrap it.
     module._RESULT_MONITOR_INSTALLED = True
     module.pending_signals = getattr(module, "pending_signals", {})
     module.pending_signal_tasks = getattr(module, "pending_signal_tasks", set())
@@ -257,9 +259,12 @@ def _install_result_monitor():
 
 
 def _bootstrap():
+    # IMPORTANT: install result monitoring FIRST. The single-signal wrapper
+    # must retain this send wrapper; otherwise its selected signal can bypass
+    # registration and no expiry result will ever be generated.
     for _ in range(1800):
-        _install_single_confirmed_signal_policy()
         if _install_result_monitor() or getattr(sys.modules.get("__main__"), "_RESULT_MONITOR_INSTALLED", False):
+            _install_single_confirmed_signal_policy()
             return
         time.sleep(0.1)
 
