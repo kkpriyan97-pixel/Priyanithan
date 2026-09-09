@@ -119,9 +119,6 @@ def _install_single_confirmed_signal_policy():
                     if signal_items:
                         signal_items.sort(key=lambda x: (x["ai_conf"], x["tech_conf"]), reverse=True)
                         chosen = signal_items[0]
-                        # Call the send wrapper that is active after restoration.
-                        # If result monitoring is installed, this registers the
-                        # selected signal before its expiry timer starts.
                         await module.send_to_recipients(chosen["bot"], chosen["text"])
                         for item in signal_items[1:]:
                             module.log.info(
@@ -149,7 +146,6 @@ def _install_single_confirmed_signal_policy():
 # FAIL-SAFE RESULT MONITOR INSTALLER
 # ============================================================
 def _install_result_monitor():
-    """Install result monitoring directly from this module if sitecustomize has not yet done so."""
     module = sys.modules.get("__main__")
     if module is None or not getattr(module, "__file__", "").endswith("app.py"):
         module = sys.modules.get("app")
@@ -245,10 +241,15 @@ def _install_result_monitor():
             signal_id = register_signal(module.pending_signals, result, ai, signal_time=now_ts)
             signal = module.pending_signals[signal_id]
             signal["_bot"] = bot
-            task = asyncio.create_task(monitor_one(signal))
+            app_obj = getattr(module, "telegram_application", None)
+            create_task = getattr(app_obj, "create_task", None) if app_obj is not None else None
+            if callable(create_task):
+                task = create_task(monitor_one(signal), name=f"signal-result-{pair}-{int(now_ts)}")
+            else:
+                task = asyncio.create_task(monitor_one(signal))
             module.pending_signal_tasks.add(task)
             task.add_done_callback(module.pending_signal_tasks.discard)
-            module.log.info("SIGNAL RESULT MONITOR STARTED: pair=%s direction=%s expiry=%s min signal_time=%s", pair, direction, expiry_text, datetime.now(_UAE).strftime("%H:%M:%S UAE"))
+            module.log.info("SIGNAL RESULT MONITOR STARTED: pair=%s direction=%s expiry=%s min signal_time=%s task=%s", pair, direction, expiry_text, datetime.now(_UAE).strftime("%H:%M:%S UAE"), getattr(task, "get_name", lambda: "task")())
         except Exception:
             module.log.exception("SIGNAL RESULT MONITOR REGISTER FAILED")
         return sent
@@ -259,9 +260,6 @@ def _install_result_monitor():
 
 
 def _bootstrap():
-    # IMPORTANT: install result monitoring FIRST. The single-signal wrapper
-    # must retain this send wrapper; otherwise its selected signal can bypass
-    # registration and no expiry result will ever be generated.
     for _ in range(1800):
         if _install_result_monitor() or getattr(sys.modules.get("__main__"), "_RESULT_MONITOR_INSTALLED", False):
             _install_single_confirmed_signal_policy()
