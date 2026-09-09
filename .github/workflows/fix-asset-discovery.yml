@@ -1,0 +1,54 @@
+name: Fix asset discovery
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch instrument extraction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("app.py")
+          s = p.read_text()
+          old = 'pair = str(item.get("pair") or item.get("symbol") or item.get("name") or "").upper().strip()'
+          new = 'pair = str(item.get("pair") or item.get("symbol") or item.get("name") or item.get("id") or "").upper().strip()'
+          if old not in s:
+              raise SystemExit("Expected instrument extraction line not found; refusing unsafe patch")
+          s = s.replace(old, new, 1)
+          old2 = '        found[pair] = item\n    return found'
+          new2 = '        found[pair] = item\n    return found'
+          if old2 not in s:
+              raise SystemExit("Expected extract_instruments body not found; refusing unsafe patch")
+          p.write_text(s)
+          PY
+          python -m py_compile app.py
+
+      - name: Show verification
+        run: |
+          grep -n 'pair = str(item.get("pair")' app.py
+          grep -n 'async def on_instruments' app.py
+          grep -n 'AUTO DISCOVERY' app.py
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git commit -m "Fix OlympTrade asset discovery from instrument id"
+          git push
+
+      - name: Remove repair workflow
+        run: |
+          git rm .github/workflows/fix-asset-discovery.yml
+          git commit -m "Remove one-time asset discovery repair workflow"
+          git push
