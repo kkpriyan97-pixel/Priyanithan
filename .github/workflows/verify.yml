@@ -33,8 +33,19 @@ jobs:
           assert "LIVE DATA CHECK" in app
           assert "STALE OlympTrade candles rejected" in app
 
+          assert "LIVE AI PATCH ACTIVE" in fast
+          assert "def patch_ai(a):" in fast
+          assert "OPENROUTER_API_KEY" in fast
+          assert "https://openrouter.ai/api/v1/chat/completions" in fast
+          assert "GROQ_API_KEY" in fast
+          assert "AIRFORCE_API_KEY" in fast
+          assert '"APPROVE"' in fast
+          assert '"REJECT"' in fast
+          assert "AI DECISION:" in fast
+
           assert "ACCESS REQUIRED" in fast
           assert "Choose DEMO or REAL before the scan" in fast
+          assert "_FINAL_ACCESS" in fast
           assert '"/trade/mode"' in fast
           assert '"/trade/app"' in fast
           assert "⚡ TRADE NOW" in fast
@@ -53,6 +64,6 @@ jobs:
           assert "SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF" in result
 
           print("FINAL FLOW VERIFY OK")
-          print("START -> ACCESS CODE -> DEMO/REAL -> AI scan -> 5-min signal -> Telegram Mini App -> auto-prepared asset/time/price/direction -> manual Olymp Trade")
+          print("START -> ACCESS -> DEMO/REAL -> LIVE AI + technical scan -> qualified signal -> TRADE NOW -> manual Olymp Trade")
           print("AUTO_TRADE=False; MARTINGALE=False; no broker order execution")
           PY
