@@ -4,7 +4,6 @@ Adds a Telegram inline button to approved signal messages. The button never
 places a broker order; it only prepares the exact signal details for immediate
 manual entry and preserves AUTO_TRADE=False.
 """
-import asyncio
 import re
 import sys
 import threading
@@ -106,7 +105,7 @@ def _install():
         return sent
 
     appmod.send_to_recipients = patched_send
-    application.add_handler(CallbackQueryHandler(_fast_manual_callback, pattern=r"^FAST\\|"))
+    application.add_handler(CallbackQueryHandler(_fast_manual_callback, pattern=r"^FAST\|"))
     application._FAST_MANUAL_ENTRY_HANDLER = True
     _INSTALLED = True
     appmod.log.info("FAST MANUAL ENTRY UI ACTIVE: ⚡ OPEN TRADE button; broker automation remains OFF")
