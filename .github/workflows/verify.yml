@@ -28,11 +28,12 @@ jobs:
           assert "global ot_client, PAIRS" in app
           assert "1054" in app
 
-          assert "⚡ OPEN TRADE" in fast
+          assert "SELECT DEMO / REAL (10s)" in fast
           assert "AUTO TRADE: OFF" in fast
-          assert "CallbackQueryHandler" in fast
+          assert "/trade/select" in fast
+          assert "10 seconds" in fast
           assert "reply_markup=markup" in fast
           assert "callback_query" in site
 
-          print("Verification OK: core runtime, manual-entry UI, callback webhook, and AUTO_TRADE safety checks passed")
+          print("Verification OK: core runtime, 10-second web DEMO/REAL selector, webhook support, and AUTO_TRADE safety checks passed")
           PY
