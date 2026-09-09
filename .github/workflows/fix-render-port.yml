@@ -1,0 +1,43 @@
+name: Fix Render port binding
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Add Render HTTP server
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+          if 'def start_web_server():' not in s:
+              marker = '\n\nif __name__ == "__main__":\n    main()'
+              if marker not in s:
+                  raise SystemExit('main marker not found')
+              block = '''\n\ndef start_web_server():\n    """Keep the Render Web Service port open for health checks while the bot runs."""\n    port = int(os.getenv("PORT", "10000"))\n    log.info("Render health server starting on 0.0.0.0:%s", port)\n    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)\n'''
+              s = s.replace(marker, block + '\n\nif __name__ == "__main__":\n    threading.Thread(target=start_web_server, daemon=True, name="render-health").start()\n    main()', 1)
+              p.write_text(s, encoding='utf-8')
+          compile(p.read_text(encoding='utf-8'), 'app.py', 'exec')
+
+      - name: Commit and remove repair workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git rm .github/workflows/fix-render-port.yml
+          git commit -m "Bind Render health port in app runtime" || exit 0
+          git push origin main
