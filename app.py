@@ -831,7 +831,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("⚡ LIVE SCAN STARTED — analysing fresh market data now...")
     manual_scan_task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
-
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_chat(update)
     if not is_authorized(update):
@@ -896,7 +895,7 @@ async def telegram_runtime(application):
         await application.bot.set_webhook(
             url=webhook_url,
             drop_pending_updates=True,
-            allowed_updates=["message"],
+            allowed_updates=["message", "callback_query"],
         )
         log.info("Telegram webhook active: %s", webhook_url)
         log.info("Telegram polling DISABLED; getUpdates will not be used.")
