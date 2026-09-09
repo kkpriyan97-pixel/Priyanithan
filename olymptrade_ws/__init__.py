@@ -21,6 +21,6 @@ try:
 except Exception:
     pass
 try:
-    import signal_logo  # noqa: F401
+    import runtime_fixes  # noqa: F401
 except Exception:
     pass
