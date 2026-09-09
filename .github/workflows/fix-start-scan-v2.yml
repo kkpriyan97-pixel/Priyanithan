@@ -1,0 +1,89 @@
+name: Fix delayed Telegram start scan v2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - app.py
+      - .github/workflows/fix-start-scan-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch app.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+
+          if 'manual_scan_task = None' not in s:
+              s = s.replace('telegram_application = None\n', 'telegram_application = None\nmanual_scan_task = None\n', 1)
+
+          old = '''async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    remember_chat(update)
+    await update.message.reply_text("Priyanithan AI is online. Use /access YOUR_CODE to authorize this chat.")
+'''
+          new = '''async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global manual_scan_task
+    remember_chat(update)
+    if not is_authorized(update):
+        await update.message.reply_text(
+            "Priyanithan AI is online. Use /access YOUR_CODE first; then /start again to begin a live scan."
+        )
+        return
+    if manual_scan_task is not None and not manual_scan_task.done():
+        await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+        return
+    await update.message.reply_text("⚡ LIVE SCAN STARTED — analysing fresh market data now...")
+    manual_scan_task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
+'''
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif 'manual_scan_task = asyncio.create_task(scan_cycle(context.application)' not in s:
+              raise SystemExit('Expected start_cmd block not found')
+
+          old_scan = '''    await update.message.reply_text("🔎 Live scan started...")
+    await scan_cycle(context.application)
+'''
+          new_scan = '''    global manual_scan_task
+    if manual_scan_task is not None and not manual_scan_task.done():
+        await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+        return
+    await update.message.reply_text("🔎 Live scan started — analysing fresh market data now...")
+    manual_scan_task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
+'''
+          if old_scan in s:
+              s = s.replace(old_scan, new_scan, 1)
+
+          s = s.replace('allowed_updates=["message"],', 'allowed_updates=["message", "callback_query"],')
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Verify
+        run: |
+          python -m py_compile app.py sitecustomize.py fast_manual_entry.py
+          grep -q 'AUTO_TRADE = False' app.py
+          grep -q 'manual_scan_task = asyncio.create_task(scan_cycle' app.py
+          grep -q 'allowed_updates=["message", "callback_query"]' app.py
+
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          if git diff --cached --quiet; then
+            echo 'Already patched'
+          else
+            git commit -m 'Fix delayed Telegram start scan v2'
+            git push
+          fi
