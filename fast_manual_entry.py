@@ -53,11 +53,14 @@ def _parse_signal(text):
 
 def _selector_url(pair, direction, entry, expiry):
     appmod = _get_app()
-    base = "https://priyanithan-ai.onrender.com"
+    # This is the actual Render service hostname shown by the user's Telegram browser.
+    base = "https://priyanithan.onrender.com"
     if appmod is not None:
         try:
             import os
-            base = os.getenv("RENDER_EXTERNAL_URL", base).rstrip("/")
+            configured = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+            if configured:
+                base = configured
         except Exception:
             pass
     return (
@@ -84,7 +87,6 @@ def _install_selector_route(appmod):
     if flask_app is None:
         return
 
-    @flask_app.get("/trade/select")
     def trade_select_page():
         from flask import request
 
@@ -143,9 +145,13 @@ function confirmReal(e){{
 }}
 </script></body></html>'''
 
+    # Use Flask's explicit add_url_rule so the route is registered immediately
+    # during app import and does not depend on a later background-thread tick.
+    if "/trade/select" not in {rule.rule for rule in flask_app.url_map.iter_rules()}:
+        flask_app.add_url_rule("/trade/select", endpoint="priyanithan_trade_select", view_func=trade_select_page, methods=["GET"])
     appmod._PRIYANITHAN_WEB_SELECTOR = True
     if hasattr(appmod, "log"):
-        appmod.log.info("WEB TRADE SELECTOR ACTIVE: 10-second DEMO/REAL page enabled")
+        appmod.log.info("WEB TRADE SELECTOR ACTIVE: /trade/select registered on Render app")
 
 
 def _wrap_send(appmod):
@@ -219,6 +225,16 @@ def _install():
     if changed:
         _INSTALLED = True
     return True
+
+
+# Register once immediately while app.py is still importing, then keep the
+# background retry as a safety net for alternate Render/Gunicorn startup paths.
+try:
+    _install()
+except Exception:
+    appmod = _get_app()
+    if appmod is not None and hasattr(appmod, "log"):
+        appmod.log.exception("WEB TRADE SELECTOR INITIAL INSTALL FAILED")
 
 
 def bootstrap():
