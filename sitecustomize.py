@@ -231,151 +231,45 @@ sys.meta_path.insert(0, _Finder())
 
 # ============================================================
 # READ-ONLY SIGNAL RESULT + SEND-TIME CLOCK PATCH
-# ============================================================
-# app.py is normally executed as __main__ by Render, so the import finder above
-# is not enough for this layer. A tiny background installer waits for app.py to
-# finish defining its functions, then wraps only the Telegram signal sender.
+# Result monitoring itself is owned exclusively by trade_result_monitor.py.
+# This layer only keeps the Telegram signal timestamp accurate.
 import re as _rm_re
-import time as _rm_time
 import threading as _rm_threading
+import time as _rm_time
 from datetime import datetime as _rm_datetime
 from zoneinfo import ZoneInfo as _rm_ZoneInfo
 
 _RM_UAE = _rm_ZoneInfo("Asia/Dubai")
-_RM_SIGNAL_RE = _rm_re.compile(
-    r"🔥\s*PRIYANITHAN AI SIGNAL\s*🔥.*?"
-    r"📈\s*([A-Z0-9_]+).*?"
-    r"(?:⬆️|⬇️)\s*(UP|DOWN).*?"
-    r"💰\s*Entry:\s*([0-9.]+).*?"
-    r"⏱️\s*Expiry:\s*(1|2|3|5|10|15)\s*MIN",
-    _rm_re.S,
-)
 _RM_TIME_RE = _rm_re.compile(r"🕐\s*[^\n]*UAE")
 
 
-def _install_result_monitor():
-    try:
-        from trade_result_monitor import register_signal, monitor_signal
-    except Exception:
-        return False
-
+def _install_result_clock_patch():
     module = sys.modules.get("__main__")
     if module is None or not getattr(module, "__file__", "").endswith("app.py"):
         module = sys.modules.get("app")
-    if module is None:
+    if module is None or getattr(module, "_RESULT_CLOCK_PATCH_INSTALLED", False):
         return False
-    if getattr(module, "_RESULT_MONITOR_INSTALLED", False):
-        return True
 
     original_format_signal = getattr(module, "format_signal", None)
-    original_send = getattr(module, "send_to_recipients", None)
-    if original_format_signal is None or original_send is None:
+    if original_format_signal is None:
         return False
-
-    module.pending_signals = getattr(module, "pending_signals", {})
-    module.pending_signal_tasks = getattr(module, "pending_signal_tasks", set())
 
     def patched_format_signal(result, ai):
         text = original_format_signal(result, ai)
-        # The candle timestamp may be older than the actual alert delivery.
-        # Show the real alert/send time in Telegram.
         now_text = _rm_datetime.now(_RM_UAE).strftime("%H:%M:%S UAE")
         return _RM_TIME_RE.sub("🕐 " + now_text, text, count=1)
 
     module.format_signal = patched_format_signal
-
-    async def get_expiry_price(pair):
-        # Prefer a current live tick when the broker callback supplied one.
-        ticks = getattr(module, "latest_ticks", {})
-        item = ticks.get(str(pair).upper()) if isinstance(ticks, dict) else None
-        if isinstance(item, dict):
-            for key in ("price", "p", "last", "close", "value", "ask", "bid"):
-                value = item.get(key)
-                try:
-                    if value is not None and float(value) > 0:
-                        return float(value)
-                except (TypeError, ValueError):
-                    pass
-
-        # Safe fallback: use the existing live candle reader, which rejects stale data.
-        getter = getattr(module, "get_ot_candles", None)
-        if getter is None:
-            return None
-        df, err = await getter(pair, 60, 120)
-        if df is None or getattr(df, "empty", True):
-            module.log.warning("SIGNAL RESULT PRICE UNAVAILABLE: pair=%s reason=%s", pair, err)
-            return None
-        try:
-            return float(df["close"].iloc[-1])
-        except Exception:
-            return None
-
-    async def send_result(signal, outcome):
-        icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖", "UNRESOLVED": "⚠️"}.get(outcome, "⚠️")
-        expiry_price = signal.get("expiry_price", "N/A")
-        text = (
-            f"{icon} PRIYANITHAN SIGNAL RESULT\n\n"
-            f"📈 {signal['pair']}\n"
-            f"↕️ {signal['direction']}\n"
-            f"💰 Entry: {signal['entry']}\n"
-            f"🏁 Expiry Price: {expiry_price}\n"
-            f"⏱️ Expiry: {signal['expiry_min']} MIN\n"
-            f"📊 Market Result: {outcome}\n\n"
-            f"⚠️ SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF"
-        )
-        sent = await original_send(module.telegram_application.bot, text)
-        module.log.info(
-            "SIGNAL RESULT SENT: pair=%s outcome=%s sent=%s entry=%s expiry_price=%s",
-            signal.get("pair"), outcome, sent, signal.get("entry"), expiry_price,
-        )
-
-    async def monitor_one(signal):
-        try:
-            return await monitor_signal(signal, get_expiry_price, send_result)
-        except Exception:
-            module.log.exception("SIGNAL RESULT MONITOR ERROR: pair=%s", signal.get("pair"))
-            signal["status"] = "UNRESOLVED"
-            return "UNRESOLVED"
-
-    async def patched_send(bot, text):
-        sent = await original_send(bot, text)
-        if sent:
-            match = _RM_SIGNAL_RE.search(str(text))
-            if match:
-                pair, direction, entry_text, expiry_text = match.groups()
-                try:
-                    entry = float(entry_text)
-                    expiry = int(expiry_text)
-                    now_ts = _rm_time.time()
-                    result = {
-                        "pair": pair,
-                        "price": entry,
-                        "candle_time": _rm_datetime.now(_RM_UAE).strftime("%H:%M:%S UAE"),
-                    }
-                    ai = {"direction": direction, "duration_min": expiry}
-                    signal_id = register_signal(module.pending_signals, result, ai, signal_time=now_ts)
-                    signal = module.pending_signals[signal_id]
-                    task = asyncio.create_task(monitor_one(signal))
-                    module.pending_signal_tasks.add(task)
-                    task.add_done_callback(module.pending_signal_tasks.discard)
-                    module.log.info(
-                        "SIGNAL RESULT MONITOR STARTED: pair=%s direction=%s expiry=%s min signal_time=%s",
-                        pair, direction, expiry, _rm_datetime.now(_RM_UAE).strftime("%H:%M:%S UAE"),
-                    )
-                except Exception:
-                    module.log.exception("SIGNAL RESULT MONITOR REGISTER FAILED")
-        return sent
-
-    module.send_to_recipients = patched_send
-    module._RESULT_MONITOR_INSTALLED = True
-    module.log.info("READ-ONLY SIGNAL RESULT MONITOR INSTALLED")
+    module._RESULT_CLOCK_PATCH_INSTALLED = True
+    module.log.info("RESULT CLOCK PATCH INSTALLED; outcome monitor delegated to trade_result_monitor.py")
     return True
 
 
-def _result_monitor_bootstrap():
-    for _ in range(300):
-        if _install_result_monitor():
+def _bootstrap_result_clock():
+    for _ in range(1800):
+        if _install_result_clock_patch():
             return
         _rm_time.sleep(0.1)
 
-_rm_threading.Thread(target=_result_monitor_bootstrap, name="result-monitor-install", daemon=True).start()
+
+_rm_threading.Thread(target=_bootstrap_result_clock, name="signal-clock-bootstrap", daemon=True).start()
