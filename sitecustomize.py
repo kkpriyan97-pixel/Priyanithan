@@ -188,7 +188,7 @@ class _Loader(importlib.abc.Loader):
         webhook_block = (
             '        webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")\\n'
             '        webhook_url = f"{webhook_base}/telegram/webhook"\\n'
-            '        await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True, allowed_updates=["message"])\\n'
+            '        await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True, allowed_updates=["message", "callback_query"])\\n'
             '        log.info("Telegram webhook active: %s", webhook_url)\\n'
             '        await asyncio.Event().wait()\\n'
         )
