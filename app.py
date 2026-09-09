@@ -251,6 +251,70 @@ async def on_instruments(message):
             PAIRS[:] = sorted(discovered_assets.keys())[:MAX_ASSETS_PER_CYCLE]
             log.info("AUTO DISCOVERY: %s tradable assets available", len(PAIRS))
 
+async def olymptrade_connect_loop():
+    global ot_client, PAIRS
+    if not OLYMPTRADE_ACCESS_TOKEN:
+        log.error("OLYMPTRADE_ACCESS_TOKEN is not configured.")
+        return
+    retry_delay = 5
+    attempt = 0
+    while True:
+        client = None
+        try:
+            attempt += 1
+            log.info("OlympTrade connection attempt #%s", attempt)
+            client = OlympTradeClient(access_token=OLYMPTRADE_ACCESS_TOKEN, log_raw_messages=False)
+            client.register_callback(parameters.E_TICK_UPDATE, on_tick)
+            client.register_callback(parameters.E_BALANCE_UPDATE, on_balance)
+            # Instrument catalogue observed in the project logs (event 1054).
+            # Register before start so the initial catalogue is not missed.
+            client.register_callback(1054, on_instruments)
+            client.register_callback(parameters.E_TRADE_ACCEPTED, on_trade_event)
+            client.register_callback(parameters.E_TRADE_UPDATE_INTERIM, on_trade_event)
+            client.register_callback(parameters.E_TRADE_CLOSED, on_trade_event)
+            await client.start()
+            ot_client = client
+
+            # Balance is optional. A timeout here must NOT kill market data.
+            try:
+                await asyncio.wait_for(client.balance.get_balance(), timeout=10)
+            except Exception as e:
+                log.warning("Balance read skipped/failed: %s", e)
+
+            # If auto discovery is enabled, the instrument callback may have populated PAIRS.
+            # Manual PAIRS remain supported for testing.
+            if not PAIRS and AUTO_DISCOVER_ASSETS:
+                log.info("Waiting briefly for broker instrument catalogue...")
+                await asyncio.sleep(2)
+            if not PAIRS and MANUAL_PAIRS:
+                PAIRS = MANUAL_PAIRS[:]
+            for pair in PAIRS[:MAX_ASSETS_PER_CYCLE]:
+                broker_pair = PAIR_ALIASES.get(pair, pair)
+                try:
+                    await client.market.subscribe_ticks(broker_pair)
+                    log.info("Subscribed to OlympTrade ticks: %s", broker_pair)
+                except Exception as e:
+                    log.warning("Tick subscription failed for %s: %s", broker_pair, e)
+            log.info("OlympTrade connection established. Assets available for scanner: %s", len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS))
+            retry_delay = 5
+            attempt = 0
+            while client.connection.is_connected:
+                await asyncio.sleep(5)
+            raise ConnectionError("OlympTrade WebSocket disconnected")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("OlympTrade connection error: %s", e)
+            ot_client = None
+            try:
+                if client and client.connection.is_connected:
+                    await client.connection.disconnect()
+            except Exception:
+                pass
+            log.warning("OlympTrade reconnecting in %s seconds", retry_delay)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
+
 async def get_ot_candles(pair, timeframe=60, count=120):
     if ot_client is None:
         return None, "OlympTrade client unavailable"
