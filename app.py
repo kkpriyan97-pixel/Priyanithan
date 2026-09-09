@@ -89,6 +89,7 @@ def health():
     return "OK"
 
 telegram_application = None
+manual_scan_task = None
 
 @app.post("/telegram/webhook")
 def telegram_webhook():
@@ -818,16 +819,30 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Invalid access code.")
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global manual_scan_task
     remember_chat(update)
-    await update.message.reply_text("Priyanithan AI is online. Use /access YOUR_CODE to authorize this chat.")
+    if not is_authorized(update):
+        await update.message.reply_text(
+            "Priyanithan AI is online. Use /access YOUR_CODE first; then /start again to begin a live scan."
+        )
+        return
+    if manual_scan_task is not None and not manual_scan_task.done():
+        await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+        return
+    await update.message.reply_text("⚡ LIVE SCAN STARTED — analysing fresh market data now...")
+    manual_scan_task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
 
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remember_chat(update)
     if not is_authorized(update):
         await update.message.reply_text("❌ Not authorized. Use /access YOUR_CODE first.")
         return
-    await update.message.reply_text("🔎 Live scan started...")
-    await scan_cycle(context.application)
+    global manual_scan_task
+    if manual_scan_task is not None and not manual_scan_task.done():
+        await update.message.reply_text("⏳ Live scan is already running. Please wait for the result.")
+        return
+    await update.message.reply_text("🔎 Live scan started — analysing fresh market data now...")
+    manual_scan_task = asyncio.create_task(scan_cycle(context.application), name="manual-scan")
 
 async def scan_loop(application):
     """Run the existing scan_cycle on UAE-aligned 5-minute boundaries."""
@@ -881,7 +896,7 @@ async def telegram_runtime(application):
         await application.bot.set_webhook(
             url=webhook_url,
             drop_pending_updates=True,
-            allowed_updates=["message"],
+            allowed_updates=["message", "callback_query"],
         )
         log.info("Telegram webhook active: %s", webhook_url)
         log.info("Telegram polling DISABLED; getUpdates will not be used.")

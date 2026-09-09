@@ -58,6 +58,13 @@ def _button_for(text):
     )
 
 
+
+
+async def _running_callback(update, context):
+    query = update.callback_query
+    if query is not None:
+        await query.answer("⏳ Trade is already running; final market result will be sent automatically.", show_alert=False)
+
 async def _fast_manual_callback(update, context):
     query = update.callback_query
     if query is None:
@@ -97,6 +104,7 @@ def _ensure_handler(application, appmod):
         _HANDLER_INSTALLED = True
         return
     application.add_handler(CallbackQueryHandler(_fast_manual_callback, pattern=r"^FAST\|"))
+    application.add_handler(CallbackQueryHandler(_running_callback, pattern=r"^RUNNING\|"))
     application._FAST_MANUAL_ENTRY_HANDLER = True
     _HANDLER_INSTALLED = True
     appmod.log.info("FAST MANUAL ENTRY CALLBACK ACTIVE: ⚡ OPEN TRADE")
