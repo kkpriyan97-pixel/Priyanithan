@@ -9,6 +9,9 @@ permissions:
 
 jobs:
   finalize:
+    # The workflow commits app.py itself. Never re-run finalization for that bot commit,
+    # otherwise Render receives an endless stream of identical deployments.
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -91,7 +94,7 @@ jobs:
 
           start = s.index('async def telegram_runtime(application):')
           end = s.index('\ndef main():', start)
-          runtime = '''async def telegram_runtime(application):\n    global runtime_loop, telegram_application\n    runtime_loop = asyncio.get_running_loop()\n    telegram_application = application\n    await application.initialize()\n    await application.start()\n    tasks = [\n        asyncio.create_task(olymptrade_connect_loop(), name="olymptrade-connect"),\n        asyncio.create_task(scan_loop(application), name="signal-scan"),\n        asyncio.create_task(manual_trade_monitor(application), name="trade-monitor"),\n    ]\n    try:\n        webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")\n        webhook_url = f"{webhook_base}/telegram/webhook"\n        await application.bot.set_webhook(\n            url=webhook_url,\n            drop_pending_updates=True,\n            allowed_updates=["message"],\n        )\n        log.info("Telegram webhook active: %s", webhook_url)\n        log.info("Telegram polling DISABLED; getUpdates will not be used.")\n        await asyncio.Event().wait()\n    finally:\n        for task in tasks:\n            task.cancel()\n        await asyncio.gather(*tasks, return_exceptions=True)\n        if application.running:\n            await application.stop()\n        await application.shutdown()\n'''
+          runtime = '''async def telegram_runtime(application):\n    global runtime_loop, telegram_application\n    runtime_loop = asyncio.get_running_loop()\n    telegram_application = application\n    await application.initialize()\n    await application.start()\n    tasks = [\n        asyncio.create_task(olymptrade_connect_loop(), name="olymptrade-connect"),\n        asyncio.create_task(scan_loop(application), name="signal-scan"),\n        asyncio.create_task(manual_trade_monitor(application), name="trade-monitor"),\n    ]\n    try:\n        webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan-ai.onrender.com").rstrip("/")\n        webhook_url = f"{webhook_base}/telegram/webhook"\n        await application.bot.set_webhook(\n            url=webhook_url,\n            drop_pending_updates=True,\n            allowed_updates=["message", "callback_query"],\n        )\n        log.info("Telegram webhook active: %s", webhook_url)\n        log.info("Telegram polling DISABLED; getUpdates will not be used.")\n        await asyncio.Event().wait()\n    finally:\n        for task in tasks:\n            task.cancel()\n        await asyncio.gather(*tasks, return_exceptions=True)\n        if application.running:\n            await application.stop()\n        await application.shutdown()\n'''
           s = s[:start] + runtime + s[end:]
           s = s.replace(
               'application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()',
