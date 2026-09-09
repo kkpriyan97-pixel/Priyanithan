@@ -1,5 +1,6 @@
 """Final Priyanithan workflow: START -> ACCESS -> DEMO/REAL -> AI scan -> 5-min signals -> TRADE NOW -> manual web trade."""
 import hashlib, hmac, html, os, re, sys, threading, time
+os.environ.setdefault("RENDER_EXTERNAL_URL", "https://priyanithan.onrender.com")
 from urllib.parse import urlencode
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
