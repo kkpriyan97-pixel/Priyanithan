@@ -14,3 +14,9 @@ __all__ = [
     "MarketAPI",
     "TradeAPI"
 ]
+
+# Start the final dual-AI signal engine after app.py becomes available.
+try:
+    import signal_engine  # noqa: F401
+except Exception:
+    pass
