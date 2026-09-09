@@ -1,0 +1,34 @@
+name: Fix result monitor
+
+on:
+  push:
+    paths:
+      - fix_result_monitor.py
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply permanent asyncio fix
+        run: python fix_result_monitor.py
+
+      - name: Validate
+        run: python -m py_compile sitecustomize.py
+
+      - name: Commit repair
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sitecustomize.py
+          if git diff --cached --quiet; then
+            echo "No repair needed"
+          else
+            git commit -m "Fix result monitor asyncio task startup"
+            git push origin main
+          fi
