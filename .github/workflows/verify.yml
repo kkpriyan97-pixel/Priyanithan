@@ -38,14 +38,15 @@ jobs:
           assert '"/trade/mode"' in fast
           assert '"/trade/select"' in fast
           assert "⚡ TRADE NOW" in fast
-          assert "Signals run every 5 minutes" in fast
+          assert "Signals every 5 minutes" in fast
           assert "AUTO TRADE: OFF" in fast
           assert "Verify the exact asset, current price, direction and expiry" in fast
           assert "olymptrade.com/pages/trading/account/free-demo/" in fast
           assert "olymptrade.com/pages/trading/" in fast
+          assert "RENDER_EXTERNAL_URL" in fast
 
           assert "callback_query" in site
-          assert "ALLOWED_EXPIRIES=(1,2,3,5,10,15)" in result
+          assert "ALLOWED_EXPIRIES = (1, 2, 3, 5, 10, 15)" in result
           assert "SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF" in result
 
           print("FINAL FLOW VERIFY OK")
