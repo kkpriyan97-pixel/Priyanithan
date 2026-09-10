@@ -8,6 +8,14 @@ try:
 except Exception:
     pass
 
+# app.py calls ot_client.get_candles(...), while the current client exposes
+# the implementation as ot_client.market.get_candles(...). Import the
+# compatibility shim BEFORE signal_engine starts its runtime installer.
+try:
+    from . import compat as _compat
+except Exception:
+    pass
+
 try:
     import signal_engine
 except Exception:
