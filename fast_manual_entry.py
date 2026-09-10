@@ -1,7 +1,7 @@
 """Priyanithan runtime flow + multi-provider AI decision bridge.
 
 START -> ACCESS -> DEMO/REAL -> AI/technical scan -> qualified signal ->
-Telegram Trade Now page -> official Olymp Trade web. No auto-order execution.
+Telegram Trade Now page -> official Olymptrade platform. No auto-order execution.
 """
 import asyncio
 import hashlib
@@ -21,8 +21,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 os.environ.setdefault("RENDER_EXTERNAL_URL", "https://priyanithan.onrender.com")
 BASE = "https://priyanithan.onrender.com"
-DEMO_URL = "https://olymptrade.com/pages/trading/account/free-demo/"
-REAL_URL = "https://olymptrade.com/pages/trading/"
+PLATFORM_URL = "https://olymptrade.com/platform"
+DEMO_URL = PLATFORM_URL
+REAL_URL = PLATFORM_URL
 EXPIRIES = (1, 2, 3, 5, 10, 15)
 MODES = {}
 LOCK = threading.Lock()
@@ -124,7 +125,7 @@ def signal_markup(cid, text):
 
 
 def patch_ai(a):
-    """Install multi-provider OpenAI-compatible AI with dynamic free routing."""
+    """Install multi-provider OpenAI-compatible AI with fallback routing."""
     if getattr(a, "_LIVE_AI_PATCH", False):
         return True
 
@@ -172,7 +173,6 @@ def patch_ai(a):
 
     providers = []
     if os.getenv("OPENROUTER_API_KEY"):
-        # openrouter/free dynamically selects from currently available free models.
         providers.append(("OpenRouter-FREE", "https://openrouter.ai/api/v1/chat/completions", os.getenv("OPENROUTER_API_KEY"), os.getenv("OPENROUTER_MODEL", "openrouter/free")))
     if os.getenv("CEREBRAS_API_KEY"):
         providers.append(("Cerebras", "https://api.cerebras.ai/v1/chat/completions", os.getenv("CEREBRAS_API_KEY"), os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")))
@@ -193,126 +193,79 @@ def patch_ai(a):
         last_error = None
         for name, url, key, model in providers:
             try:
-                payload = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": str(prompt) + "\n\nRequired schema:\n" + json.dumps(schema)},
-                    ],
-                    "temperature": 0,
-                    "max_tokens": 350,
-                }
+                payload = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": str(prompt) + "\n\nRequired schema:\n" + json.dumps(schema)}], "temperature": 0, "max_tokens": 350}
                 headers = {"Authorization": f"Bearer {key.strip()}", "Content-Type": "application/json"}
                 if name.startswith("OpenRouter"):
-                    headers["HTTP-Referer"] = base_url()
-                    headers["X-Title"] = "Priyanithan AI Signal Bot"
-                started = time.time()
-                r = requests.post(url, headers=headers, json=payload, timeout=20)
+                    headers["HTTP-Referer"] = base_url(); headers["X-Title"] = "Priyanithan AI Signal Bot"
+                started = time.time(); r = requests.post(url, headers=headers, json=payload, timeout=20)
                 a.log.info("AI PROVIDER RESPONSE: %s model=%s status=%s elapsed=%.2fs", name, model, r.status_code, time.time() - started)
-                if not r.ok:
-                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
+                if not r.ok: raise RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
                 parsed = parse_ai(r.json())
-                decision = str(parsed.get("decision", "")).upper()
-                direction = str(parsed.get("direction", "")).upper()
-                confidence = int(parsed.get("confidence", 0))
-                duration = int(parsed.get("duration_min", 5))
-                if decision not in ("APPROVE", "REJECT") or direction not in ("UP", "DOWN", "NO SIGNAL"):
-                    raise ValueError("invalid AI decision fields")
-                if not 0 <= confidence <= 100 or duration not in EXPIRIES:
-                    raise ValueError("invalid AI confidence/duration")
+                decision = str(parsed.get("decision", "")).upper(); direction = str(parsed.get("direction", "")).upper(); confidence = int(parsed.get("confidence", 0)); duration = int(parsed.get("duration_min", 5))
+                if decision not in ("APPROVE", "REJECT") or direction not in ("UP", "DOWN", "NO SIGNAL"): raise ValueError("invalid AI decision fields")
+                if not 0 <= confidence <= 100 or duration not in EXPIRIES: raise ValueError("invalid AI confidence/duration")
                 parsed.update(decision=decision, direction=direction, confidence=confidence, duration_min=duration)
                 a.log.info("AI DECISION: provider=%s decision=%s direction=%s confidence=%s duration=%s reason=%s", name, decision, direction, confidence, duration, str(parsed.get("reason", ""))[:180])
                 return parsed, None
             except Exception as exc:
-                last_error = f"{name}: {exc}"
-                a.log.warning("AI PROVIDER FAILED: %s", last_error)
+                last_error = f"{name}: {exc}"; a.log.warning("AI PROVIDER FAILED: %s", last_error)
         return None, last_error or "AI providers failed"
 
-    a.call_ai = call_ai
-    a._LIVE_AI_PATCH = True
+    a.call_ai = call_ai; a._LIVE_AI_PATCH = True
     a.log.warning("LIVE AI PATCH ACTIVE: OpenRouter FREE + Cerebras + Groq + Airforce fallback chain")
     return True
 
 
 def start_scan(cid):
-    a = app()
-    loop = getattr(a, "runtime_loop", None) if a else None
-    application = getattr(a, "telegram_application", None) if a else None
-    if not a or not loop or not application or mode(cid) not in ("DEMO", "REAL"):
-        return False
+    a = app(); loop = getattr(a, "runtime_loop", None) if a else None; application = getattr(a, "telegram_application", None) if a else None
+    if not a or not loop or not application or mode(cid) not in ("DEMO", "REAL"): return False
     task = getattr(a, "manual_scan_task", None)
-    if task is not None and not task.done():
-        return True
+    if task is not None and not task.done(): return True
     def kick():
         task2 = getattr(a, "manual_scan_task", None)
         if task2 is None or task2.done():
-            try:
-                a.manual_scan_task = asyncio.create_task(a.scan_cycle(application), name="manual-scan")
-            except Exception as exc:
-                a.log.warning("FINAL FLOW scan start failed: %s", exc)
-    loop.call_soon_threadsafe(kick)
-    return True
+            try: a.manual_scan_task = asyncio.create_task(a.scan_cycle(application), name="manual-scan")
+            except Exception as exc: a.log.warning("FINAL FLOW scan start failed: %s", exc)
+    loop.call_soon_threadsafe(kick); return True
 
 
 def patch_start(a):
     application = getattr(a, "telegram_application", None)
-    if not application:
-        return False
+    if not application: return False
     for handlers in getattr(application, "handlers", {}).values():
         for handler in handlers:
-            if "start" not in getattr(handler, "commands", set()) or getattr(handler.callback, "_FINAL_START", False):
-                continue
+            if "start" not in getattr(handler, "commands", set()) or getattr(handler.callback, "_FINAL_START", False): continue
             async def final_start(update, context):
-                user = update.effective_user
-                chat = update.effective_chat
-                uid, cid = user.id, chat.id
+                user = update.effective_user; chat = update.effective_chat; uid, cid = user.id, chat.id
                 try: a.remember_chat(update)
                 except Exception: pass
                 if uid not in authorized_ids(a):
-                    await update.message.reply_text("🔐 ACCESS REQUIRED\n\nSend /access YOUR_ACCESS_CODE first.")
-                    return
+                    await update.message.reply_text("🔐 ACCESS REQUIRED\n\nSend /access YOUR_ACCESS_CODE first."); return
                 if mode(uid) not in ("DEMO", "REAL"):
-                    await update.message.reply_text("🎯 PRIYANITHAN AI TRADING\n\nACCESS: VERIFIED ✅\nChoose DEMO or REAL before the scan.\n🤖 AI confirmation is required.\n⏱️ Signals every 5 minutes.\n⚠️ AUTO TRADE: OFF — manual trade only.", reply_markup=mode_markup(uid))
-                    return
-                if start_scan(uid):
-                    await update.message.reply_text(f"✅ ACCESS OK | MODE: {mode(uid)}\n🔎 Fresh AI + technical scan started.\n🤖 AI confirmation required.\n⏱️ Automatic cycle: every 5 minutes.")
-            final_start._FINAL_START = True
-            handler.callback = final_start
-            return True
+                    await update.message.reply_text("🎯 PRIYANITHAN AI TRADING\n\nACCESS: VERIFIED ✅\nChoose DEMO or REAL before the scan.\n🤖 AI confirmation is required.\n⏱️ Signals every 5 minutes.\n⚠️ AUTO TRADE: OFF — manual trade only.", reply_markup=mode_markup(uid)); return
+                if start_scan(uid): await update.message.reply_text(f"✅ ACCESS OK | MODE: {mode(uid)}\n🔎 Fresh AI + technical scan started.\n🤖 AI confirmation required.\n⏱️ Automatic cycle: every 5 minutes.")
+            final_start._FINAL_START = True; handler.callback = final_start; return True
     return False
 
 
 def patch_access(a):
     application = getattr(a, "telegram_application", None)
-    if not application:
-        return False
+    if not application: return False
     for handlers in getattr(application, "handlers", {}).values():
         for handler in handlers:
-            if "access" not in getattr(handler, "commands", set()) or getattr(handler.callback, "_FINAL_ACCESS", False):
-                continue
+            if "access" not in getattr(handler, "commands", set()) or getattr(handler.callback, "_FINAL_ACCESS", False): continue
             async def final_access(update, context):
-                a.remember_chat(update)
-                expected = os.getenv("ACCESS_CODE")
-                code = (context.args or [""])[0].strip()
-                if not expected:
-                    await update.message.reply_text("ACCESS_CODE is not configured.")
-                    return
-                if code != expected:
-                    await update.message.reply_text("❌ Invalid access code.")
-                    return
-                uid = update.effective_user.id
-                a.authorized_users.add(int(uid))
-                await update.message.reply_text("✅ ACCESS VERIFIED\n\nChoose DEMO or REAL before the scan.", reply_markup=mode_markup(uid))
-            final_access._FINAL_ACCESS = True
-            handler.callback = final_access
-            return True
+                a.remember_chat(update); expected = os.getenv("ACCESS_CODE"); code = (context.args or [""])[0].strip()
+                if not expected: await update.message.reply_text("ACCESS_CODE is not configured."); return
+                if code != expected: await update.message.reply_text("❌ Invalid access code."); return
+                uid = update.effective_user.id; a.authorized_users.add(int(uid)); await update.message.reply_text("✅ ACCESS VERIFIED\n\nChoose DEMO or REAL before the scan.", reply_markup=mode_markup(uid))
+            final_access._FINAL_ACCESS = True; handler.callback = final_access; return True
     return False
 
 
 def install_routes(a):
     flask = getattr(a, "app", None)
-    if flask is None:
-        return
+    if flask is None: return
     rules = {r.rule for r in flask.url_map.iter_rules()}
     if "/trade/mode" not in rules:
         def trade_mode():
@@ -324,13 +277,10 @@ def install_routes(a):
             except Exception: return "Invalid mode link", 400
             if abs(bucket - int(time.time()) // 600) > 1: return "Mode link expired. Send /start again.", 410
             if cid not in authorized_ids(a): return "Access not authorized.", 403
-            value = parts[1]
-            set_mode(cid, value)
-            start_scan(cid)
+            value = parts[1]; set_mode(cid, value); start_scan(cid)
             appx = getattr(a, "telegram_application", None)
             if appx is not None and getattr(a, "runtime_loop", None):
-                async def notify():
-                    await appx.bot.send_message(chat_id=cid, text=f"✅ MODE SELECTED: {value}\n🔎 Fresh AI + technical scan started.\n🤖 AI confirmation required.\n⏱️ Signals every 5 minutes.\n⚠️ AUTO TRADE: OFF — manual trade only.")
+                async def notify(): await appx.bot.send_message(chat_id=cid, text=f"✅ MODE SELECTED: {value}\n🔎 Fresh AI + technical scan started.\n🤖 AI confirmation required.\n⏱️ Signals every 5 minutes.\n⚠️ AUTO TRADE: OFF — manual trade only.")
                 try: asyncio.run_coroutine_threadsafe(notify(), a.runtime_loop)
                 except Exception: pass
             return f"<meta name='viewport' content='width=device-width,initial-scale=1'><body style='font-family:system-ui;padding:28px'><h2>{'🧪' if value == 'DEMO' else '🔴'} {value} MODE SELECTED</h2><p>Fresh AI + technical scan started.</p><b>AUTO TRADE: OFF</b></body>"
@@ -350,9 +300,8 @@ def install_routes(a):
             if abs(bucket - int(time.time()) // 300) > 1: return "Trade signal expired. Wait for the next signal.", 410
             selected_mode = mode(cid)
             if selected_mode not in ("DEMO", "REAL"): return "Select DEMO or REAL first.", 403
-            olymp_url = DEMO_URL if selected_mode == "DEMO" else REAL_URL
             label = "⬆️ UP / BUY" if direction == "UP" else "⬇️ DOWN / SELL"
-            return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Priyanithan Trade Now</title><style>body{{margin:0;background:#0b1220;color:#fff;font-family:system-ui;padding:18px}}.card{{max-width:520px;margin:auto;background:#172033;border-radius:22px;padding:22px}}.row{{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #ffffff18}}.label{{color:#9ca3af}}.value{{font-weight:800}}.auto{{color:#86efac;font-size:12px}}.open{{display:block;text-align:center;text-decoration:none;background:#16a34a;color:#fff;padding:17px;border-radius:14px;font-weight:900;margin-top:22px}}</style></head><body><div class='card'><h2>⚡ TRADE NOW</h2><div class='row'><span class='label'>MODE</span><span class='value'>{html.escape(selected_mode)} <span class='auto'>AUTO</span></span></div><div class='row'><span class='label'>ASSET</span><span class='value'>{html.escape(pair)} <span class='auto'>AUTO</span></span></div><div class='row'><span class='label'>DIRECTION</span><span class='value'>{label} <span class='auto'>AUTO</span></span></div><div class='row'><span class='label'>ENTRY / PRICE REF</span><span class='value'>{html.escape(entry)} <span class='auto'>AUTO</span></span></div><div class='row'><span class='label'>EXPIRY / TIME</span><span class='value'>{expiry} MIN <span class='auto'>AUTO</span></span></div><a class='open' href='{html.escape(olymp_url, quote=True)}'>OPEN OLYMP TRADE</a><p>Asset, price reference, direction and expiry are carried from the AI-confirmed signal.</p><b>⚠️ AUTO TRADE: OFF — final broker action is manual.</b></div></body></html>"""
+            return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Priyanithan Trade Now</title><style>body{{margin:0;background:#0b1220;color:#fff;font-family:system-ui;padding:18px}}.card{{max-width:520px;margin:auto;background:#172033;border-radius:22px;padding:22px}}.row{{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #ffffff18}}.label{{color:#9ca3af}}.value{{font-weight:800}}.auto{{color:#86efac;font-size:12px}}.open{{display:block;text-align:center;text-decoration:none;background:#16a34a;color:#fff;padding:17px;border-radius:14px;font-weight:900;margin-top:22px}}</style></head><body><div class='card'><h2>⚡ TRADE NOW</h2><div class='row'><span class='label'>MODE</span><span class='value'>{html.escape(selected_mode)}</span></div><div class='row'><span class='label'>ASSET</span><span class='value'>{html.escape(pair)}</span></div><div class='row'><span class='label'>DIRECTION</span><span class='value'>{label}</span></div><div class='row'><span class='label'>ENTRY / PRICE REF</span><span class='value'>{html.escape(entry)}</span></div><div class='row'><span class='label'>EXPIRY / TIME</span><span class='value'>{expiry} MIN</span></div><a class='open' href='{html.escape(PLATFORM_URL, quote=True)}'>OPEN OLYMPTRADE PLATFORM</a><p>Signal parameters are shown here for manual entry. The official Olymptrade platform opens next.</p><b>⚠️ AUTO TRADE: OFF — final broker action is manual.</b></div></body></html>"""
         flask.add_url_rule("/trade/app", endpoint="final_trade_app", view_func=trade_app)
 
 
@@ -366,29 +315,19 @@ def patch_senders(a):
             for cid in a.recipients():
                 if mode(cid) not in ("DEMO", "REAL"): continue
                 try:
-                    await bot.send_message(chat_id=cid, text=text, reply_markup=signal_markup(cid, text))
-                    sent = True
-                except Exception as exc:
-                    a.log.warning("FINAL signal send failed %s: %s", cid, exc)
+                    await bot.send_message(chat_id=cid, text=text, reply_markup=signal_markup(cid, text)); sent = True
+                except Exception as exc: a.log.warning("FINAL signal send failed %s: %s", cid, exc)
             return sent
-        final_recipients._FINAL_RECIPIENTS = True
-        a.send_to_recipients = final_recipients
+        final_recipients._FINAL_RECIPIENTS = True; a.send_to_recipients = final_recipients
 
 
 def install():
     a = app()
     if not a: return False
-    patch_ai(a)
-    install_routes(a)
-    patch_senders(a)
-    patch_start(a)
-    patch_access(a)
-    return True
+    patch_ai(a); install_routes(a); patch_senders(a); patch_start(a); patch_access(a); return True
 
-try:
-    install()
-except Exception:
-    pass
+try: install()
+except Exception: pass
 
 
 def bootstrap():
