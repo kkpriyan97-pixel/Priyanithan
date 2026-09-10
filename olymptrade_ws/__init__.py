@@ -71,4 +71,9 @@ try:
 except Exception:
     pass
 
+try:
+    import disable_trade_now_hotfix
+except Exception:
+    pass
+
 # AUTO_TRADE remains OFF.
