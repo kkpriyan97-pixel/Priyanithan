@@ -8,6 +8,7 @@ EXPIRIES=(1,2,3,5,15)
 AI_CANDIDATE_LIMIT=12
 AI_RETRY_PER_CANDIDATE=0
 SIGNAL_COOLDOWN_SECONDS=240
+CANDLE_CONCURRENCY=8
 
 
 def _app():
@@ -43,7 +44,9 @@ def _extract_pairs(value):
                 x=v.get(k)
                 if isinstance(x,str):
                     x=x.upper().strip()
-                    if x and 2<=len(x)<=30 and x not in {"UP","DOWN","USD","EUR"}: out.add(x)
+                    # Profitability payloads can contain non-symbol strings in
+                    # fields such as p. Keep only plausible instrument IDs.
+                    if x and 2<=len(x)<=30 and re.fullmatch(r"[A-Z][A-Z0-9_.\-]{1,29}",x) and x not in {"UP","DOWN","USD","EUR","PERCENT"}: out.add(x)
             for x in v.values(): walk(x)
         elif isinstance(v,list):
             for x in v: walk(x)
@@ -86,6 +89,16 @@ def _signal_text(result,ai):
             f"🕯️ 5m Trend: {mtf}\n\n{patterns}\n\n"
             f"🕐 {result.get('candle_time','LIVE')}\n\n🧠 Candice AI: APPROVED\n\n⚠️ MANUAL TRADE — AUTO TRADE OFF")
 
+async def _fetch_1m(a,pair):
+    """Fetch one pair without allowing one bad instrument to stop the cycle."""
+    try:
+        df,err=await asyncio.wait_for(a.get_ot_candles(pair,60,120),timeout=18)
+        if df is None:
+            return pair,None,err or "no candle data"
+        return pair,df,None
+    except Exception as exc:
+        return pair,None,f"exception: {str(exc)[:140]}"
+
 async def _install_scan():
     a=_app()
     if not a or getattr(a,"_FINAL_SIGNAL_ENGINE",False): return bool(a)
@@ -97,15 +110,22 @@ async def _install_scan():
         try:
             universe=await _refresh_universe(a)
             a.log.info("FINAL LIVE SCAN START: universe=%s discovered=%s",len(universe),len(getattr(a,"discovered_assets",{}) or {}))
-            candidates=[]; candle_failures=0
-            for pair in universe:
+            candidates=[]; candle_failures=0; failure_examples=[]
+            sem=asyncio.Semaphore(CANDLE_CONCURRENCY)
+            async def limited(pair):
+                async with sem:
+                    return await _fetch_1m(a,pair)
+            fetched=await asyncio.gather(*(limited(p) for p in universe),return_exceptions=False)
+            for pair,df,err in fetched:
+                if df is None:
+                    candle_failures+=1
+                    if len(failure_examples)<6: failure_examples.append(f"{pair}: {err}")
+                    continue
                 try:
-                    df,err=await a.get_ot_candles(pair,60,120)
-                    if df is None: candle_failures+=1; continue
                     r=a.analyze_pair(pair,df)
                     if str(r.get("signal","NO SIGNAL")).upper()=="NO SIGNAL": continue
                     try:
-                        hdf,herr=await a.get_ot_candles(pair,300,60)
+                        hdf,herr=await asyncio.wait_for(a.get_ot_candles(pair,300,60),timeout=18)
                         if hdf is not None:
                             hr=a.analyze_pair(pair,hdf)
                             r["higher_tf_direction"]=str(hr.get("signal","NO SIGNAL")).upper()
@@ -113,12 +133,16 @@ async def _install_scan():
                             r["mtf_aligned"]=r["higher_tf_direction"]==r.get("signal")
                             if r["higher_tf_direction"] not in ("NO SIGNAL",r.get("signal")): continue
                             if r["mtf_aligned"]: r["setup_score"]=min(100,int(r.get("setup_score",0))+8)
-                    except Exception: pass
+                    except Exception as exc:
+                        r["higher_tf_direction"]="UNKNOWN"; r["mtf_aligned"]=None
+                        if len(failure_examples)<6: failure_examples.append(f"{pair}: 5m context {str(exc)[:100]}")
                     candidates.append(r)
                 except Exception as exc:
-                    candle_failures+=1; a.log.warning("FINAL TECHNICAL SCAN FAILED %s: %s",pair,str(exc)[:160])
+                    if len(failure_examples)<6: failure_examples.append(f"{pair}: analysis {str(exc)[:100]}")
             candidates.sort(key=lambda x:(float(x.get("setup_score",0)),float(x.get("confidence",0))),reverse=True)
             a.log.info("FINAL TECHNICAL SUMMARY: assets=%s candidates=%s candle_failures=%s",len(universe),len(candidates),candle_failures)
+            if failure_examples:
+                a.log.info("FINAL CANDLE FAILURE EXAMPLES: %s", " | ".join(failure_examples))
             ai_attempts=ai_rejects=ai_failures=0; rejection_reasons=[]
             now=time.time(); sent_key=getattr(a,"_FINAL_LAST_SIGNAL",None)
             min_ai_conf=max(72,int(getattr(a,"AI_MIN_CONFIDENCE",72)))
@@ -127,8 +151,8 @@ async def _install_scan():
                 try:
                     prompt=a.ai_prompt(result)
                     ai,err=await asyncio.wait_for(asyncio.to_thread(a.call_ai,prompt),timeout=30)
-                except Exception:
-                    ai_failures+=1; rejection_reasons.append(f"{result.get('pair')}: AI error"); continue
+                except Exception as exc:
+                    ai_failures+=1; rejection_reasons.append(f"{result.get('pair')}: AI error {str(exc)[:90]}"); continue
                 if not ai or err:
                     ai_failures+=1; rejection_reasons.append(f"{result.get('pair')}: {err or 'no decision'}"); continue
                 decision=str(ai.get("decision","")).upper(); direction=str(ai.get("direction","")).upper()
@@ -159,7 +183,7 @@ async def _install_scan():
         finally:
             a._FINAL_SCAN_RUNNING=False
     a.scan_cycle=classic_scan; a._FINAL_SIGNAL_ENGINE=True
-    a.log.warning("FINAL SIGNAL ENGINE ACTIVE: broad universe + 1m trigger + 5m context + AI gate")
+    a.log.warning("FINAL SIGNAL ENGINE ACTIVE: broad universe + concurrent live candles + 5m context + AI gate")
     return True
 
 def _boot():
