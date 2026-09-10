@@ -3,7 +3,7 @@
 from .main import OlympTradeClient
 from .core.client import OlympTradeClient as CoreOlympTradeClient
 from .api.balance import BalanceAPI
-from .api.market import MarketAPI
+from .market import MarketAPI
 from .api.trade import TradeAPI
 from . import compat as _compat
 
@@ -26,5 +26,9 @@ except Exception:
     pass
 try:
     import scan_bootstrap_fix  # noqa: F401
+except Exception:
+    pass
+try:
+    import external_signal_bridge  # noqa: F401
 except Exception:
     pass
