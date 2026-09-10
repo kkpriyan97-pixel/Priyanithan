@@ -4,6 +4,7 @@ Classic compact Telegram format with live technical + AI confirmation.
 AUTO TRADE remains OFF; this module never places broker orders.
 """
 import asyncio
+import re
 import sys
 import time
 
@@ -47,7 +48,7 @@ def _classic_signal_text(result, ai):
 
 
 async def _wait_for_live_assets(a, timeout=45):
-    """Wait for the broker's 1054 instrument catalogue before scanning."""
+    """Wait for the broker's complete discovered instrument catalogue."""
     if not getattr(a, "AUTO_DISCOVER_ASSETS", False):
         return True
     deadline = time.time() + timeout
@@ -61,7 +62,7 @@ async def _wait_for_live_assets(a, timeout=45):
 
 
 def _asset_priority(pair):
-    """Prefer common liquid-looking symbols while retaining broker discovery."""
+    """Prefer common symbols first, without excluding any discovered asset."""
     p = str(pair).upper()
     preferred = (
         "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
@@ -96,11 +97,14 @@ def _install():
 
         discovered = getattr(a, "discovered_assets", {}) or {}
         if a.AUTO_DISCOVER_ASSETS:
-            universe = sorted(discovered.keys(), key=_asset_priority)[:int(a.MAX_ASSETS_PER_CYCLE)]
+            # IMPORTANT: scan the complete broker-discovered catalogue. Do not
+            # truncate to MAX_ASSETS_PER_CYCLE; that setting is retained only
+            # for legacy/manual fallback paths.
+            universe = sorted(discovered.keys(), key=_asset_priority)
         else:
             universe = a.MANUAL_PAIRS[:] if a.MANUAL_PAIRS else a.PAIRS[:a.MAX_ASSETS_PER_CYCLE]
 
-        a.log.info("CLASSIC LIVE SCAN START: assets=%s", len(universe))
+        a.log.info("CLASSIC COMPLETE LIVE SCAN START: discovered_assets=%s scanning_all=%s", len(discovered), a.AUTO_DISCOVER_ASSETS)
         candidates = []
         technical_rejects = 0
         candle_failures = 0
@@ -120,8 +124,8 @@ def _install():
                 a.log.warning("CLASSIC TECHNICAL SCAN FAILED %s: %s", pair, exc)
 
         candidates.sort(key=lambda x: float(x.get("confidence", 0)), reverse=True)
-        # The signal engine owns the AI review budget. Every technical candidate
-        # gets an AI opportunity; provider fallback is handled by a.call_ai.
+        # AI review remains bounded for latency/cost, but technical scanning now
+        # covers the complete broker-discovered catalogue first.
         ai_limit = min(AI_CANDIDATE_LIMIT, len(candidates))
         a.log.info(
             "CLASSIC TECHNICAL SUMMARY: assets=%s candidates=%s technical_rejects=%s candle_failures=%s ai_candidates=%s",
@@ -133,10 +137,6 @@ def _install():
         ai_failures = 0
         last_ai_error = None
         for result in candidates[:ai_limit]:
-            # First attempt uses the normal multi-provider chain. If that attempt
-            # fails because a provider is unavailable/transient, immediately retry
-            # the same live snapshot once so a temporary API failure does not kill
-            # the whole signal cycle.
             for retry_no in range(AI_RETRY_PER_CANDIDATE + 1):
                 ai_attempts += 1
                 try:
@@ -230,7 +230,7 @@ def _install():
     a.scan_cycle = classic_scan
     a._CLASSIC_SIGNAL_ENGINE = True
     a.log.warning(
-        "CLASSIC PRIYANITHAN SIGNAL FORMAT + LIVE AI CONFIRMATION ACTIVE: AI candidate budget=%s retry=%s expiries=%s",
+        "CLASSIC COMPLETE BROKER ASSET SCAN + LIVE AI CONFIRMATION ACTIVE: AI candidate budget=%s retry=%s expiries=%s",
         AI_CANDIDATE_LIMIT, AI_RETRY_PER_CANDIDATE, EXPIRIES,
     )
     return True
