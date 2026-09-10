@@ -76,8 +76,7 @@ async def wait_until_next_5min_uae():
 def remember_chat(update):
     chat=getattr(update,"effective_chat",None)
     if chat and getattr(chat,"id",None) is not None: known_chat_ids.add(int(chat.id))
-def is_authorized(update):
-    user=getattr(update,"effective_user",None); return bool(user and user.id in authorized_users)
+def is_authorized(update): user=getattr(update,"effective_user",None); return bool(user and user.id in authorized_users)
 def recipients():
     ids=set(authorized_users)
     if TELEGRAM_CHAT_ID:
@@ -220,4 +219,12 @@ def main():
     application=Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build(); application.add_handler(CommandHandler("start",start_cmd)); application.add_handler(CommandHandler("access",access_cmd)); application.add_handler(CommandHandler("scan",scan_cmd)); ot_client=OlympTradeClient(OLYMPTRADE_ACCESS_TOKEN,parameters); asyncio.run(telegram_runtime(application))
 def start_web_server():
     port=int(os.getenv("PORT","10000")); app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
-if __name__=="__main__": threading.Thread(target=start_web_server,daemon=True).start(); main()
+if __name__=="__main__":
+    # Register all runtime Flask routes before the web server can accept its
+    # first request. Flask 3.x rejects add_url_rule after first request.
+    try:
+        import fast_manual_entry
+        fast_manual_entry.install()
+    except Exception:
+        log.exception("FAST MANUAL ENTRY STARTUP INSTALL FAILED")
+    threading.Thread(target=start_web_server,daemon=True).start(); main()
