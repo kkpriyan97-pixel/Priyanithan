@@ -2,11 +2,7 @@
 try:
     from .api.market import MarketAPI
 except Exception:
-    try:
-        from .market import MarketAPI
-    except Exception:
-        MarketAPI = None
-
+    pass
 try:
     import signal_engine
 except Exception:
