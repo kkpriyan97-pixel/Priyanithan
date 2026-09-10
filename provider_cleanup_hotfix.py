@@ -1,21 +1,23 @@
-"""AI provider safety cleanup.
+"""AI provider safety and fallback cleanup.
 
-Keeps the existing provider implementation intact while preventing known-invalid
-free OpenRouter routing from being selected accidentally. Groq remains available
-as the active provider; Cerebras remains an optional fallback when funded.
-Airforce is ignored even if an old environment variable is still present.
+The signal engine may retry the existing AI provider chain, but this module
+ensures known-invalid legacy providers do not silently consume attempts.
+AUTO TRADE remains OFF.
 """
 import os
 
-# The current OpenRouter free route/model used by the older provider patch is
-# not a reliable fallback for this deployment. Do not let an old key silently
-# activate it. The key can remain in Render temporarily, but it is intentionally
-# ignored until a valid paid OpenRouter model is explicitly configured.
-if os.getenv("OPENROUTER_MODEL", "").strip().lower() in {
-    "", "openrouter/free", "openai/gpt-oss-120b:free"
+# Disable legacy OpenRouter free routing. It previously returned unavailable
+# model errors in this deployment. A paid OpenRouter model can be enabled only
+# by explicitly setting OPENROUTER_MODEL to a non-free model.
+_openrouter_model = os.getenv("OPENROUTER_MODEL", "").strip().lower()
+if not _openrouter_model or _openrouter_model in {
+    "openrouter/free", "openai/gpt-oss-120b:free"
 }:
     os.environ.pop("OPENROUTER_API_KEY", None)
 
-# Airforce was removed from the intended provider chain. Ignore stale secrets.
+# Airforce is not part of the supported fallback chain.
 os.environ.pop("AIRFORCE_API_KEY", None)
 os.environ.pop("AIRFORCE_MODEL", None)
+
+# Keep retry configuration deterministic and bounded.
+os.environ.setdefault("AI_PROVIDER_RETRIES", "2")
