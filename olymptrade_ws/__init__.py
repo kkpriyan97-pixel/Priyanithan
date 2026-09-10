@@ -32,7 +32,7 @@ try:
     import analysis_hotfix
 except Exception:
     pass
-try:
-    import demo_lock_hotfix
-except Exception:
-    pass
+
+# NOTE: demo_lock_hotfix.py is intentionally retained in the repository for
+# rollback/reference, but is no longer imported. The active flow supports
+# explicit DEMO or REAL selection; AUTO_TRADE remains OFF.
