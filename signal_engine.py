@@ -9,6 +9,7 @@ AI_CANDIDATE_LIMIT=12
 AI_RETRY_PER_CANDIDATE=0
 SIGNAL_COOLDOWN_SECONDS=240
 
+
 def _app():
     m=sys.modules.get("__main__")
     if m is not None and getattr(m,"__file__","").endswith("app.py"): return m
@@ -120,12 +121,13 @@ async def _install_scan():
             a.log.info("FINAL TECHNICAL SUMMARY: assets=%s candidates=%s candle_failures=%s",len(universe),len(candidates),candle_failures)
             ai_attempts=ai_rejects=ai_failures=0; rejection_reasons=[]
             now=time.time(); sent_key=getattr(a,"_FINAL_LAST_SIGNAL",None)
+            min_ai_conf=max(72,int(getattr(a,"AI_MIN_CONFIDENCE",72)))
             for result in candidates[:AI_CANDIDATE_LIMIT]:
                 ai_attempts+=1
                 try:
                     prompt=a.ai_prompt(result)
                     ai,err=await asyncio.wait_for(asyncio.to_thread(a.call_ai,prompt),timeout=30)
-                except Exception as exc:
+                except Exception:
                     ai_failures+=1; rejection_reasons.append(f"{result.get('pair')}: AI error"); continue
                 if not ai or err:
                     ai_failures+=1; rejection_reasons.append(f"{result.get('pair')}: {err or 'no decision'}"); continue
@@ -133,7 +135,7 @@ async def _install_scan():
                 try: conf=int(ai.get("confidence",0)); duration=int(ai.get("duration_min",5))
                 except Exception: ai_rejects+=1; continue
                 technical=str(result.get("signal","")).upper()
-                qualified=(decision=="APPROVE" and direction==technical and direction in ("UP","DOWN") and conf>=int(getattr(a,"AI_MIN_CONFIDENCE",72)) and duration in EXPIRIES and int(result.get("indicator_votes",0) or 0)>=3 and (result.get("mtf_aligned") is not False))
+                qualified=(decision=="APPROVE" and direction==technical and direction in ("UP","DOWN") and conf>=min_ai_conf and duration in EXPIRIES and int(result.get("indicator_votes",0) or 0)>=3 and (result.get("mtf_aligned") is not False))
                 key=(str(result.get("pair")),direction,duration)
                 if qualified and sent_key and sent_key.get("key")==key and now-float(sent_key.get("time",0))<SIGNAL_COOLDOWN_SECONDS:
                     qualified=False; rejection_reasons.append(f"{result.get('pair')}: duplicate cooldown")
