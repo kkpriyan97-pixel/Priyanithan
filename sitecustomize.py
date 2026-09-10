@@ -14,3 +14,7 @@ try:
     import one_minute_candle_mode_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import final_access_asset_lock_v2  # noqa: F401
+except Exception:
+    pass
