@@ -34,6 +34,13 @@ try:
 except Exception:
     pass
 
+# Make the existing AI confirmation explicitly evaluate the same indicator
+# method rather than using a generic technical prompt.
+try:
+    import ai_method_prompt_hotfix
+except Exception:
+    pass
+
 try:
     import signal_engine
 except Exception:
