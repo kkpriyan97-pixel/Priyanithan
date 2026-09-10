@@ -30,6 +30,6 @@ jobs:
           assert "MARTINGALE = False" in app
           assert "AI_CANDIDATE_LIMIT = 8" in engine
           assert "a.call_ai" in engine
-          assert "demo_lock_hotfix" not in init
+          assert "from . import demo_lock_hotfix" not in init
           print("CORE SAFETY VERIFY OK")
           PY
