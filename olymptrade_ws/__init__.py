@@ -24,3 +24,7 @@ try:
     import runtime_fixes  # noqa: F401
 except Exception:
     pass
+try:
+    import scan_bootstrap_fix  # noqa: F401
+except Exception:
+    pass
