@@ -27,6 +27,13 @@ try:
 except Exception:
     pass
 
+# Reference-style technical method: PSAR, moving averages, Donchian,
+# MACD and ROC. It patches app.analyze_pair after app.py is loaded.
+try:
+    import indicator_method_hotfix
+except Exception:
+    pass
+
 try:
     import signal_engine
 except Exception:
