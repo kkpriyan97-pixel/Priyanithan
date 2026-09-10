@@ -81,4 +81,14 @@ try:
 except Exception:
     pass
 
+try:
+    import final_asset_selection_flow
+except Exception:
+    pass
+
+try:
+    import final_asset_flow_enforcer
+except Exception:
+    pass
+
 # AUTO_TRADE remains OFF.
