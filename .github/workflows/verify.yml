@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile all runtime Python
         run: |
-          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py
+          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py demo_lock_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify final flow invariants
         run: |
@@ -30,6 +30,7 @@ jobs:
           engine = Path("signal_engine.py").read_text(encoding="utf-8")
           fixes = Path("runtime_fixes.py").read_text(encoding="utf-8")
           init = Path("olymptrade_ws/__init__.py").read_text(encoding="utf-8")
+          lock = Path("demo_lock_hotfix.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
@@ -45,7 +46,6 @@ jobs:
           assert '"APPROVE"' in fast
           assert '"REJECT"' in fast
           assert "ACCESS REQUIRED" in fast
-          assert "Choose DEMO or REAL before the scan" in fast
           assert "_FINAL_ACCESS" in fast
           assert '"/trade/mode"' in fast
           assert '"/trade/app"' in fast
@@ -57,7 +57,11 @@ jobs:
           assert "ENTRY / PRICE REF" in fast
           assert "EXPIRY / TIME" in fast
           assert "https://olymptrade.com/platform" in fast
-          assert "RENDER_EXTERNAL_URL" in fast
+
+          assert "DEMO_ONLY" in lock
+          assert "REAL mode is disabled" in lock
+          assert "DEMO_LANDING" in lock
+          assert "demo_lock_hotfix" in init
 
           assert "Classic compact Telegram format" in engine
           assert "LIVE AI CONFIRMATION" in engine
@@ -74,7 +78,7 @@ jobs:
           assert "runtime_fixes" in init
           assert "signal_logo" not in init
 
-          print("FINAL FLOW VERIFY OK")
-          print("START -> ACCESS -> DEMO/REAL -> LIVE MARKET -> AI CONFIRMATION -> SIGNAL -> TRADE NOW -> official Olymptrade platform -> MANUAL FINAL ACTION -> RESULT")
+          print("FINAL DEMO-ONLY FLOW VERIFY OK")
+          print("START -> ACCESS -> DEMO ONLY -> LIVE MARKET -> AI CONFIRMATION -> SIGNAL -> TRADE NOW -> DEMO LANDING -> MANUAL FINAL ACTION -> RESULT")
           print("AUTO_TRADE=False; MARTINGALE=False; no broker order execution")
           PY
