@@ -19,5 +19,9 @@ if not _openrouter_model or _openrouter_model in {
 os.environ.pop("AIRFORCE_API_KEY", None)
 os.environ.pop("AIRFORCE_MODEL", None)
 
+# Groq GPT-OSS-120B is currently exhausting the organization's 8K TPM limit.
+# Use the compact GPT-OSS-20B model for the signal-validation workload.
+os.environ["GROQ_MODEL"] = "openai/gpt-oss-20b"
+
 # Keep retry configuration deterministic and bounded.
 os.environ.setdefault("AI_PROVIDER_RETRIES", "2")
