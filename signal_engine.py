@@ -44,8 +44,6 @@ def _extract_pairs(value):
                 x=v.get(k)
                 if isinstance(x,str):
                     x=x.upper().strip()
-                    # Profitability payloads can contain non-symbol strings in
-                    # fields such as p. Keep only plausible instrument IDs.
                     if x and 2<=len(x)<=30 and re.fullmatch(r"[A-Z][A-Z0-9_.\-]{1,29}",x) and x not in {"UP","DOWN","USD","EUR","PERCENT"}: out.add(x)
             for x in v.values(): walk(x)
         elif isinstance(v,list):
@@ -81,8 +79,9 @@ def _signal_text(result,ai):
     patterns="\n".join("• "+str(x) for x in (result.get("patterns") or [])[:6])
     votes=f"{result.get('indicator_votes','-')}/{result.get('indicator_total','6')}"
     mtf=result.get("higher_tf_direction") or "UNKNOWN"
+    pair=str(result.get("pair") or result.get("asset") or result.get("symbol") or "UNKNOWN_ASSET").strip()
     return ("🔥 PRIYANITHAN AI SIGNAL 🔥\n\n"
-            f"📈 {result.get('pair')}\n\n{arrow} {direction}\n\n"
+            f"📈 {pair}\n\n{arrow} {direction}\n\n"
             f"💰 Entry: {result.get('price','LIVE')}\n\n⏱️ Expiry: {expiry} MIN\n\n"
             f"🤖 AI Confidence: {confidence}%\n\n📊 Setup Score: {technical}%\n"
             f"🧩 Indicators: {votes} aligned\n"
@@ -90,11 +89,9 @@ def _signal_text(result,ai):
             f"🕐 {result.get('candle_time','LIVE')}\n\n🧠 Candice AI: APPROVED\n\n⚠️ MANUAL TRADE — AUTO TRADE OFF")
 
 async def _fetch_1m(a,pair):
-    """Fetch one pair without allowing one bad instrument to stop the cycle."""
     try:
         df,err=await asyncio.wait_for(a.get_ot_candles(pair,60,120),timeout=18)
-        if df is None:
-            return pair,None,err or "no candle data"
+        if df is None: return pair,None,err or "no candle data"
         return pair,df,None
     except Exception as exc:
         return pair,None,f"exception: {str(exc)[:140]}"
@@ -113,8 +110,7 @@ async def _install_scan():
             candidates=[]; candle_failures=0; failure_examples=[]
             sem=asyncio.Semaphore(CANDLE_CONCURRENCY)
             async def limited(pair):
-                async with sem:
-                    return await _fetch_1m(a,pair)
+                async with sem: return await _fetch_1m(a,pair)
             fetched=await asyncio.gather(*(limited(p) for p in universe),return_exceptions=False)
             for pair,df,err in fetched:
                 if df is None:
@@ -123,17 +119,20 @@ async def _install_scan():
                     continue
                 try:
                     r=a.analyze_pair(pair,df)
+                    r["pair"]=str(r.get("pair") or pair)
                     if str(r.get("signal","NO SIGNAL")).upper()=="NO SIGNAL": continue
                     try:
                         hdf,herr=await asyncio.wait_for(a.get_ot_candles(pair,300,60),timeout=18)
                         if hdf is not None:
                             hr=a.analyze_pair(pair,hdf)
+                            r["pair"]=str(r.get("pair") or pair)
                             r["higher_tf_direction"]=str(hr.get("signal","NO SIGNAL")).upper()
                             r["higher_tf_score"]=int(hr.get("setup_score",hr.get("confidence",0)) or 0)
                             r["mtf_aligned"]=r["higher_tf_direction"]==r.get("signal")
                             if r["higher_tf_direction"] not in ("NO SIGNAL",r.get("signal")): continue
                             if r["mtf_aligned"]: r["setup_score"]=min(100,int(r.get("setup_score",0))+8)
                     except Exception as exc:
+                        r["pair"]=str(r.get("pair") or pair)
                         r["higher_tf_direction"]="UNKNOWN"; r["mtf_aligned"]=None
                         if len(failure_examples)<6: failure_examples.append(f"{pair}: 5m context {str(exc)[:100]}")
                     candidates.append(r)
@@ -141,36 +140,45 @@ async def _install_scan():
                     if len(failure_examples)<6: failure_examples.append(f"{pair}: analysis {str(exc)[:100]}")
             candidates.sort(key=lambda x:(float(x.get("setup_score",0)),float(x.get("confidence",0))),reverse=True)
             a.log.info("FINAL TECHNICAL SUMMARY: assets=%s candidates=%s candle_failures=%s",len(universe),len(candidates),candle_failures)
-            if failure_examples:
-                a.log.info("FINAL CANDLE FAILURE EXAMPLES: %s", " | ".join(failure_examples))
+            if failure_examples: a.log.info("FINAL CANDLE FAILURE EXAMPLES: %s", " | ".join(failure_examples))
             ai_attempts=ai_rejects=ai_failures=0; rejection_reasons=[]
             now=time.time(); sent_key=getattr(a,"_FINAL_LAST_SIGNAL",None)
             min_ai_conf=max(72,int(getattr(a,"AI_MIN_CONFIDENCE",72)))
             for result in candidates[:AI_CANDIDATE_LIMIT]:
+                result["pair"]=str(result.get("pair") or result.get("asset") or result.get("symbol") or "UNKNOWN_ASSET").strip()
                 ai_attempts+=1
                 try:
                     prompt=a.ai_prompt(result)
                     ai,err=await asyncio.wait_for(asyncio.to_thread(a.call_ai,prompt),timeout=30)
                 except Exception as exc:
-                    ai_failures+=1; rejection_reasons.append(f"{result.get('pair')}: AI error {str(exc)[:90]}"); continue
+                    ai_failures+=1; rejection_reasons.append(f"{result['pair']}: AI error {str(exc)[:90]}"); continue
                 if not ai or err:
-                    ai_failures+=1; rejection_reasons.append(f"{result.get('pair')}: {err or 'no decision'}"); continue
+                    ai_failures+=1; rejection_reasons.append(f"{result['pair']}: {err or 'no decision'}"); continue
                 decision=str(ai.get("decision","")).upper(); direction=str(ai.get("direction","")).upper()
                 try: conf=int(ai.get("confidence",0)); duration=int(ai.get("duration_min",5))
-                except Exception: ai_rejects+=1; continue
+                except Exception:
+                    ai_rejects+=1; rejection_reasons.append(f"{result['pair']}: invalid AI numeric fields"); continue
                 technical=str(result.get("signal","")).upper()
-                qualified=(decision=="APPROVE" and direction==technical and direction in ("UP","DOWN") and conf>=min_ai_conf and duration in EXPIRIES and int(result.get("indicator_votes",0) or 0)>=3 and (result.get("mtf_aligned") is not False))
-                key=(str(result.get("pair")),direction,duration)
+                failures=[]
+                if decision!="APPROVE": failures.append(f"decision={decision or 'MISSING'}")
+                if direction!=technical or direction not in ("UP","DOWN"): failures.append(f"direction={direction or 'MISSING'} vs technical={technical or 'MISSING'}")
+                if conf<min_ai_conf: failures.append(f"confidence={conf}<{min_ai_conf}")
+                if duration not in EXPIRIES: failures.append(f"duration={duration} invalid")
+                if int(result.get("indicator_votes",0) or 0)<3: failures.append(f"indicators={result.get('indicator_votes',0)}<3")
+                if result.get("mtf_aligned") is False: failures.append("5m conflict")
+                qualified=not failures
+                a.log.info("FINAL AI GATE: pair=%s decision=%s direction=%s confidence=%s duration=%s technical=%s votes=%s mtf=%s result=%s",result["pair"],decision,direction,conf,duration,technical,result.get("indicator_votes",0),result.get("mtf_aligned"),"PASS" if qualified else "FAIL:"+";".join(failures))
+                key=(result["pair"],direction,duration)
                 if qualified and sent_key and sent_key.get("key")==key and now-float(sent_key.get("time",0))<SIGNAL_COOLDOWN_SECONDS:
-                    qualified=False; rejection_reasons.append(f"{result.get('pair')}: duplicate cooldown")
+                    qualified=False; failures.append("duplicate cooldown")
                 if qualified:
                     text=_signal_text(result,ai)
                     if await a.send_to_recipients(application.bot,text):
                         a._FINAL_LAST_SIGNAL={"key":key,"time":time.time()}
-                        a.log.info("FINAL QUALIFIED SIGNAL SENT: %s %s %sM AI=%s",result.get("pair"),direction,duration,conf)
+                        a.log.info("FINAL QUALIFIED SIGNAL SENT: %s %s %sM AI=%s",result["pair"],direction,duration,conf)
                         return
                 else:
-                    ai_rejects+=1; rejection_reasons.append(f"{result.get('pair')}: {str(ai.get('reason','reject'))[:120]}")
+                    ai_rejects+=1; rejection_reasons.append(f"{result['pair']}: {('; '.join(failures)) or str(ai.get('reason','reject'))[:120]}")
             a.log.info("FINAL CYCLE COMPLETE: assets=%s candidates=%s ai_attempts=%s rejects=%s failures=%s",len(universe),len(candidates),ai_attempts,ai_rejects,ai_failures)
             if ai_failures and ai_failures==ai_attempts:
                 msg=("⚠️ AI CONFIRMATION UNAVAILABLE\n\n" f"📊 Assets scanned: {len(universe)}\n📈 Candidates: {len(candidates)}\n🤖 AI attempts: {ai_attempts}\n\nNo signal was forced because AI confirmation was unavailable.")
