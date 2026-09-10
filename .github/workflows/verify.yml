@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile all runtime Python
         run: |
-          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py demo_lock_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py demo_lock_hotfix.py provider_cleanup_hotfix.py one_minute_candle_mode_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety flags
         run: |
@@ -26,10 +26,13 @@ jobs:
           app = Path("app.py").read_text(encoding="utf-8")
           engine = Path("signal_engine.py").read_text(encoding="utf-8")
           init = Path("olymptrade_ws/__init__.py").read_text(encoding="utf-8")
+          mode = Path("one_minute_candle_mode_hotfix.py").read_text(encoding="utf-8")
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
-          assert "AI_CANDIDATE_LIMIT = 8" in engine
+          assert "AI_CANDIDATE_LIMIT=12" in engine
+          assert "EXPIRIES=(2,3,5,15)" in engine
           assert "a.call_ai" in engine
+          assert "No broker order" in mode
           assert "from . import demo_lock_hotfix" not in init
-          print("CORE SAFETY VERIFY OK")
+          print("CORE SAFETY + 1M CANDLE MODE VERIFY OK")
           PY
