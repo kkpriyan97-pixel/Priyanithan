@@ -7,8 +7,9 @@ import asyncio
 import sys
 import time
 
-EXPIRIES = (1, 2, 3, 5, 10, 15)
+EXPIRIES = (1, 2, 3, 5, 15)
 AI_CANDIDATE_LIMIT = 8
+AI_RETRY_PER_CANDIDATE = 1
 
 
 def _app():
@@ -119,8 +120,8 @@ def _install():
                 a.log.warning("CLASSIC TECHNICAL SCAN FAILED %s: %s", pair, exc)
 
         candidates.sort(key=lambda x: float(x.get("confidence", 0)), reverse=True)
-        # The signal engine owns the AI review budget. Do not inherit the
-        # legacy app.py cap of 2; every technical candidate should reach AI.
+        # The signal engine owns the AI review budget. Every technical candidate
+        # gets an AI opportunity; provider fallback is handled by a.call_ai.
         ai_limit = min(AI_CANDIDATE_LIMIT, len(candidates))
         a.log.info(
             "CLASSIC TECHNICAL SUMMARY: assets=%s candidates=%s technical_rejects=%s candle_failures=%s ai_candidates=%s",
@@ -132,53 +133,69 @@ def _install():
         ai_failures = 0
         last_ai_error = None
         for result in candidates[:ai_limit]:
-            ai_attempts += 1
-            try:
-                prompt = a.ai_prompt(result)
-                ai, err = await asyncio.wait_for(asyncio.to_thread(a.call_ai, prompt), timeout=30)
-            except Exception as exc:
-                ai_failures += 1
-                last_ai_error = str(exc)
-                a.log.warning("CLASSIC AI CHECK FAILED %s: %s", result.get("pair"), exc)
-                continue
-            if not ai or err:
-                ai_failures += 1
-                last_ai_error = err
-                a.log.warning("CLASSIC AI REJECTED/FAILED %s: %s", result.get("pair"), err)
-                continue
+            # First attempt uses the normal multi-provider chain. If that attempt
+            # fails because a provider is unavailable/transient, immediately retry
+            # the same live snapshot once so a temporary API failure does not kill
+            # the whole signal cycle.
+            for retry_no in range(AI_RETRY_PER_CANDIDATE + 1):
+                ai_attempts += 1
+                try:
+                    prompt = a.ai_prompt(result)
+                    if retry_no:
+                        prompt += (
+                            "\n\nFALLBACK CONFIRMATION RETRY: Re-evaluate this same live snapshot now. "
+                            "Choose only one of the allowed expiry values 1, 2, 3, 5, 15 minutes. "
+                            "Do not invent missing data."
+                        )
+                    ai, err = await asyncio.wait_for(asyncio.to_thread(a.call_ai, prompt), timeout=30)
+                except Exception as exc:
+                    ai_failures += 1
+                    last_ai_error = str(exc)
+                    a.log.warning("CLASSIC AI CHECK FAILED %s retry=%s: %s", result.get("pair"), retry_no, exc)
+                    if retry_no < AI_RETRY_PER_CANDIDATE:
+                        continue
+                    break
+                if not ai or err:
+                    ai_failures += 1
+                    last_ai_error = err
+                    a.log.warning("CLASSIC AI REJECTED/FAILED %s retry=%s: %s", result.get("pair"), retry_no, err)
+                    if retry_no < AI_RETRY_PER_CANDIDATE:
+                        continue
+                    break
 
-            decision = str(ai.get("decision", "")).upper()
-            direction = str(ai.get("direction", "")).upper()
-            try:
-                ai_conf = int(ai.get("confidence", 0))
-                duration = int(ai.get("duration_min", 5))
-            except Exception:
-                ai_rejects += 1
-                continue
+                decision = str(ai.get("decision", "")).upper()
+                direction = str(ai.get("direction", "")).upper()
+                try:
+                    ai_conf = int(ai.get("confidence", 0))
+                    duration = int(ai.get("duration_min", 5))
+                except Exception:
+                    ai_rejects += 1
+                    break
 
-            technical_direction = str(result.get("signal", "")).upper()
-            qualified = (
-                decision == "APPROVE"
-                and direction == technical_direction
-                and direction in ("UP", "DOWN")
-                and ai_conf >= int(a.AI_MIN_CONFIDENCE)
-                and duration in EXPIRIES
-            )
-            if qualified:
-                text = _classic_signal_text(result, ai)
-                if text and await a.send_to_recipients(application.bot, text):
-                    a.log.info(
-                        "CLASSIC QUALIFIED SIGNAL SENT: pair=%s direction=%s AI=%s technical=%s expiry=%s",
-                        result.get("pair"), direction, ai_conf, result.get("confidence"), duration,
-                    )
-                    return
-            else:
-                ai_rejects += 1
-                a.log.info(
-                    "CLASSIC AI FILTER: pair=%s decision=%s direction=%s technical=%s confidence=%s expiry=%s reason=%s",
-                    result.get("pair"), decision, direction, technical_direction, ai_conf, duration,
-                    str(ai.get("reason", ""))[:180],
+                technical_direction = str(result.get("signal", "")).upper()
+                qualified = (
+                    decision == "APPROVE"
+                    and direction == technical_direction
+                    and direction in ("UP", "DOWN")
+                    and ai_conf >= int(a.AI_MIN_CONFIDENCE)
+                    and duration in EXPIRIES
                 )
+                if qualified:
+                    text = _classic_signal_text(result, ai)
+                    if text and await a.send_to_recipients(application.bot, text):
+                        a.log.info(
+                            "CLASSIC QUALIFIED SIGNAL SENT: pair=%s direction=%s AI=%s technical=%s expiry=%s",
+                            result.get("pair"), direction, ai_conf, result.get("confidence"), duration,
+                        )
+                        return
+                else:
+                    ai_rejects += 1
+                    a.log.info(
+                        "CLASSIC AI FILTER: pair=%s decision=%s direction=%s technical=%s confidence=%s expiry=%s reason=%s",
+                        result.get("pair"), decision, direction, technical_direction, ai_conf, duration,
+                        str(ai.get("reason", ""))[:180],
+                    )
+                break
 
         a.log.info(
             "CLASSIC CYCLE COMPLETE: assets=%s technical_candidates=%s ai_attempts=%s ai_rejects=%s ai_failures=%s",
@@ -186,11 +203,14 @@ def _install():
         )
 
         if ai_attempts and ai_failures == ai_attempts and last_ai_error:
+            safe_error = re.sub(r"(?:Bearer\s+)[A-Za-z0-9._-]+", "Bearer [REDACTED]", str(last_ai_error))[:220]
             await a.send_to_recipients(
                 application.bot,
                 "⚠️ AI CONFIRMATION UNAVAILABLE\n\n"
                 f"Live technical candidates found: {len(candidates)}\n"
-                "AI could not complete confirmation.\n"
+                f"AI checks/retries attempted: {ai_attempts}\n"
+                f"Diagnostic: {safe_error}\n\n"
+                "No signal was forced because AI confirmation was unavailable.\n"
                 "⏱️ Next scan: automatic 5-minute cycle."
             )
             return
@@ -210,8 +230,8 @@ def _install():
     a.scan_cycle = classic_scan
     a._CLASSIC_SIGNAL_ENGINE = True
     a.log.warning(
-        "CLASSIC PRIYANITHAN SIGNAL FORMAT + LIVE AI CONFIRMATION ACTIVE: AI candidate budget=%s",
-        AI_CANDIDATE_LIMIT,
+        "CLASSIC PRIYANITHAN SIGNAL FORMAT + LIVE AI CONFIRMATION ACTIVE: AI candidate budget=%s retry=%s expiries=%s",
+        AI_CANDIDATE_LIMIT, AI_RETRY_PER_CANDIDATE, EXPIRIES,
     )
     return True
 
