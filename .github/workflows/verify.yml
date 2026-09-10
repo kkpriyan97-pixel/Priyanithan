@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile all runtime Python
         run: |
-          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py demo_lock_hotfix.py
+          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py demo_lock_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify final flow invariants
         run: |
@@ -30,7 +30,7 @@ jobs:
           engine = Path("signal_engine.py").read_text(encoding="utf-8")
           fixes = Path("runtime_fixes.py").read_text(encoding="utf-8")
           init = Path("olymptrade_ws/__init__.py").read_text(encoding="utf-8")
-          lock = Path("demo_lock_hotfix.py").read_text(encoding="utf-8")
+          provider = Path("provider_cleanup_hotfix.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
@@ -73,10 +73,14 @@ jobs:
           assert "Expiry|Duration" in fixes
           assert "(1|2|3|5|10|15)" in fixes
           assert "runtime_fixes" in init
+          assert "provider_cleanup_hotfix" in init
           assert "demo_lock_hotfix" not in init
           assert "REAL mode is disabled" not in init
+          assert "OPENROUTER_API_KEY" in provider
+          assert "AIRFORCE_API_KEY" in provider
 
           print("FINAL SELECTABLE-MODE FLOW VERIFY OK")
           print("START -> ACCESS -> DEMO/REAL -> LIVE MARKET -> AI CONFIRMATION -> SIGNAL -> TRADE NOW -> OLYMPTRADE -> MANUAL FINAL ACTION -> RESULT")
           print("AUTO_TRADE=False; MARTINGALE=False; no automatic order execution")
+          print("INVALID FREE/STALE AI PROVIDER ROUTING BLOCKED")
           PY
