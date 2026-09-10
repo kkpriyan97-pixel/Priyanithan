@@ -56,21 +56,16 @@ jobs:
           assert "ASSET" in fast
           assert "ENTRY / PRICE REF" in fast
           assert "EXPIRY / TIME" in fast
-          assert "olymptrade.com/pages/trading/account/free-demo/" in fast
-          assert "olymptrade.com/pages/trading/" in fast
+          assert "https://olymptrade.com/platform" in fast
           assert "RENDER_EXTERNAL_URL" in fast
 
-          assert "Cerebras + Groq independently analyze" in engine
-          assert "CEREBRAS_API_KEY" in engine
-          assert "GROQ_API_KEY" in engine
-          assert "https://api.cerebras.ai/v1/chat/completions" in engine
-          assert "https://api.groq.com/openai/v1/chat/completions" in engine
-          assert "x[\"direction\"]!=y[\"direction\"]" in engine
-          assert "x[\"decision\"]!=\"APPROVE\"" in engine
-          assert "30s" in engine
-          assert "10-signal" in engine
+          assert "Classic compact Telegram format" in engine
+          assert "LIVE AI CONFIRMATION" in engine
+          assert "a.call_ai" in engine
+          assert "decision == \"APPROVE\"" in engine
+          assert "direction == technical_direction" in engine
+          assert "🧠 Candice AI: APPROVED" in engine
           assert "AUTO TRADE OFF" in engine
-          assert "3D SIGNAL CENTER" in engine
 
           assert "ALLOWED_EXPIRIES = (1, 2, 3, 5, 10, 15)" in result
           assert "SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF" in result
@@ -80,6 +75,6 @@ jobs:
           assert "signal_logo" not in init
 
           print("FINAL FLOW VERIFY OK")
-          print("START -> ACCESS -> DEMO/REAL -> LIVE MARKET -> Cerebras + Groq -> DUAL CONFIRMATION -> SIGNAL -> TRADE NOW -> 30s updates -> RESULT -> 10-signal report -> next 5-minute cycle")
+          print("START -> ACCESS -> DEMO/REAL -> LIVE MARKET -> AI CONFIRMATION -> SIGNAL -> TRADE NOW -> official Olymptrade platform -> MANUAL FINAL ACTION -> RESULT")
           print("AUTO_TRADE=False; MARTINGALE=False; no broker order execution")
           PY
