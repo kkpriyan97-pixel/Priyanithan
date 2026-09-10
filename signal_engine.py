@@ -8,6 +8,7 @@ import sys
 import time
 
 EXPIRIES = (1, 2, 3, 5, 10, 15)
+AI_CANDIDATE_LIMIT = 8
 
 
 def _app():
@@ -58,6 +59,26 @@ async def _wait_for_live_assets(a, timeout=45):
     return bool(getattr(a, "discovered_assets", {}))
 
 
+def _asset_priority(pair):
+    """Prefer common liquid-looking symbols while retaining broker discovery.
+
+    The scanner still uses only broker-discovered instruments; this merely
+    prevents alphabetical ordering from spending the AI budget on obscure
+    symbols when familiar FX symbols are available.
+    """
+    p = str(pair).upper()
+    preferred = (
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
+        "EURJPY", "GBPJPY", "EURGBP", "AUDJPY", "NZDUSD", "NZDJPY",
+        "ASIA_X",
+    )
+    try:
+        rank = preferred.index(p)
+    except ValueError:
+        rank = len(preferred) + 1
+    return (rank, p)
+
+
 def _install():
     a = _app()
     if not a or getattr(a, "_CLASSIC_SIGNAL_ENGINE", False):
@@ -77,57 +98,76 @@ def _install():
             )
             return
 
-        universe = (
-            sorted(a.discovered_assets.keys())[:a.MAX_ASSETS_PER_CYCLE]
-            if a.AUTO_DISCOVER_ASSETS
-            else (a.MANUAL_PAIRS[:] if a.MANUAL_PAIRS else a.PAIRS[:a.MAX_ASSETS_PER_CYCLE])
-        )
+        discovered = getattr(a, "discovered_assets", {}) or {}
+        if a.AUTO_DISCOVER_ASSETS:
+            universe = sorted(discovered.keys(), key=_asset_priority)[:int(a.MAX_ASSETS_PER_CYCLE)]
+        else:
+            universe = a.MANUAL_PAIRS[:] if a.MANUAL_PAIRS else a.PAIRS[:a.MAX_ASSETS_PER_CYCLE]
+
         a.log.info("CLASSIC LIVE SCAN START: assets=%s", len(universe))
         candidates = []
+        technical_rejects = 0
+        candle_failures = 0
         for pair in universe:
             try:
                 df, err = await a.get_ot_candles(pair, 60, 120)
                 if df is None:
+                    candle_failures += 1
                     continue
                 result = a.analyze_pair(pair, df)
                 if str(result.get("signal", "NO SIGNAL")).upper() == "NO SIGNAL":
+                    technical_rejects += 1
                     continue
                 candidates.append(result)
             except Exception as exc:
+                candle_failures += 1
                 a.log.warning("CLASSIC TECHNICAL SCAN FAILED %s: %s", pair, exc)
 
         candidates.sort(key=lambda x: float(x.get("confidence", 0)), reverse=True)
-        a.log.info("CLASSIC TECHNICAL CANDIDATES: %s", len(candidates))
+        ai_limit = max(1, min(AI_CANDIDATE_LIMIT, int(getattr(a, "MAX_AI_CANDIDATES", AI_CANDIDATE_LIMIT))))
+        a.log.info(
+            "CLASSIC TECHNICAL SUMMARY: assets=%s candidates=%s technical_rejects=%s candle_failures=%s ai_candidates=%s",
+            len(universe), len(candidates), technical_rejects, candle_failures, min(len(candidates), ai_limit),
+        )
 
-        # Give AI a broader set of technically directional candidates. The
-        # quality gate is unchanged: APPROVE + matching direction + confidence
-        # threshold + valid expiry are still mandatory before a signal is sent.
-        ai_limit = max(1, min(int(getattr(a, "MAX_AI_CANDIDATES", 5)), 5))
+        ai_attempts = 0
+        ai_rejects = 0
+        ai_failures = 0
+        last_ai_error = None
         for result in candidates[:ai_limit]:
+            ai_attempts += 1
             try:
                 prompt = a.ai_prompt(result)
                 ai, err = await asyncio.wait_for(asyncio.to_thread(a.call_ai, prompt), timeout=30)
             except Exception as exc:
+                ai_failures += 1
+                last_ai_error = str(exc)
                 a.log.warning("CLASSIC AI CHECK FAILED %s: %s", result.get("pair"), exc)
                 continue
             if not ai or err:
+                ai_failures += 1
+                last_ai_error = err
                 a.log.warning("CLASSIC AI REJECTED/FAILED %s: %s", result.get("pair"), err)
                 continue
+
             decision = str(ai.get("decision", "")).upper()
             direction = str(ai.get("direction", "")).upper()
             try:
                 ai_conf = int(ai.get("confidence", 0))
                 duration = int(ai.get("duration_min", 5))
             except Exception:
+                ai_rejects += 1
                 continue
+
             technical_direction = str(result.get("signal", "")).upper()
-            if (
+            qualified = (
                 decision == "APPROVE"
                 and direction == technical_direction
                 and direction in ("UP", "DOWN")
                 and ai_conf >= int(a.AI_MIN_CONFIDENCE)
                 and duration in EXPIRIES
-            ):
+            )
+            if qualified:
                 text = _classic_signal_text(result, ai)
                 if text and await a.send_to_recipients(application.bot, text):
                     a.log.info(
@@ -135,17 +175,43 @@ def _install():
                         result.get("pair"), direction, ai_conf, result.get("confidence"), duration,
                     )
                     return
+            else:
+                ai_rejects += 1
+                a.log.info(
+                    "CLASSIC AI FILTER: pair=%s decision=%s direction=%s technical=%s confidence=%s expiry=%s reason=%s",
+                    result.get("pair"), decision, direction, technical_direction, ai_conf, duration,
+                    str(ai.get("reason", ""))[:180],
+                )
+
+        a.log.info(
+            "CLASSIC CYCLE COMPLETE: assets=%s technical_candidates=%s ai_attempts=%s ai_rejects=%s ai_failures=%s",
+            len(universe), len(candidates), ai_attempts, ai_rejects, ai_failures,
+        )
+
+        # Never disguise an AI outage as a market rejection. This makes the
+        # Telegram status actionable while keeping the signal gate unchanged.
+        if ai_attempts and ai_failures == ai_attempts and last_ai_error:
+            await a.send_to_recipients(
+                application.bot,
+                "⚠️ AI CONFIRMATION UNAVAILABLE\n\n"
+                "Live technical candidates were found, but AI confirmation could not be completed.\n"
+                "⏱️ Next scan: automatic 5-minute cycle."
+            )
+            return
 
         await a.send_to_recipients(
             application.bot,
             "🚫 NO QUALIFIED SIGNAL\n\n"
-            "No clean technical + AI-confirmed setup passed the safety filters this cycle.\n"
+            "Live technical candidates were checked with AI, but none passed the final confirmation gate.\n"
             "⏱️ Next scan: automatic 5-minute cycle."
         )
 
     a.scan_cycle = classic_scan
     a._CLASSIC_SIGNAL_ENGINE = True
-    a.log.warning("CLASSIC PRIYANITHAN SIGNAL FORMAT + LIVE AI CONFIRMATION ACTIVE")
+    a.log.warning(
+        "CLASSIC PRIYANITHAN SIGNAL FORMAT + LIVE AI CONFIRMATION ACTIVE: AI candidate budget=%s",
+        AI_CANDIDATE_LIMIT,
+    )
     return True
 
 
