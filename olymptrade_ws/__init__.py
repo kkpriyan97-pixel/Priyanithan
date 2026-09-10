@@ -8,9 +8,6 @@ try:
 except Exception:
     pass
 
-# app.py calls ot_client.get_candles(...), while the current client exposes
-# the implementation as ot_client.market.get_candles(...). Import the
-# compatibility shim BEFORE signal_engine starts its runtime installer.
 try:
     from . import compat as _compat
 except Exception:
@@ -20,6 +17,13 @@ except Exception:
 # manual-entry AI patch builds its provider chain.
 try:
     import provider_cleanup_hotfix
+except Exception:
+    pass
+
+# Normalize successful Groq responses when the model returned explicit
+# decision fields without valid JSON. This never invents a decision.
+try:
+    import ai_response_hotfix
 except Exception:
     pass
 
