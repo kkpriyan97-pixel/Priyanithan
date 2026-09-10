@@ -1,6 +1,10 @@
-"""Intentionally empty runtime customization.
+"""Runtime startup hooks for the Priyanithan signal engine.
 
-The application is now self-contained in app.py. Legacy import hooks and
-hotfix bootstraps are disabled so they cannot add old Telegram handlers or
-rewrite the fresh main engine at startup.
+Loads only the compatibility hardening needed by the signal engine. This
+module never enables broker order execution or automatic trading.
 """
+
+try:
+    import signal_gate_compat_hotfix  # noqa: F401
+except Exception:
+    pass
