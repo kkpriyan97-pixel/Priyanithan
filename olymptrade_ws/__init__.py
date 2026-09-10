@@ -66,4 +66,9 @@ try:
 except Exception:
     pass
 
+try:
+    import final_loss_reanalysis_hotfix
+except Exception:
+    pass
+
 # AUTO_TRADE remains OFF.
