@@ -1,6 +1,6 @@
 # Priyanithan runtime compatibility patch.
 # Keeps broker asset discovery incremental, validates live candles,
-# broadens AI review to the strongest five technical candidates, and uses
+# reviews a broader set of technical candidates with AI, and uses
 # Telegram webhook delivery to eliminate getUpdates polling conflicts.
 import importlib.abc
 import importlib.machinery
@@ -37,15 +37,21 @@ class _Loader(importlib.abc.Loader):
         )
         source = source.replace(old_universe, new_universe)
 
-        # Review up to five strongest technical candidates with AI. This does
-        # NOT lower AI_MIN_CONFIDENCE and does NOT bypass direction agreement.
+        # The environment value was previously capped at 2, which meant a
+        # perfectly valid technical candidate could never reach AI review.
+        # Keep the user's confidence threshold untouched but guarantee a
+        # meaningful AI review budget for each cycle.
         source = source.replace(
             'MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))',
-            'MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "5")), 5)',
+            'MAX_AI_CANDIDATES = 8',
         )
         source = source.replace(
             'MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "2")), 2)',
+            'MAX_AI_CANDIDATES = 8',
+        )
+        source = source.replace(
             'MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "5")), 5)',
+            'MAX_AI_CANDIDATES = 8',
         )
 
         source = source.replace(
@@ -91,6 +97,7 @@ class _Loader(importlib.abc.Loader):
             '        return df.tail(count).reset_index(drop=True), None\\n'
         )
         source = source.replace(old_candle, new_candle)
+
         source = source.replace(
             'f"📊 Assets: {len(PAIRS)} (auto-discovered)\\n"',
             'f"📊 Assets: {len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS)} (live broker catalogue)\\n"',
@@ -99,16 +106,30 @@ class _Loader(importlib.abc.Loader):
             'log.info("OlympTrade connection established. Assets available for scanner: %s", len(PAIRS))',
             'log.info("OlympTrade connection established. Assets available for scanner: %s", len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS))',
         )
-        webhook_globals = 'runtime_loop = None\\nlatest_candles = {}\\n'
-        webhook_globals_new = 'runtime_loop = None\\ntelegram_application = None\\nlatest_candles = {}\\n'
+
+        webhook_globals = (
+            'runtime_loop = None\\n'
+            'latest_candles = {}\\n'
+        )
+        webhook_globals_new = (
+            'runtime_loop = None\\n'
+            'telegram_application = None\\n'
+            'latest_candles = {}\\n'
+        )
         source = source.replace(webhook_globals, webhook_globals_new)
-        webhook_anchor = '@app.get("/health")\\ndef health():\\n    return "OK"\\n\\n'
+
+        webhook_anchor = (
+            '@app.get("/health")\\n'
+            'def health():\\n'
+            '    return "OK"\\n\\n'
+        )
         webhook_code = (
             '@app.get("/health")\\n'
             'def health():\\n'
             '    return "OK"\\n\\n'
             '@app.post("/telegram/webhook")\\n'
             'def telegram_webhook():\\n'
+            '    """Receive Telegram updates without getUpdates polling conflicts."""\\n'
             '    if telegram_application is None or runtime_loop is None:\\n'
             '        return "Bot is starting", 503\\n'
             '    payload = request.get_json(silent=True)\\n'
@@ -124,6 +145,7 @@ class _Loader(importlib.abc.Loader):
             '        return "Webhook processing failed", 500\\n\\n'
         )
         source = source.replace(webhook_anchor, webhook_code)
+
         source = source.replace(
             'async def telegram_runtime(application):\\n'
             '    global runtime_loop\\n'
@@ -146,15 +168,18 @@ class _Loader(importlib.abc.Loader):
             '        await asyncio.Event().wait()\\n'
         )
         source = source.replace(polling_block, webhook_block)
+
         source = source.replace(
             '        if application.updater and application.updater.running: await application.updater.stop()\\n',
-            '        if application.updater and application.updater.running:\\n            await application.updater.stop()\\n'
+            '        if application.updater and application.updater.running:\\n'
+            '            await application.updater.stop()\\n'
         )
         source = source.replace('APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"', 'APP_VERSION = "6.0-live-uae-webhook"')
+
         exec(compile(source, self.original.path, "exec"), module.__dict__)
         logging = __import__("logging")
         logging.getLogger("priyanithan").warning(
-            "RUNTIME PATCH ACTIVE: live asset catalogue + live candle validation + AI top-5 review + Telegram webhook"
+            "RUNTIME PATCH ACTIVE: live asset catalogue + live candle validation + expanded AI review + Telegram webhook"
         )
 
 class _Finder(importlib.abc.MetaPathFinder):
@@ -194,10 +219,12 @@ def _install_result_clock_patch():
     original_format_signal = getattr(module, "format_signal", None)
     if original_format_signal is None:
         return False
+
     def patched_format_signal(result, ai):
         text = original_format_signal(result, ai)
         now_text = _rm_datetime.now(_RM_UAE).strftime("%H:%M:%S UAE")
         return _RM_TIME_RE.sub("🕐 " + now_text, text, count=1)
+
     module.format_signal = patched_format_signal
     module._RESULT_CLOCK_PATCH_INSTALLED = True
     module.log.info("RESULT CLOCK PATCH INSTALLED; outcome monitor delegated to trade_result_monitor.py")
@@ -214,7 +241,7 @@ def _bootstrap_result_clock():
 def _bootstrap_result_monitor_module():
     for _ in range(1800):
         try:
-            import trade_result_monitor
+            import trade_result_monitor  # noqa: F401
             module = sys.modules.get("__main__")
             if module is None or not getattr(module, "__file__", "").endswith("app.py"):
                 module = sys.modules.get("app")
@@ -226,11 +253,12 @@ def _bootstrap_result_monitor_module():
                 module.log.exception("RESULT MONITOR BOOTSTRAP IMPORT FAILED")
         _rm_time.sleep(0.1)
 
+
 _rm_threading.Thread(target=_bootstrap_result_clock, name="signal-clock-bootstrap", daemon=True).start()
 _rm_threading.Thread(target=_bootstrap_result_monitor_module, name="signal-result-monitor-bootstrap", daemon=True).start()
 
 try:
-    import fast_manual_entry
+    import fast_manual_entry  # noqa: F401
 except Exception:
     import logging as _fme_logging
     _fme_logging.getLogger("priyanithan").exception("FAST MANUAL ENTRY IMPORT FAILED")
