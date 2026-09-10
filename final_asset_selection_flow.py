@@ -26,6 +26,7 @@ CHOICES = {}
 PAGES = {}
 TASKS = {}
 INSTALLED = False
+CALLBACK_INSTALLED = False
 
 
 def _app():
@@ -84,7 +85,6 @@ async def _discover_live_assets(a):
     pairs.update(str(x).upper() for x in getattr(a, "MANUAL_PAIRS", []) if x)
     pairs = sorted(p for p in pairs if re.fullmatch(r"[A-Z][A-Z0-9_.-]{1,29}", str(p)))
     sem = asyncio.Semaphore(8)
-    live = []
 
     async def check(pair):
         async with sem:
@@ -150,35 +150,32 @@ async def _select_callback(update, context):
         return
     data = str(q.data or "")
     if data == "ASSET_REFRESH":
-        await _send_asset_menu(q.message.get_bot(), uid, q.message, PAGES.get(uid, 0), "🔄 REFRESHED LIVE ASSET LIST")
+        await _send_asset_menu(context.bot, uid, q.message, PAGES.get(uid, 0), "🔄 REFRESHED LIVE ASSET LIST")
         return
     if data.startswith("ASSET_PAGE:"):
         try:
             page = max(0, int(data.split(":", 1)[1]))
         except Exception:
             page = 0
-        await _send_asset_menu(q.message.get_bot(), uid, q.message, page)
+        await _send_asset_menu(context.bot, uid, q.message, page)
         return
     if not data.startswith("ASSET:"):
         return
     pair = data.split(":", 1)[1].strip().upper()
     live = CHOICES.get(uid, [])
     if pair not in live:
-        await _send_asset_menu(q.message.get_bot(), uid, q.message, 0, "⚠️ ASSET LIST EXPIRED — REFRESHED")
+        await _send_asset_menu(context.bot, uid, q.message, 0, "⚠️ ASSET LIST EXPIRED — REFRESHED")
         return
-    # One final live-candle check prevents a market that closed between menu
-    # generation and selection from becoming the active market.
     try:
         df, err = await a.get_ot_candles(pair, 60, 5)
         if df is None or not _fresh(df):
-            await _send_asset_menu(q.message.get_bot(), uid, q.message, 0, f"⚠️ {pair} IS NO LONGER LIVE")
+            await _send_asset_menu(context.bot, uid, q.message, 0, f"⚠️ {pair} IS NO LONGER LIVE")
             return
     except Exception:
-        await _send_asset_menu(q.message.get_bot(), uid, q.message, 0, f"⚠️ {pair} LIVE CHECK FAILED")
+        await _send_asset_menu(context.bot, uid, q.message, 0, f"⚠️ {pair} LIVE CHECK FAILED")
         return
     with LOCK:
         SELECTED[uid] = pair
-    # The global app scan loop calls scan_cycle on the next 5-minute boundary.
     await q.edit_message_text(
         f"✅ ASSET SELECTED: {pair}\n\n"
         "🟢 LIVE CANDLE VERIFIED\n"
@@ -202,7 +199,6 @@ async def _assets_cmd(update, context):
     if not _authorized(a, uid):
         await update.message.reply_text("❌ Not authorized. Use /access YOUR_ACCESS_CODE first.")
         return
-    # This final flow is demo/manual only; no Trade Now UI is generated.
     try:
         import fast_manual_entry
         fast_manual_entry.set_mode(uid, "DEMO")
@@ -265,16 +261,13 @@ async def _monitor_signal(a, bot, uid, pair, direction, entry, duration, signal_
         else:
             outcome = "WIN" if expiry_price < entry else ("DRAW" if expiry_price == entry else "LOSS")
         icon = {"WIN":"✅","LOSS":"❌","DRAW":"➖","UNRESOLVED":"⚠️"}[outcome]
-        await bot.send_message(
-            chat_id=uid,
-            text=(
-                f"{icon} PRIYANITHAN SIGNAL RESULT\n\n"
-                f"📈 {pair}\n↕️ {direction}\n"
-                f"💰 Entry: {entry}\n🏁 Expiry Price: {expiry_price if expiry_price is not None else 'N/A'}\n"
-                f"⏱️ Duration: {duration} MIN\n📊 Market Result: {outcome}\n\n"
-                "⚠️ RESULT ONLY — AUTO TRADE OFF"
-            )
-        )
+        await bot.send_message(chat_id=uid, text=(
+            f"{icon} PRIYANITHAN SIGNAL RESULT\n\n"
+            f"📈 {pair}\n↕️ {direction}\n"
+            f"💰 Entry: {entry}\n🏁 Expiry Price: {expiry_price if expiry_price is not None else 'N/A'}\n"
+            f"⏱️ Duration: {duration} MIN\n📊 Market Result: {outcome}\n\n"
+            "⚠️ RESULT ONLY — AUTO TRADE OFF"
+        ))
         if outcome == "LOSS":
             with LOCK:
                 if SELECTED.get(uid) == pair:
@@ -335,24 +328,19 @@ async def _scan_selected(a, application):
             now = time.time()
             arrow = "⬆️" if direction == "UP" else "⬇️"
             patterns = "\n".join("• " + str(x) for x in (result.get("patterns") or [])[:6])
-            await application.bot.send_message(
-                chat_id=uid,
-                text=(
-                    "🔥 PRIYANITHAN AI SIGNAL 🔥\n\n"
-                    f"📈 {pair}\n\n{arrow} {direction}\n\n"
-                    f"💰 Entry: {entry}\n\n⏱️ Duration: {duration} MIN\n\n"
-                    f"🤖 AI Confidence: {confidence}%\n\n"
-                    f"📊 Technical Confidence: {int(result.get('confidence', 0))}%\n"
-                    f"🧩 1m + 5m Live Market Check\n"
-                    f"🕯️ 5m Trend: {result.get('higher_tf_direction', 'UNKNOWN')}\n\n"
-                    f"{patterns}\n\n"
-                    f"🕐 {datetime.now(UAE).strftime('%H:%M:%S UAE')}\n\n"
-                    "🧠 Candice AI: APPROVED\n\n"
-                    "⚠️ MANUAL TRADE — AUTO TRADE OFF"
-                )
-            )
-            # Register an independent result monitor. This bypasses the old
-            # Trade Now sender completely, so no stale/deep-link UI is attached.
+            await application.bot.send_message(chat_id=uid, text=(
+                "🔥 PRIYANITHAN AI SIGNAL 🔥\n\n"
+                f"📈 {pair}\n\n{arrow} {direction}\n\n"
+                f"💰 Entry: {entry}\n\n⏱️ Duration: {duration} MIN\n\n"
+                f"🤖 AI Confidence: {confidence}%\n\n"
+                f"📊 Technical Confidence: {int(result.get('confidence', 0))}%\n"
+                f"🧩 1m + 5m Live Market Check\n"
+                f"🕯️ 5m Trend: {result.get('higher_tf_direction', 'UNKNOWN')}\n\n"
+                f"{patterns}\n\n"
+                f"🕐 {datetime.now(UAE).strftime('%H:%M:%S UAE')}\n\n"
+                "🧠 Candice AI: APPROVED\n\n"
+                "⚠️ MANUAL TRADE — AUTO TRADE OFF"
+            ))
             task = asyncio.create_task(_monitor_signal(a, application.bot, uid, pair, direction, entry, duration, now), name=f"selected-result-{pair}-{uid}")
             TASKS.setdefault(uid, set()).add(task)
             task.add_done_callback(lambda t, u=uid: TASKS.get(u, set()).discard(t))
@@ -386,22 +374,21 @@ def _patch_start_handler(a, application):
 
 
 def install():
-    global INSTALLED
+    global INSTALLED, CALLBACK_INSTALLED
     a = _app()
     application = getattr(a, "telegram_application", None) if a else None
     if not a or not application:
         return False
     _patch_start_handler(a, application)
-    # Replace the old broad scanner with the selected-asset scanner.
     a.scan_cycle = _scan_cycle
     a._FINAL_SELECTED_FLOW = True
     try:
         commands = [getattr(h, "commands", set()) for group in application.handlers.values() for h in group]
         if not any("assets" in c for c in commands):
             application.add_handler(CommandHandler("assets", _assets_cmd))
-        if not getattr(application, "_FINAL_ASSET_CALLBACK", False):
+        if not CALLBACK_INSTALLED:
             application.add_handler(CallbackQueryHandler(_select_callback, pattern=r"^ASSET(?:[:_])"))
-            application._FINAL_ASSET_CALLBACK = True
+            CALLBACK_INSTALLED = True
     except Exception as exc:
         a.log.warning("FINAL ASSET SELECTOR HANDLER INSTALL FAILED: %s", exc)
     INSTALLED = True
