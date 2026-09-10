@@ -2,8 +2,11 @@
 
 Normalizes successful Groq responses when the model returns an explicit
 trading decision but wraps it in prose/markdown or labelled fields instead
-of clean JSON. It never invents a decision. AUTO TRADE remains OFF.
+of clean JSON. It also requests Groq JSON-object mode so the normal parser
+receives machine-readable output. It never invents a decision.
+AUTO TRADE remains OFF.
 """
+import copy
 import json
 import re
 import requests
@@ -17,6 +20,21 @@ _installed = False
 def _extract(text):
     if not text:
         return None
+
+    # Structured response content can arrive as a list of content blocks.
+    if isinstance(text, list):
+        parts = []
+        for item in text:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        text = "".join(parts)
+    if isinstance(text, dict):
+        if all(k in text for k in _REQUIRED):
+            return dict(text)
+        return None
+
     text = str(text).strip()
 
     # JSON object embedded in prose or a markdown code fence.
@@ -30,7 +48,7 @@ def _extract(text):
 
     # Some OpenAI-compatible responses use labelled fields instead of JSON.
     patterns = {
-        "decision": r"(?:decision)\s*[:=]\s*([A-Za-z _-]+)",
+        "decision": r"(?:decision)\s*[:=]\s*(APPROVE|REJECT)\b",
         "direction": r"(?:direction)\s*[:=]\s*(UP|DOWN|NO\s*SIGNAL)\b",
         "confidence": r"(?:confidence)\s*[:=]\s*(\d{1,3})\s*%?",
         "duration_min": r"(?:duration_min|duration|expiry|expiration)\s*[:=]\s*(\d{1,2})\s*(?:min(?:ute)?s?)?\b",
@@ -52,6 +70,19 @@ def _extract(text):
 
 
 def _post(*args, **kwargs):
+    # Groq supports OpenAI-compatible JSON Object Mode. Add it only for Groq,
+    # leaving other providers untouched. Never alter the user's decision data.
+    try:
+        url = str(args[0] if args else kwargs.get("url", ""))
+        if "api.groq.com" in url:
+            payload = kwargs.get("json")
+            if isinstance(payload, dict):
+                payload = copy.deepcopy(payload)
+                payload["response_format"] = {"type": "json_object"}
+                kwargs["json"] = payload
+    except Exception:
+        pass
+
     response = _orig_post(*args, **kwargs)
     try:
         url = str(args[0] if args else kwargs.get("url", ""))
@@ -66,11 +97,18 @@ def _post(*args, **kwargs):
         first = choices[0]
         msg = first.get("message") or {}
         content = msg.get("content") if isinstance(msg, dict) else None
-        if isinstance(content, (dict, list)):
-            return response
 
-        text = content or first.get("text") or body.get("output_text")
-        parsed = _extract(text)
+        # Also inspect common structured-output fields before falling back to text.
+        structured = None
+        if isinstance(msg, dict):
+            structured = msg.get("parsed") or msg.get("json")
+        if structured is None and isinstance(first, dict):
+            structured = first.get("parsed") or first.get("json")
+        parsed = _extract(structured) if structured is not None else None
+
+        if parsed is None:
+            text = content or first.get("text") or body.get("output_text")
+            parsed = _extract(text)
         if not parsed:
             return response
 
@@ -88,11 +126,14 @@ def _post(*args, **kwargs):
             return response
         if not 0 <= confidence <= 100 or duration not in _ALLOWED_DURATIONS:
             return response
+        if not str(parsed.get("reason", "")).strip():
+            return response
 
         parsed["decision"] = decision
         parsed["direction"] = "NO SIGNAL" if direction == "NO_SIGNAL" else direction
         parsed["confidence"] = confidence
         parsed["duration_min"] = duration
+        parsed["reason"] = str(parsed.get("reason", "")).strip()
 
         normalized = dict(body)
         normalized["choices"] = [
