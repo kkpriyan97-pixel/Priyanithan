@@ -35,8 +35,6 @@ def _patch():
     except Exception:
         return False
 
-    # Keep the requested supported fixed-time set consistent across the final
-    # gate. No order execution is introduced here.
     signal_engine.EXPIRIES = (1, 2, 4, 5, 15)
 
     if not getattr(app, "_SIGNAL_GATE_COMPAT_V1", False):
@@ -74,5 +72,6 @@ def _boot():
         except Exception:
             pass
         time.sleep(0.1)
+
 
 threading.Thread(target=_boot, name="signal-gate-compat", daemon=True).start()
