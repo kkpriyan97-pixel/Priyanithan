@@ -20,31 +20,40 @@ try:
 except Exception:
     pass
 
-# Normalize successful Groq responses when the model returned explicit
-# decision fields without valid JSON. This never invents a decision.
+# Normalize successful Groq responses using strict Structured Outputs when
+# available. This never invents a decision.
 try:
     import ai_response_hotfix
 except Exception:
     pass
 
-# Reference-style technical method: PSAR, moving averages, Donchian,
-# MACD and ROC. It patches app.analyze_pair after app.py is loaded.
+# Final reference-style technical method: PSAR, MA, EMA, Donchian, MACD, ROC
+# with a live candle trigger and a complete numeric snapshot for AI.
 try:
     import indicator_method_hotfix
 except Exception:
     pass
 
-# Make the existing AI confirmation explicitly evaluate the same indicator
-# method rather than using a generic technical prompt.
+# Final AI confirmation prompt: the model receives the exact numeric indicator
+# snapshot and must confirm/reject it rather than infer missing values.
 try:
     import ai_method_prompt_hotfix
 except Exception:
     pass
 
+# Final scanner: broad broker/profitability universe + 1m trigger + 5m context.
 try:
     import signal_engine
 except Exception:
     pass
+
+# Scan every minute so a 1-minute/short-expiry opportunity is not missed
+# between the old five-minute scan boundaries.
+try:
+    import scan_cadence_hotfix
+except Exception:
+    pass
+
 try:
     import runtime_fixes
 except Exception:
@@ -58,6 +67,5 @@ try:
 except Exception:
     pass
 
-# NOTE: demo_lock_hotfix.py is intentionally retained in the repository for
-# rollback/reference, but is no longer imported. The active flow supports
-# explicit DEMO or REAL selection; AUTO_TRADE remains OFF.
+# demo_lock_hotfix.py is retained for rollback/reference only.
+# AUTO_TRADE remains OFF.
