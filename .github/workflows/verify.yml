@@ -74,7 +74,8 @@ jobs:
 
           assert "ALLOWED_EXPIRIES = (1, 2, 3, 5, 10, 15)" in result
           assert "SIGNAL RESULT ONLY — MANUAL TRADE / AUTO TRADE OFF" in result
-          assert "Duration\\s*:\\s*(1|2|3|5|10|15)" in fixes
+          assert "Expiry|Duration" in fixes
+          assert "(1|2|3|5|10|15)" in fixes
           assert "runtime_fixes" in init
           assert "signal_logo" not in init
 
