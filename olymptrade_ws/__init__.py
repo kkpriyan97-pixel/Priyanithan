@@ -91,4 +91,9 @@ try:
 except Exception:
     pass
 
+try:
+    import final_telegram_flow_lock
+except Exception:
+    pass
+
 # AUTO_TRADE remains OFF.
