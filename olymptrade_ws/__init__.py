@@ -16,6 +16,13 @@ try:
 except Exception:
     pass
 
+# Clean up stale/invalid AI provider environment variables before the
+# manual-entry AI patch builds its provider chain.
+try:
+    import provider_cleanup_hotfix
+except Exception:
+    pass
+
 try:
     import signal_engine
 except Exception:
