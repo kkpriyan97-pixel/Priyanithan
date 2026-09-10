@@ -33,8 +33,6 @@ try:
 except Exception:
     pass
 
-# Limit the number of AI confirmations in one scan to protect small-provider
-# token-per-minute budgets. No signal is forced when AI is unavailable.
 try:
     import ai_rate_limit_hotfix
 except Exception:
@@ -60,6 +58,11 @@ except Exception:
     pass
 try:
     import analysis_hotfix
+except Exception:
+    pass
+
+try:
+    import trade_asset_selection_hotfix
 except Exception:
     pass
 
