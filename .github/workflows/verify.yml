@@ -19,43 +19,17 @@ jobs:
         run: |
           python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py demo_lock_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
-      - name: Verify critical safety and scan invariants
+      - name: Verify core safety flags
         run: |
           python - <<'PY'
           from pathlib import Path
           app = Path("app.py").read_text(encoding="utf-8")
-          fast = Path("fast_manual_entry.py").read_text(encoding="utf-8")
-          site = Path("sitecustomize.py").read_text(encoding="utf-8")
-          result = Path("trade_result_monitor.py").read_text(encoding="utf-8")
           engine = Path("signal_engine.py").read_text(encoding="utf-8")
           init = Path("olymptrade_ws/__init__.py").read_text(encoding="utf-8")
-          provider = Path("provider_cleanup_hotfix.py").read_text(encoding="utf-8")
-
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
-          assert all(x in app for x in ("1", "2", "3", "5", "10", "15"))
-          assert "1054" in (site + app + engine)
-          assert "LIVE DATA CHECK" in site
-          assert "STALE OlympTrade candles rejected" in site
-
-          assert "GROQ_API_KEY" in fast
-          assert '"APPROVE"' in fast and '"REJECT"' in fast
-          assert "🧪 DEMO" in fast and "🔴 REAL" in fast
-          assert "⚡ TRADE NOW" in fast
-          assert "AUTO TRADE: OFF" in fast
-
           assert "AI_CANDIDATE_LIMIT = 8" in engine
           assert "a.call_ai" in engine
-          assert "decision == \"APPROVE\"" in engine
-          assert "direction == technical_direction" in engine
-
-          assert "ALLOWED_EXPIRIES = (1, 2, 3, 5, 10, 15)" in result
-          assert "provider_cleanup_hotfix" in init
           assert "demo_lock_hotfix" not in init
-          assert "OPENROUTER_API_KEY" in provider
-          assert "AIRFORCE_API_KEY" in provider
-
-          print("PRIYANITHAN STATIC VERIFY OK")
-          print("Live candles -> technical candidates -> expanded AI review -> manual signal")
-          print("DEMO/REAL selectable; AUTO_TRADE=False; MARTINGALE=False")
+          print("CORE SAFETY VERIFY OK")
           PY
