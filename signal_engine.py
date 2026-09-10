@@ -119,10 +119,12 @@ def _install():
                 a.log.warning("CLASSIC TECHNICAL SCAN FAILED %s: %s", pair, exc)
 
         candidates.sort(key=lambda x: float(x.get("confidence", 0)), reverse=True)
-        ai_limit = max(1, min(AI_CANDIDATE_LIMIT, int(getattr(a, "MAX_AI_CANDIDATES", AI_CANDIDATE_LIMIT))))
+        # The signal engine owns the AI review budget. Do not inherit the
+        # legacy app.py cap of 2; every technical candidate should reach AI.
+        ai_limit = min(AI_CANDIDATE_LIMIT, len(candidates))
         a.log.info(
             "CLASSIC TECHNICAL SUMMARY: assets=%s candidates=%s technical_rejects=%s candle_failures=%s ai_candidates=%s",
-            len(universe), len(candidates), technical_rejects, candle_failures, min(len(candidates), ai_limit),
+            len(universe), len(candidates), technical_rejects, candle_failures, ai_limit,
         )
 
         ai_attempts = 0
