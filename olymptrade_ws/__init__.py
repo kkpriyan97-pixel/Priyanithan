@@ -32,3 +32,7 @@ try:
     import analysis_hotfix
 except Exception:
     pass
+try:
+    import demo_lock_hotfix
+except Exception:
+    pass
