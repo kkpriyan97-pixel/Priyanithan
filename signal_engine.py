@@ -45,12 +45,7 @@ def _classic_signal_text(result, ai):
 
 
 async def _wait_for_live_assets(a, timeout=45):
-    """Wait for the broker's 1054 instrument catalogue before scanning.
-
-    /start can arrive immediately after the service boots. Previously the
-    scanner could run before instrument discovery completed, producing a
-    false-looking NO QUALIFIED SIGNAL even though no assets had been scanned.
-    """
+    """Wait for the broker's 1054 instrument catalogue before scanning."""
     if not getattr(a, "AUTO_DISCOVER_ASSETS", False):
         return True
     deadline = time.time() + timeout
@@ -103,7 +98,12 @@ def _install():
 
         candidates.sort(key=lambda x: float(x.get("confidence", 0)), reverse=True)
         a.log.info("CLASSIC TECHNICAL CANDIDATES: %s", len(candidates))
-        for result in candidates[:max(1, min(int(a.MAX_AI_CANDIDATES), 2))]:
+
+        # Give AI a broader set of technically directional candidates. The
+        # quality gate is unchanged: APPROVE + matching direction + confidence
+        # threshold + valid expiry are still mandatory before a signal is sent.
+        ai_limit = max(1, min(int(getattr(a, "MAX_AI_CANDIDATES", 5)), 5))
+        for result in candidates[:ai_limit]:
             try:
                 prompt = a.ai_prompt(result)
                 ai, err = await asyncio.wait_for(asyncio.to_thread(a.call_ai, prompt), timeout=30)
