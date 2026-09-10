@@ -76,4 +76,9 @@ try:
 except Exception:
     pass
 
+try:
+    import final_five_minute_cadence_hotfix
+except Exception:
+    pass
+
 # AUTO_TRADE remains OFF.
