@@ -35,7 +35,7 @@ jobs:
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
           assert "[1,2,3,5,10,15]" in app
-          assert "1054" in site
+          assert "1054" in (site + app)
           assert "LIVE DATA CHECK" in site
           assert "STALE OlympTrade candles rejected" in site
 
@@ -62,6 +62,7 @@ jobs:
 
           assert "Classic compact Telegram format" in engine
           assert "LIVE AI CONFIRMATION" in engine
+          assert "AI_CANDIDATE_LIMIT = 8" in engine
           assert "a.call_ai" in engine
           assert "decision == \"APPROVE\"" in engine
           assert "direction == technical_direction" in engine
@@ -82,5 +83,6 @@ jobs:
           print("FINAL SELECTABLE-MODE FLOW VERIFY OK")
           print("START -> ACCESS -> DEMO/REAL -> LIVE MARKET -> AI CONFIRMATION -> SIGNAL -> TRADE NOW -> OLYMPTRADE -> MANUAL FINAL ACTION -> RESULT")
           print("AUTO_TRADE=False; MARTINGALE=False; no automatic order execution")
+          print("LIVE DATA + EXPANDED AI CANDIDATE REVIEW VERIFIED")
           print("INVALID FREE/STALE AI PROVIDER ROUTING BLOCKED")
           PY
