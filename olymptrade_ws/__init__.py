@@ -28,3 +28,7 @@ try:
     import scan_bootstrap_fix
 except Exception:
     pass
+try:
+    import analysis_hotfix
+except Exception:
+    pass
