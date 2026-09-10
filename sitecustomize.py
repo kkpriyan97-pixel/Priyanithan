@@ -36,11 +36,6 @@ class _Loader(importlib.abc.Loader):
             '                universe = MANUAL_PAIRS[:] if MANUAL_PAIRS else PAIRS[:]\\n'
         )
         source = source.replace(old_universe, new_universe)
-
-        # The environment value was previously capped at 2, which meant a
-        # perfectly valid technical candidate could never reach AI review.
-        # Keep the user's confidence threshold untouched but guarantee a
-        # meaningful AI review budget for each cycle.
         source = source.replace(
             'MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))',
             'MAX_AI_CANDIDATES = 8',
@@ -53,7 +48,6 @@ class _Loader(importlib.abc.Loader):
             'MAX_AI_CANDIDATES = min(int(os.getenv("MAX_AI_CANDIDATES", "5")), 5)',
             'MAX_AI_CANDIDATES = 8',
         )
-
         source = source.replace(
             'for m in (OPENROUTER_MODEL, "openrouter/free", "minimax/minimax-m3:free", "google/gemma-4-26b-a4b-it:free"):',
             'for m in (OPENROUTER_MODEL,):',
@@ -70,7 +64,6 @@ class _Loader(importlib.abc.Loader):
             '                    ai = normalize_ai_decision(ai)\\n'
         )
         source = source.replace(retry_block, '                    ai = normalize_ai_decision(ai)\\n')
-
         old_candle = (
             '        log.info("CANDLE NORMALIZED: pair=%s rows=%s", pair, rows)\\n'
             '        if df is None or rows < 220:\\n'
@@ -97,7 +90,6 @@ class _Loader(importlib.abc.Loader):
             '        return df.tail(count).reset_index(drop=True), None\\n'
         )
         source = source.replace(old_candle, new_candle)
-
         source = source.replace(
             'f"📊 Assets: {len(PAIRS)} (auto-discovered)\\n"',
             'f"📊 Assets: {len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS)} (live broker catalogue)\\n"',
@@ -106,7 +98,6 @@ class _Loader(importlib.abc.Loader):
             'log.info("OlympTrade connection established. Assets available for scanner: %s", len(PAIRS))',
             'log.info("OlympTrade connection established. Assets available for scanner: %s", len(discovered_assets) if AUTO_DISCOVER_ASSETS else len(PAIRS))',
         )
-
         webhook_globals = (
             'runtime_loop = None\\n'
             'latest_candles = {}\\n'
@@ -117,7 +108,6 @@ class _Loader(importlib.abc.Loader):
             'latest_candles = {}\\n'
         )
         source = source.replace(webhook_globals, webhook_globals_new)
-
         webhook_anchor = (
             '@app.get("/health")\\n'
             'def health():\\n'
@@ -145,7 +135,6 @@ class _Loader(importlib.abc.Loader):
             '        return "Webhook processing failed", 500\\n\\n'
         )
         source = source.replace(webhook_anchor, webhook_code)
-
         source = source.replace(
             'async def telegram_runtime(application):\\n'
             '    global runtime_loop\\n'
@@ -168,14 +157,12 @@ class _Loader(importlib.abc.Loader):
             '        await asyncio.Event().wait()\\n'
         )
         source = source.replace(polling_block, webhook_block)
-
         source = source.replace(
             '        if application.updater and application.updater.running: await application.updater.stop()\\n',
             '        if application.updater and application.updater.running:\\n'
             '            await application.updater.stop()\\n'
         )
         source = source.replace('APP_VERSION = "5.0-flex-adaptive-1-2-3-5-10-15"', 'APP_VERSION = "6.0-live-uae-webhook"')
-
         exec(compile(source, self.original.path, "exec"), module.__dict__)
         logging = __import__("logging")
         logging.getLogger("priyanithan").warning(
@@ -262,3 +249,9 @@ try:
 except Exception:
     import logging as _fme_logging
     _fme_logging.getLogger("priyanithan").exception("FAST MANUAL ENTRY IMPORT FAILED")
+
+try:
+    import final_asset_selection_flow  # noqa: F401
+except Exception:
+    import logging as _fas_logging
+    _fas_logging.getLogger("priyanithan").exception("FINAL ASSET SELECTION FLOW IMPORT FAILED")
