@@ -65,9 +65,6 @@ def _install():
         candle="BULLISH" if c>prev else ("BEARISH" if c<prev else "FLAT")
         candle_trigger=(direction=="UP" and candle=="BULLISH") or (direction=="DOWN" and candle=="BEARISH")
         adx=float(base.get("adx",0) or 0); rsi=float(base.get("rsi",50) or 50)
-        core_ok=votes>=3 and abs(up-down)>=1 and candle_trigger
-        strong=votes>=4 and abs(up-down)>=2
-        signal=direction if (core_ok or strong) else "NO SIGNAL"
         score=votes*10
         score += 10 if candle_trigger else 0
         score += 5 if body_ratio>=.55 else 0
@@ -75,6 +72,12 @@ def _install():
         score += 5 if ((direction=="UP" and rsi<70) or (direction=="DOWN" and rsi>30)) else 0
         score += 5 if (ma_cross==direction or ema_cross==direction or macd_cross==direction) else 0
         score=min(100,score)
+        # Do not require the latest candle to agree in every case. Short-lived
+        # reversals can close with a counter-color candle while the six-indicator
+        # structure remains aligned. Let AI + 5m context perform the final gate.
+        core_ok=votes>=3 and abs(up-down)>=1 and (candle_trigger or score>=40)
+        strong=votes>=4 and abs(up-down)>=2
+        signal=direction if (core_ok or strong) else "NO SIGNAL"
         patterns=[]
         patterns.append("Parabolic SAR Reversal" if psar_rev else ("Parabolic SAR Bullish" if vals["psar"]=="UP" else "Parabolic SAR Bearish"))
         patterns.append("Moving Average Crossover" if ma_cross!="NONE" else "Moving Average Trend")
