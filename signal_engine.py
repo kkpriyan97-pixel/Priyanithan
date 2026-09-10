@@ -60,12 +60,7 @@ async def _wait_for_live_assets(a, timeout=45):
 
 
 def _asset_priority(pair):
-    """Prefer common liquid-looking symbols while retaining broker discovery.
-
-    The scanner still uses only broker-discovered instruments; this merely
-    prevents alphabetical ordering from spending the AI budget on obscure
-    symbols when familiar FX symbols are available.
-    """
+    """Prefer common liquid-looking symbols while retaining broker discovery."""
     p = str(pair).upper()
     preferred = (
         "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
@@ -188,13 +183,12 @@ def _install():
             len(universe), len(candidates), ai_attempts, ai_rejects, ai_failures,
         )
 
-        # Never disguise an AI outage as a market rejection. This makes the
-        # Telegram status actionable while keeping the signal gate unchanged.
         if ai_attempts and ai_failures == ai_attempts and last_ai_error:
             await a.send_to_recipients(
                 application.bot,
                 "⚠️ AI CONFIRMATION UNAVAILABLE\n\n"
-                "Live technical candidates were found, but AI confirmation could not be completed.\n"
+                f"Live technical candidates found: {len(candidates)}\n"
+                "AI could not complete confirmation.\n"
                 "⏱️ Next scan: automatic 5-minute cycle."
             )
             return
@@ -202,7 +196,12 @@ def _install():
         await a.send_to_recipients(
             application.bot,
             "🚫 NO QUALIFIED SIGNAL\n\n"
-            "Live technical candidates were checked with AI, but none passed the final confirmation gate.\n"
+            f"📊 Assets scanned: {len(universe)}\n"
+            f"📈 Technical candidates: {len(candidates)}\n"
+            f"🤖 AI checks: {ai_attempts}\n"
+            f"❌ AI rejects: {ai_rejects}\n"
+            f"⚠️ AI failures: {ai_failures}\n\n"
+            "No setup passed the final confirmation gate.\n"
             "⏱️ Next scan: automatic 5-minute cycle."
         )
 
