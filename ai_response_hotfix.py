@@ -1,9 +1,8 @@
 """Runtime hotfix for OpenAI-compatible AI responses.
 
-Normalizes successful Groq responses when the model returns an explicit
-trading decision but wraps it in prose/markdown or labelled fields instead
-of clean JSON. It also requests Groq JSON-object mode so the normal parser
-receives machine-readable output. It never invents a decision.
+Groq GPT-OSS supports strict Structured Outputs. Request the exact trading
+schema so successful Groq calls return machine-readable JSON. Normalize a
+few compatible response shapes as a fallback. Never invent a decision.
 AUTO TRADE remains OFF.
 """
 import copy
@@ -13,31 +12,33 @@ import requests
 
 _REQUIRED = ("decision", "direction", "confidence", "duration_min", "reason")
 _ALLOWED_DURATIONS = {1, 2, 3, 5, 15}
+_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": ["APPROVE", "REJECT"]},
+        "direction": {"type": "string", "enum": ["UP", "DOWN", "NO SIGNAL"]},
+        "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+        "duration_min": {"type": "integer", "enum": sorted(_ALLOWED_DURATIONS)},
+        "reason": {"type": "string"},
+    },
+    "required": list(_REQUIRED),
+    "additionalProperties": False,
+}
 _orig_post = requests.post
 _installed = False
 
 
-def _extract(text):
-    if not text:
+def _extract(value):
+    if not value:
         return None
-
-    # Structured response content can arrive as a list of content blocks.
-    if isinstance(text, list):
-        parts = []
-        for item in text:
-            if isinstance(item, dict):
-                parts.append(str(item.get("text") or item.get("content") or ""))
-            else:
-                parts.append(str(item))
-        text = "".join(parts)
-    if isinstance(text, dict):
-        if all(k in text for k in _REQUIRED):
-            return dict(text)
-        return None
-
-    text = str(text).strip()
-
-    # JSON object embedded in prose or a markdown code fence.
+    if isinstance(value, dict):
+        return dict(value) if all(k in value for k in _REQUIRED) else None
+    if isinstance(value, list):
+        value = "".join(
+            str(item.get("text") or item.get("content") or "") if isinstance(item, dict) else str(item)
+            for item in value
+        )
+    text = str(value).strip()
     for match in re.finditer(r"\{", text):
         try:
             obj, _ = json.JSONDecoder().raw_decode(text[match.start():])
@@ -45,8 +46,6 @@ def _extract(text):
                 return obj
         except Exception:
             continue
-
-    # Some OpenAI-compatible responses use labelled fields instead of JSON.
     patterns = {
         "decision": r"(?:decision)\s*[:=]\s*(APPROVE|REJECT)\b",
         "direction": r"(?:direction)\s*[:=]\s*(UP|DOWN|NO\s*SIGNAL)\b",
@@ -59,56 +58,61 @@ def _extract(text):
         m = re.search(pattern, text, re.I | re.S)
         if not m:
             return None
-        value = m.group(1).strip().strip("`* ")
+        v = m.group(1).strip().strip("`* ")
         if key in {"confidence", "duration_min"}:
             try:
-                value = int(value)
+                v = int(v)
             except Exception:
                 return None
-        out[key] = value
+        out[key] = v
+    return out
+
+
+def _normalize_request(kwargs):
+    payload = kwargs.get("json")
+    if not isinstance(payload, dict):
+        return kwargs
+    out = dict(kwargs)
+    payload = copy.deepcopy(payload)
+    model = str(payload.get("model", "")).lower()
+    if model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "trading_signal_decision",
+                "strict": True,
+                "schema": _SCHEMA,
+            },
+        }
+        payload["include_reasoning"] = False
+        payload.setdefault("reasoning_effort", "low")
+        out["json"] = payload
     return out
 
 
 def _post(*args, **kwargs):
-    # Groq supports OpenAI-compatible JSON Object Mode. Add it only for Groq,
-    # leaving other providers untouched. Never alter the user's decision data.
-    try:
-        url = str(args[0] if args else kwargs.get("url", ""))
-        if "api.groq.com" in url:
-            payload = kwargs.get("json")
-            if isinstance(payload, dict):
-                payload = copy.deepcopy(payload)
-                payload["response_format"] = {"type": "json_object"}
-                kwargs["json"] = payload
-    except Exception:
-        pass
-
+    url = str(args[0] if args else kwargs.get("url", ""))
+    if "api.groq.com" in url:
+        kwargs = _normalize_request(kwargs)
     response = _orig_post(*args, **kwargs)
     try:
-        url = str(args[0] if args else kwargs.get("url", ""))
         if "api.groq.com" not in url or not response.ok:
             return response
-
         body = response.json()
         choices = body.get("choices") if isinstance(body, dict) else None
         if not choices or not isinstance(choices[0], dict):
             return response
-
         first = choices[0]
         msg = first.get("message") or {}
-        content = msg.get("content") if isinstance(msg, dict) else None
-
-        # Also inspect common structured-output fields before falling back to text.
         structured = None
         if isinstance(msg, dict):
             structured = msg.get("parsed") or msg.get("json")
-        if structured is None and isinstance(first, dict):
+        if structured is None:
             structured = first.get("parsed") or first.get("json")
-        parsed = _extract(structured) if structured is not None else None
-
+        parsed = _extract(structured)
         if parsed is None:
-            text = content or first.get("text") or body.get("output_text")
-            parsed = _extract(text)
+            content = msg.get("content") if isinstance(msg, dict) else None
+            parsed = _extract(content or first.get("text") or body.get("output_text"))
         if not parsed:
             return response
 
@@ -119,22 +123,23 @@ def _post(*args, **kwargs):
             duration = int(parsed.get("duration_min"))
         except Exception:
             return response
-
         if decision not in {"APPROVE", "REJECT"}:
             return response
         if direction not in {"UP", "DOWN", "NO SIGNAL", "NO_SIGNAL"}:
             return response
         if not 0 <= confidence <= 100 or duration not in _ALLOWED_DURATIONS:
             return response
-        if not str(parsed.get("reason", "")).strip():
+        reason = str(parsed.get("reason", "")).strip()
+        if not reason:
             return response
 
-        parsed["decision"] = decision
-        parsed["direction"] = "NO SIGNAL" if direction == "NO_SIGNAL" else direction
-        parsed["confidence"] = confidence
-        parsed["duration_min"] = duration
-        parsed["reason"] = str(parsed.get("reason", "")).strip()
-
+        parsed.update(
+            decision=decision,
+            direction="NO SIGNAL" if direction == "NO_SIGNAL" else direction,
+            confidence=confidence,
+            duration_min=duration,
+            reason=reason,
+        )
         normalized = dict(body)
         normalized["choices"] = [
             dict(first, message=dict(msg, content=json.dumps(parsed, separators=(",", ":"))))
@@ -142,7 +147,6 @@ def _post(*args, **kwargs):
         response._content = json.dumps(normalized).encode("utf-8")
         response.headers["Content-Type"] = "application/json"
     except Exception:
-        # Never turn a provider response into a forced trading decision.
         pass
     return response
 
