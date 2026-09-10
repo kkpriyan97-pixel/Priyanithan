@@ -304,6 +304,8 @@ def patch_access(a):
     changed = False
     for group in getattr(application, "handlers", {}).values():
         for handler in group:
+            if "access" not in getattr(handler.callback, "commands", set()) if False else False:
+                pass
             if "access" not in getattr(handler, "commands", set()) or getattr(handler.callback, "_FINAL_ACCESS", False):
                 continue
             async def final_access(update, context):
@@ -333,8 +335,6 @@ def install_routes(a):
     if flask is None:
         return False
     rules = {rule.rule for rule in flask.url_map.iter_rules()}
-    # Flask 3.x permanently locks setup after the first request. Never attempt
-    # add_url_rule after that point; startup install in app.py owns this phase.
     if getattr(flask, "_got_first_request", False):
         return "/trade/mode" in rules and "/trade/app" in rules
 
@@ -395,6 +395,7 @@ def install_routes(a):
             if selected_mode not in ("DEMO", "REAL"):
                 return "Select DEMO or REAL first.", 403
             label = "⬆️ UP / BUY" if direction == "UP" else "⬇️ DOWN / SELL"
+            platform_pair_url = PLATFORM_URL + "?" + urlencode({"pair": pair})
             return (
                 "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
                 "<title>Priyanithan Trade Now</title><style>body{margin:0;background:#0b1220;color:#fff;font-family:system-ui;padding:18px}"
@@ -402,7 +403,7 @@ def install_routes(a):
                 f"<body><div class='card'><h2>⚡ TRADE NOW</h2><div class='row'><span class='label'>MODE</span><span class='value'>{html.escape(selected_mode)}</span></div>"
                 f"<div class='row'><span class='label'>ASSET</span><span class='value'>{html.escape(pair)}</span></div><div class='row'><span class='label'>DIRECTION</span><span class='value'>{label}</span></div>"
                 f"<div class='row'><span class='label'>ENTRY / PRICE REF</span><span class='value'>{html.escape(entry)}</span></div><div class='row'><span class='label'>EXPIRY / TIME</span><span class='value'>{expiry} MIN</span></div>"
-                f"<a class='open' href='{html.escape(PLATFORM_URL, quote=True)}'>OPEN OLYMPTRADE PLATFORM</a><p>Signal parameters are shown here for manual entry. The official Olymptrade platform opens next.</p>"
+                f"<a class='open' href='{html.escape(platform_pair_url, quote=True)}'>OPEN OLYMPTRADE PLATFORM — {html.escape(pair)}</a><p>Signal asset is passed to the Olymptrade platform URL. Confirm the selected asset, direction and expiry manually before trading.</p>"
                 "<b>⚠️ AUTO TRADE: OFF — final broker action is manual.</b></div></body></html>"
             )
         flask.add_url_rule("/trade/app", endpoint="final_trade_app", view_func=trade_app)
@@ -447,10 +448,6 @@ def install():
             a.log.info("FINAL FLOW READY: Flask routes locked before first request; manual trade only")
         return bool(routes_ok)
 
-
-# Do one safe installation when imported. The explicit app.py startup call runs
-# immediately before the Flask server starts. This function is idempotent and
-# never modifies Flask setup after the first request.
 try:
     install()
 except Exception:
@@ -458,9 +455,6 @@ except Exception:
 
 
 def bootstrap():
-    # Handler patching may require telegram_application, which is assigned only
-    # after the Telegram runtime starts. This loop never adds Flask routes after
-    # first request, so it cannot trigger Flask's setup AssertionError.
     for _ in range(1800):
         try:
             a = app()
