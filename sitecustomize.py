@@ -71,3 +71,7 @@ try:
     import candice_research_brain_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_ai_memory_context_hotfix  # noqa: F401
+except Exception:
+    pass
