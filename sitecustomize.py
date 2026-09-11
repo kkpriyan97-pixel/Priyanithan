@@ -75,3 +75,7 @@ try:
     import candice_ai_memory_context_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_timeframe_strategy_brain_hotfix  # noqa: F401
+except Exception:
+    pass
