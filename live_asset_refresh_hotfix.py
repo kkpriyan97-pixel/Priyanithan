@@ -1,21 +1,27 @@
-"""Ensure Telegram always exposes a live-asset refresh control.
+"""Ensure Telegram live-asset refresh uses the same running app state.
 
-The native send_asset_menu() previously sent the no-live state as plain text,
-so users had no inline button to retry discovery. This runtime patch keeps the
-strict fresh-candle requirement and adds a refresh button to that state.
-No broker order execution is enabled here.
+Render starts app.py as __main__. Resolve that module so Telegram discovery,
+broker connection state, and asset cache are shared. No broker order execution.
 """
-import asyncio
+import sys
 import threading
 import time
 
 PATCHED = False
 
 
+def _app():
+    module = sys.modules.get("__main__")
+    if module is not None and getattr(module, "__file__", "").endswith("app.py"):
+        return module
+    import app
+    return app
+
+
 def _patch():
     global PATCHED
     try:
-        import app
+        app = _app()
     except Exception:
         return False
 
