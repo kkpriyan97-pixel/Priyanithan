@@ -7,11 +7,13 @@ from zoneinfo import ZoneInfo
 
 UAE_TZ = ZoneInfo("Asia/Dubai")
 
+
 def _app():
     m = sys.modules.get("__main__")
     if m is not None and getattr(m, "__file__", "").endswith("app.py"):
         return m
     return sys.modules.get("app")
+
 
 def _session_text(a):
     now = datetime.now(timezone.utc)
@@ -25,14 +27,23 @@ def _session_text(a):
     h, r = divmod(remaining, 3600)
     m, s = divmod(r, 60)
     mode = "🟢 SIGNAL SESSION" if active else "🧠 RESEARCH ONLY"
-    return ("🤖 CANDICE AI SESSION\n\n" f"{mode}\n\n" f"⏳ Remaining: {h:02d}:{m:02d}:{s:02d}\n" f"🏁 Current period ends: {boundary.astimezone(UAE_TZ):%Y-%m-%d %H:%M:%S} UAE\n" f"🚀 Next signal session: {next_signal.astimezone(UAE_TZ):%Y-%m-%d %H:%M:%S} UAE\n\n" "📡 Market research: 24/7\n" "📊 Signal generation: 2H signal / 1H research cycle\n" "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF")
+    return ("🤖 CANDICE AI SESSION\n\n" f"{mode}\n\n" f"⏳ Remaining: {h:02d}:{m:02d}:{s:02d}\n"
+            f"🏁 Current period ends: {boundary.astimezone(UAE_TZ):%Y-%m-%d %H:%M:%S} UAE\n"
+            f"🚀 Next signal session: {next_signal.astimezone(UAE_TZ):%Y-%m-%d %H:%M:%S} UAE\n\n"
+            "📡 Market research: 24/7\n"
+            "📊 Signal generation: 2H signal / 1H research cycle\n"
+            "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF")
+
 
 async def _session_cmd(update, context):
     a = _app(); user = update.effective_user
-    if a is None or user is None or update.message is None: return
+    if a is None or user is None or update.message is None:
+        return
     if int(user.id) not in getattr(a, "authorized_users", set()):
-        await update.message.reply_text("Use /access YOUR_ACCESS_CODE first."); return
+        await update.message.reply_text("Use /access YOUR_ACCESS_CODE first.")
+        return
     await update.message.reply_text(_session_text(a))
+
 
 def build_application():
     a = _app()
@@ -41,9 +52,17 @@ def build_application():
     application.add_handler(a.CommandHandler("access", a.access_cmd))
     application.add_handler(a.CommandHandler("assets", a.assets_cmd))
     application.add_handler(a.CommandHandler("session", _session_cmd))
-    application.add_handler(a.CallbackQueryHandler(a.assets_callback, pattern=r"^(asset:|assets:)"))
-    a.log.warning("CANDICE CANONICAL APPLICATION BUILDER ACTIVE")
+
+    # The previous runtime patched a.assets_callback after the handler had
+    # already captured the old bound method. Register the visual callback
+    # directly so Telegram actually executes the animated asset UI.
+    native = a.assets_callback
+    a._native_assets_callback = native
+    visual = importlib.import_module("candice_visual_asset_ui")
+    application.add_handler(a.CallbackQueryHandler(visual._callback, pattern=r"^(asset:|assets:)"))
+    a.log.warning("CANDICE CANONICAL APPLICATION BUILDER ACTIVE: animated asset callback registered")
     return application
+
 
 builtins.build_application = build_application
 for _module in ("candice_visual_cards_hotfix", "candice_visual_asset_ui"):
