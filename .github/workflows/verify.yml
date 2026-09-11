@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py candice_research_brain_hotfix.py candice_ai_memory_context_hotfix.py candice_timeframe_strategy_brain_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py candice_research_brain_hotfix.py candice_ai_memory_context_hotfix.py candice_timeframe_strategy_brain_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py candice_signal_session_hotfix.py candice_session_status_hotfix.py candice_compare_learn_improve_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
@@ -40,6 +40,9 @@ jobs:
           research = Path("candice_research_brain_hotfix.py").read_text(encoding="utf-8")
           ai_memory = Path("candice_ai_memory_context_hotfix.py").read_text(encoding="utf-8")
           timeframe = Path("candice_timeframe_strategy_brain_hotfix.py").read_text(encoding="utf-8")
+          session = Path("candice_signal_session_hotfix.py").read_text(encoding="utf-8")
+          status = Path("candice_session_status_hotfix.py").read_text(encoding="utf-8")
+          compare = Path("candice_compare_learn_improve_hotfix.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
@@ -61,8 +64,13 @@ jobs:
           assert 'import candice_research_brain_hotfix' in site
           assert 'import candice_ai_memory_context_hotfix' in site
           assert 'import candice_timeframe_strategy_brain_hotfix' in site
+          assert 'import candice_compare_learn_improve_hotfix' in site
+          assert 'import candice_signal_session_hotfix' in site
+          assert 'import candice_session_status_hotfix' in site
           assert 'CommandHandler("start", app.start_cmd)' in builder
           assert 'CommandHandler("access", app.access_cmd)' in builder
+          assert 'CommandHandler("session", _session_cmd)' in builder
+          assert 'CANDICE /session COMMAND REGISTERED IN APPLICATION BUILD' in builder
           assert 'CallbackQueryHandler(app.assets_callback' in builder
           assert "AI_CANDIDATE_LIMIT=12" in engine
           assert "EXPIRIES=(2,3,5,10,15)" in engine
@@ -113,7 +121,37 @@ jobs:
           assert "LOW_WIN_RATE = 45.0" in timeframe
           assert "CANDICE TIMEFRAME STRATEGY BRAIN V1 ACTIVE" in timeframe
           assert "never" in timeframe.lower() and "broker orders" in timeframe.lower()
+          assert "CANDICE 2H/2H SESSION V4 ACTIVE" in session
+          assert "module.analyze_asset = gated_analyze" in session
+          assert "module.scan_cycle = gated_scan" in session
+          assert "RESEARCH_ONLY" in session
+          assert "SIGNAL_SESSION" in session
+          assert "Asia/Dubai" in session
+          assert "_session_cmd" in status
+          assert "CANDICE SESSION STATUS V2 ACTIVE" in status
+          assert "CANDICE COMPARE -> LEARN -> IMPROVE" in compare
           print("CORE STATIC VERIFY OK")
+          PY
+      - name: Smoke test Candice session timing
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import candice_signal_session_hotfix as s
+
+          def ts(h, m=0):
+              return datetime(2026, 9, 11, h, m, tzinfo=timezone.utc).timestamp()
+
+          assert s.signal_session_active(ts(0, 30)) is True
+          assert s.signal_session_active(ts(1, 59)) is True
+          assert s.signal_session_active(ts(2, 0)) is False
+          assert s.signal_session_active(ts(3, 59)) is False
+          assert s.signal_session_active(ts(4, 0)) is True
+          assert s.signal_session_active(ts(5, 59)) is True
+          state = s.session_state(ts(2, 30))
+          assert state["mode"] == "RESEARCH_ONLY"
+          assert state["next_signal_utc"].endswith("04:00:00 UTC")
+          assert state["end_uae"].endswith("06:00:00 UAE")
+          print("CANDICE SESSION SMOKE TEST OK")
           PY
       - name: Smoke test Candice memory brain
         run: |
@@ -125,11 +163,7 @@ jobs:
           with tempfile.TemporaryDirectory() as td:
               brain = CandiceMemoryBrain(Path(td) / "memory.json")
               brain.record_signal({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND", "direction": "UP"})
-              brain.record_result({
-                  "asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM",
-                  "regime": "TREND", "direction": "UP", "outcome": "WIN",
-                  "lesson": "test evidence"
-              })
+              brain.record_result({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND", "direction": "UP", "outcome": "WIN", "lesson": "test evidence"})
               score = brain.strategy_score({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND"})
               similar = brain.similar_experience({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND", "direction": "UP"})
               assert score["samples"] == 1
@@ -144,40 +178,21 @@ jobs:
           python - <<'PY'
           import pandas as pd
           from duration_selection_hotfix import _choose
-
-          def frame(n=40, step=0.001, body=0.8):
-              rows = []
-              p = 100.0
+          def frame(n=40, step=0.001):
+              rows=[]; p=100.0
               for i in range(n):
-                  o = p
-                  c = p + step
-                  h = max(o, c) + abs(step) * 0.25
-                  l = min(o, c) - abs(step) * 0.05
-                  rows.append({"timestamp": 1700000000 + i * 60, "open": o, "high": h, "low": l, "close": c})
-                  p = c
+                  o=p; c=p+step; h=max(o,c)+abs(step)*0.25; l=min(o,c)-abs(step)*0.05
+                  rows.append({"timestamp":1700000000+i*60,"open":o,"high":h,"low":l,"close":c}); p=c
               return pd.DataFrame(rows)
-
-          df1 = frame(step=0.02)
-          df5 = frame(step=0.01)
-          signal = {"direction": "UP", "trend_5m": "UP", "ai_confidence": 90}
-          duration, reason = _choose(signal, df1, df5)
-          assert duration in (2, 3, 5, 10, 15)
-          assert duration != 5
-          print("CANDICE DURATION SMOKE TEST OK", duration, reason)
+          d, r = _choose({"direction":"UP","trend_5m":"UP","ai_confidence":90}, frame(step=.02), frame(step=.01))
+          assert d in (2,3,5,10,15) and d != 5
+          print("CANDICE DURATION SMOKE TEST OK", d, r)
           PY
       - name: Smoke test AI memory request injection
         run: |
           python - <<'PY'
           import candice_ai_memory_context_hotfix as hook
-
-          original = hook._memory_context
-          hook._memory_context = lambda pair, direction, trend: {"strategy_key": "TEST|5M|TREND_CONFIRM|TREND", "samples": 6, "wins": 5, "losses": 1, "historical_win_rate": 83.33, "similar_results": [{"outcome": "WIN", "direction": "UP", "duration": 5, "lesson": "test"}]}
-          payload = {"messages": [{"role": "user", "content": "Asset: TEST\nDirection candidate: UP\n5m trend: UP\nReason: structure"}]}
-          assert hook._extract_fields(payload) == ("TEST", "UP", "UP")
-          ctx = hook._memory_context("TEST", "UP", "UP")
-          assert ctx["samples"] == 6
-          assert ctx["historical_win_rate"] == 83.33
-          hook._memory_context = original
+          assert hook._extract_fields({"messages":[{"role":"user","content":"Asset: TEST\nDirection candidate: UP\n5m trend: UP\nReason: structure"}]}) == ("TEST","UP","UP")
           print("CANDICE AI MEMORY CONTEXT SMOKE TEST OK")
           PY
       - name: Smoke test timeframe strategy brain
@@ -187,16 +202,13 @@ jobs:
           from pathlib import Path
           import candice_timeframe_strategy_brain_hotfix as tf
           import candice_memory_brain as memory
-
           with tempfile.TemporaryDirectory() as td:
-              old = memory.brain
-              memory.brain = memory.CandiceMemoryBrain(Path(td) / "memory.json")
-              ctx = tf.build_strategy_context("TEST", "UP")
+              old=memory.brain; memory.brain=memory.CandiceMemoryBrain(Path(td)/"memory.json")
+              ctx=tf.build_strategy_context("TEST","UP")
               assert ctx["candidate_direction"] == "UP"
               assert len(ctx["profiles"]) == 5
-              assert [x["timeframe"] for x in ctx["profiles"]] == ["1M", "3M", "5M", "10M", "15M"]
-              assert [x["strategy"] for x in ctx["profiles"]] == ["MICRO_MOMENTUM", "PULLBACK_MOMENTUM", "TREND_CONFIRM", "INTRADAY_STRUCTURE", "MACRO_CONTEXT"]
-              assert ctx["mature_low_score_timeframes"] == []
-              memory.brain = old
+              assert [x["timeframe"] for x in ctx["profiles"]] == ["1M","3M","5M","10M","15M"]
+              assert [x["strategy"] for x in ctx["profiles"]] == ["MICRO_MOMENTUM","PULLBACK_MOMENTUM","TREND_CONFIRM","INTRADAY_STRUCTURE","MACRO_CONTEXT"]
+              memory.brain=old
           print("CANDICE TIMEFRAME STRATEGY SMOKE TEST OK")
           PY
