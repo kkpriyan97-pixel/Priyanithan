@@ -46,7 +46,8 @@ def build_application():
     return application
 
 builtins.build_application = build_application
-try:
-    importlib.import_module("candice_visual_cards_hotfix")
-except Exception:
-    pass
+for _module in ("candice_visual_cards_hotfix", "candice_visual_asset_ui"):
+    try:
+        importlib.import_module(_module)
+    except Exception:
+        pass
