@@ -8,6 +8,11 @@ No broker order execution or automatic trading is enabled here.
 """
 
 try:
+    import build_application_hotfix  # noqa: F401
+except Exception:
+    pass
+
+try:
     import signal_gate_compat_hotfix  # noqa: F401
 except Exception:
     pass
