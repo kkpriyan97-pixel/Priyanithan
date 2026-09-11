@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py candice_memory_brain.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
@@ -35,6 +35,7 @@ jobs:
           selected_scan = Path("selected_scan_cycle_hotfix.py").read_text(encoding="utf-8")
           live_ai = Path("live_ai_monitor_hotfix.py").read_text(encoding="utf-8")
           memory = Path("candice_memory_brain.py").read_text(encoding="utf-8")
+          memory_runtime = Path("candice_memory_integration_hotfix.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
@@ -49,6 +50,7 @@ jobs:
           assert 'import live_asset_probe_v2_hotfix' in site
           assert 'import loss_recovery_ai_hotfix' in site
           assert 'import selected_scan_cycle_hotfix' in site
+          assert 'import candice_memory_integration_hotfix' in site
           assert 'import signal_live_update_hotfix' in site
           assert 'import native_live_signal_monitor_hotfix' in site
           assert 'CommandHandler("start", app.start_cmd)' in builder
@@ -73,6 +75,11 @@ jobs:
           assert "record_result" in memory
           assert "similar_experience" in memory
           assert "context_for_ai" in memory
+          assert "CANDICE MEMORY INTEGRATION V2 ACTIVE" in memory_runtime
+          assert "brain.record_signal" in memory_runtime
+          assert "brain.record_result" in memory_runtime
+          assert "MIN_EVIDENCE = 5" in memory_runtime
+          assert "LOW_WIN_RATE = 45.0" in memory_runtime
           print("CORE STATIC VERIFY OK")
           PY
       - name: Smoke test Candice memory brain
