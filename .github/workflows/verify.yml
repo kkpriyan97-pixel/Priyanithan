@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py candice_memory_brain.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
@@ -32,10 +32,14 @@ jobs:
           recovery = Path("loss_recovery_ai_hotfix.py").read_text(encoding="utf-8")
           live = Path("signal_live_update_hotfix.py").read_text(encoding="utf-8")
           native_live = Path("native_live_signal_monitor_hotfix.py").read_text(encoding="utf-8")
+          memory = Path("candice_memory_brain.py").read_text(encoding="utf-8")
+
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
           assert "LIVE ASSET SELECTION" in app
           assert "Choose DEMO or REAL before the scan" not in app
+          assert "REFRESH LIVE ASSETS" in app
+          assert 'callback_data="assets:refresh"' in app
           assert "one_minute_candle_mode_hotfix" not in site
           assert "disable_legacy_telegram_flow" not in site
           assert "final_access_asset_lock_v2" not in site
@@ -51,12 +55,40 @@ jobs:
           assert "EXPIRIES=(2,3,5,10,15)" in engine
           assert "FALLBACK_PAIRS" in probe
           assert "LIVE ASSET DISCOVERY V2 REASONS" in probe
-          assert "REFRESH LIVE ASSETS" in refresh
+          assert "discover_live_assets" in refresh
           assert "ONE recovery attempt" in recovery
           assert "LIVE SIGNAL UPDATE V2 ACTIVE" in live
           assert "monitor_result" in live
           assert "module.send_signal = _patched_send_signal" in native_live
           assert "_live_monitor" in native_live
           assert "No broker order" in native_live
-          print("CORE SAFETY + TELEGRAM + LIVE ASSET + RECOVERY + NATIVE LIVE MONITOR VERIFY OK")
+          assert "class CandiceMemoryBrain" in memory
+          assert "record_result" in memory
+          assert "similar_experience" in memory
+          assert "context_for_ai" in memory
+          print("CORE STATIC VERIFY OK")
+          PY
+      - name: Smoke test Candice memory brain
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+          from candice_memory_brain import CandiceMemoryBrain
+
+          with tempfile.TemporaryDirectory() as td:
+              brain = CandiceMemoryBrain(Path(td) / "memory.json")
+              brain.record_signal({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND", "direction": "UP"})
+              brain.record_result({
+                  "asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM",
+                  "regime": "TREND", "direction": "UP", "outcome": "WIN",
+                  "lesson": "test evidence"
+              })
+              score = brain.strategy_score({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND"})
+              similar = brain.similar_experience({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND", "direction": "UP"})
+              assert score["samples"] == 1
+              assert score["wins"] == 1
+              assert score["historical_win_rate"] == 100.0
+              assert similar
+              assert brain.context_for_ai({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND"})["strategy"]["samples"] == 1
+          print("CANDICE MEMORY SMOKE TEST OK")
           PY
