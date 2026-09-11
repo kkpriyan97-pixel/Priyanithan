@@ -6,7 +6,7 @@ import asyncio, json, re, sys, time
 
 # User-requested AI expiry choices. Analysis cadence is controlled by the
 # selected-asset flow and runs once per newly closed 1-minute candle.
-EXPIRIES=(2,3,5,15)
+EXPIRIES=(2,3,5,10,15)
 AI_CANDIDATE_LIMIT=12
 AI_RETRY_PER_CANDIDATE=0
 SIGNAL_COOLDOWN_SECONDS=60
@@ -169,7 +169,7 @@ async def _install_scan():
         finally:
             a._FINAL_SCAN_RUNNING=False
     a.scan_cycle=classic_scan; a._FINAL_SIGNAL_ENGINE=True
-    a.log.warning("FINAL SIGNAL ENGINE ACTIVE: 1m candle scan + 5m context + AI gate; expiry=2/3/5/15")
+    a.log.warning("FINAL SIGNAL ENGINE ACTIVE: 1m candle scan + 5m context + AI gate; expiry=2/3/5/10/15")
     return True
 
 def _boot():
