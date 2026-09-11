@@ -87,3 +87,7 @@ try:
     import candice_signal_session_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_session_status_hotfix  # noqa: F401
+except Exception:
+    pass
