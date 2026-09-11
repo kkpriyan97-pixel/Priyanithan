@@ -47,3 +47,7 @@ try:
     import signal_window_countdown_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import signal_live_update_hotfix  # noqa: F401
+except Exception:
+    pass
