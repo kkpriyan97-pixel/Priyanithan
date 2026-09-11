@@ -111,3 +111,11 @@ try:
     import candice_session_automation_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_visual_cards_hotfix  # noqa: F401
+except Exception:
+    pass
+try:
+    import candice_visual_runtime_hotfix  # noqa: F401
+except Exception:
+    pass
