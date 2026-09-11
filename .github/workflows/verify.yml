@@ -64,8 +64,8 @@ jobs:
           state = s.session_state(ts(2,30))
           assert state["mode"] == "RESEARCH_ONLY"
           assert state["next_signal_utc"].endswith("04:00:00 UTC")
-          # 06:00 UTC is 10:00 UAE (UTC+4).
-          assert state["end_uae"].endswith("10:00:00 UAE")
+          # The 02:00-04:00 UTC research window ends at 08:00 UAE (UTC+4).
+          assert state["end_uae"].endswith("08:00:00 UAE")
           active = s.session_state(ts(4,30))
           assert active["mode"] == "SIGNAL_SESSION"
           assert active["end_uae"].endswith("10:00:00 UAE")
