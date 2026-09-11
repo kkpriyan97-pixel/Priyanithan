@@ -25,11 +25,10 @@ def build_application():
     application.add_handler(app.CommandHandler("access", app.access_cmd))
     application.add_handler(app.CommandHandler("assets", app.assets_cmd))
     application.add_handler(app.CallbackQueryHandler(app.assets_callback, pattern=r"^(asset:|assets:)"))
-    # Register /session during construction, before webhook processing starts.
-    # This avoids a race where a background hotfix thread adds the handler too late.
     try:
         import candice_session_status_hotfix as session_status
         application.add_handler(app.CommandHandler("session", session_status._session_cmd))
+        app._CANDICE_SESSION_HANDLER_REGISTERED = True
     except Exception as exc:
         app.log.warning("CANDICE /session registration unavailable: %s", exc)
     return application
