@@ -44,6 +44,10 @@ try:
 except Exception:
     pass
 try:
+    import selected_scan_cycle_hotfix  # noqa: F401
+except Exception:
+    pass
+try:
     import signal_window_countdown_hotfix  # noqa: F401
 except Exception:
     pass
