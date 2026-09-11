@@ -1,20 +1,18 @@
-"""Live selected-asset signal-window countdown with boundary catch-up.
+"""Live selected-asset signal-window countdown with reliable boundary scan.
 
-If an asset is selected just after a 5-minute boundary, the bot must not
-silently skip that just-closed candle and move the user to the next boundary.
-Within a short post-boundary grace period, trigger exactly one immediate
-selected-asset scan, then return to the normal 5-minute schedule.
-
-No broker order execution is enabled.
+The countdown is UI only; the actual selected-asset scan is explicitly
+triggered at the current/new 5-minute boundary.  No broker order execution.
 """
 import asyncio
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 PATCHED = False
 UPDATE_SECONDS = 1
 BOUNDARY_GRACE_SECONDS = 45
+SCAN_READY_RETRY_SECONDS = 0.25
+SCAN_READY_TIMEOUT_SECONDS = 15
 
 
 def _app():
@@ -38,9 +36,6 @@ def _next_boundary(ts=None):
         ts = time.time()
     current = _floor_boundary(ts)
     elapsed = ts - current
-    # During the first 45 seconds after a boundary, that boundary is the
-    # active generation window. This prevents 15:20 from being skipped and
-    # incorrectly displayed as 15:25 when the asset is selected at 15:20:xx.
     if 0 <= elapsed <= BOUNDARY_GRACE_SECONDS:
         return current
     return current + 300.0
@@ -52,32 +47,59 @@ def _clock(seconds):
     return f"00:{m:02d}:{s:02d}"
 
 
+async def _run_boundary_scan(a, uid, pair, bot, boundary):
+    """Run exactly one selected-asset scan for this 5-minute boundary.
+
+    Hotfix startup and Telegram webhook startup are asynchronous, so the old
+    implementation could reach the boundary before scan_cycle/application was
+    installed and then permanently skip the scan.  Wait briefly for the
+    already-starting native engine instead of dropping the window.
+    """
+    key = (int(uid), str(pair).upper(), int(boundary))
+    kicked = getattr(a, "_SIGNAL_WINDOW_KICKED", None)
+    if kicked is None:
+        kicked = set()
+        a._SIGNAL_WINDOW_KICKED = kicked
+    if key in kicked:
+        return False
+
+    deadline = time.monotonic() + SCAN_READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        scan = getattr(a, "scan_cycle", None)
+        application = getattr(a, "telegram_application", None)
+        if callable(scan) and application is not None:
+            kicked.add(key)
+            try:
+                a.log.info(
+                    "SIGNAL WINDOW SCAN TRIGGERED: pair=%s uid=%s boundary=%s",
+                    pair, uid, a.fmt_ts(boundary),
+                )
+                await scan(application)
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                a.log.exception(
+                    "SIGNAL WINDOW SCAN FAILED: pair=%s uid=%s boundary=%s: %s",
+                    pair, uid, a.fmt_ts(boundary), exc,
+                )
+                return False
+        await asyncio.sleep(SCAN_READY_RETRY_SECONDS)
+
+    a.log.error(
+        "SIGNAL WINDOW SCAN UNAVAILABLE AFTER RETRY: pair=%s uid=%s boundary=%s",
+        pair, uid, a.fmt_ts(boundary),
+    )
+    return False
+
+
 async def _kick_current_boundary_scan(a, uid, pair, bot):
     now = time.time()
     boundary = _floor_boundary(now)
     elapsed = now - boundary
     if elapsed < 0 or elapsed > BOUNDARY_GRACE_SECONDS:
         return
-    key = (int(uid), pair, int(boundary))
-    kicked = getattr(a, "_SIGNAL_WINDOW_KICKED", None)
-    if kicked is None:
-        kicked = set()
-        a._SIGNAL_WINDOW_KICKED = kicked
-    if key in kicked:
-        return
-    kicked.add(key)
-    scan = getattr(a, "scan_cycle", None)
-    application = getattr(a, "telegram_application", None)
-    if not callable(scan) or application is None:
-        a.log.warning("SIGNAL WINDOW IMMEDIATE SCAN unavailable: scan_cycle/application not ready")
-        return
-    try:
-        a.log.info("SIGNAL WINDOW IMMEDIATE SCAN: pair=%s uid=%s boundary=%s", pair, uid, a.fmt_ts(boundary))
-        await scan(application)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        a.log.exception("SIGNAL WINDOW IMMEDIATE SCAN FAILED: pair=%s uid=%s: %s", pair, uid, exc)
+    await _run_boundary_scan(a, uid, pair, bot, boundary)
 
 
 async def _window_countdown(a, bot, uid, pair):
@@ -97,6 +119,7 @@ async def _window_countdown(a, bot, uid, pair):
     except Exception as exc:
         a.log.debug("SIGNAL WINDOW COUNTDOWN initial send failed: %s", exc)
         return
+
     last = None
     while a.selected_asset.get(uid) == pair and uid not in a.active_signal:
         now = time.time()
@@ -117,9 +140,12 @@ async def _window_countdown(a, bot, uid, pair):
                 )
             except Exception:
                 pass
-            # Do not wait for the next 5-minute cycle here. The selected-asset
-            # scan is kicked exactly once at this boundary by the callback.
+            # Critical: the countdown itself owns the boundary trigger.  This
+            # guarantees future 5-minute windows are not skipped even if the
+            # selection-time catch-up task was not needed or already finished.
+            await _run_boundary_scan(a, uid, pair, bot, boundary)
             return
+
         whole = int(remaining)
         text = (
             f"🎯 {pair} — SIGNAL WINDOW ARMED\n\n"
@@ -133,7 +159,9 @@ async def _window_countdown(a, bot, uid, pair):
         )
         if text != last:
             try:
-                await bot.edit_message_text(chat_id=uid, message_id=msg.message_id, text=text)
+                await bot.edit_message_text(
+                    chat_id=uid, message_id=msg.message_id, text=text
+                )
                 last = text
             except Exception as exc:
                 a.log.debug("SIGNAL WINDOW COUNTDOWN edit skipped: %s", exc)
@@ -156,7 +184,9 @@ async def _patched_assets_callback(update, context):
     pair = data.split(":", 1)[1].strip().upper()
     ok, err = await a.verify_live_pair(pair)
     if not ok:
-        await query.message.reply_text(f"⚠️ {pair} is not currently live: {err}\n\nChoose another live asset.")
+        await query.message.reply_text(
+            f"⚠️ {pair} is not currently live: {err}\n\nChoose another live asset."
+        )
         return
     a.selected_asset[uid] = pair
     a.active_signal.pop(uid, None)
@@ -168,8 +198,8 @@ async def _patched_assets_callback(update, context):
         "⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n"
         "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF"
     )
-    # If the user selects the asset immediately after 15:20/15:25/etc.,
-    # analyze the just-closed candle now instead of silently waiting for 15:25.
+    # Catch the just-opened boundary immediately (15:20, 15:25, ...). The
+    # helper waits briefly if the final scan engine is still booting.
     asyncio.create_task(
         _kick_current_boundary_scan(a, uid, pair, context.bot),
         name=f"signal-window-kick-{uid}-{pair}",
@@ -188,7 +218,7 @@ def _patch():
     a = _app()
     if not a:
         return False
-    if getattr(a, "_SIGNAL_WINDOW_COUNTDOWN_V2", False):
+    if getattr(a, "_SIGNAL_WINDOW_COUNTDOWN_V3", False):
         PATCHED = True
         return True
     original = getattr(a, "assets_callback", None)
@@ -196,8 +226,10 @@ def _patch():
         return False
     _ORIGINAL = original
     a.assets_callback = _patched_assets_callback
-    a._SIGNAL_WINDOW_COUNTDOWN_V2 = True
-    a.log.warning("SIGNAL WINDOW COUNTDOWN V2 ACTIVE: current-boundary catch-up + next 5m cycle")
+    a._SIGNAL_WINDOW_COUNTDOWN_V3 = True
+    a.log.warning(
+        "SIGNAL WINDOW COUNTDOWN V3 ACTIVE: boundary trigger + engine-ready retry"
+    )
     PATCHED = True
     return True
 
@@ -211,4 +243,7 @@ def _boot():
             pass
         time.sleep(0.1)
 
-threading.Thread(target=_boot, name="signal-window-countdown-v2", daemon=True).start()
+
+threading.Thread(
+    target=_boot, name="signal-window-countdown-v3", daemon=True
+).start()
