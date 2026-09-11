@@ -79,3 +79,7 @@ try:
     import candice_timeframe_strategy_brain_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_compare_learn_improve_hotfix  # noqa: F401
+except Exception:
+    pass
