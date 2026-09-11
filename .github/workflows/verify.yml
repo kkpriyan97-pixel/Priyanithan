@@ -41,6 +41,6 @@ jobs:
           assert 'CallbackQueryHandler(app.assets_callback' in builder
           assert "AI_CANDIDATE_LIMIT=12" in engine
           assert "EXPIRIES=(2,3,5,10,15)" in engine
-          assert "callable(builtins.build_application)" if False else True
+          assert callable(getattr(builtins, "build_application", None))
           print("CORE SAFETY + RENDER BUILDER + TELEGRAM FLOW VERIFY OK")
           PY
