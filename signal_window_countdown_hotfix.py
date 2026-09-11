@@ -26,8 +26,6 @@ def _next_boundary(ts=None):
     if ts is None:
         ts = time.time()
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    # The bot's existing UAE clock is UTC+4; using UTC here and adding the
-    # same five-minute wall-clock boundary preserves the minute boundary.
     minute = ((dt.minute // 5) + 1) * 5
     if minute >= 60:
         target = (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
@@ -51,8 +49,7 @@ async def _window_countdown(a, bot, uid, pair):
                 "🤖 Candice AI: LIVE\n"
                 "🕯️ Waiting for the next closed 1-minute candle\n\n"
                 "⏳ NEXT SIGNAL GENERATION\n"
-                "🔢 00:00:00\n"
-                "\n"
+                "🔢 00:00:00\n\n"
                 "⚡ At 00:00 → AI analysis starts\n"
                 "⚠️ No forced signal • Manual trade only"
             ),
@@ -60,7 +57,6 @@ async def _window_countdown(a, bot, uid, pair):
     except Exception as exc:
         a.log.debug("SIGNAL WINDOW COUNTDOWN initial send failed: %s", exc)
         return
-
     last = None
     while a.selected_asset.get(uid) == pair and uid not in a.active_signal:
         boundary = _next_boundary()
@@ -74,7 +70,7 @@ async def _window_countdown(a, bot, uid, pair):
                         f"🚀 {pair} — SIGNAL WINDOW OPEN\n\n"
                         "🤖 Candice AI is analyzing the fresh candle now.\n"
                         "📊 Checking 1m trigger + 5m context + AI gate…\n\n"
-                        "⏳ WAITING FOR VERIFIED RESULT\n"
+                        "⏳ ANALYSIS RUNNING\n"
                         "⚠️ No forced signal • Manual trade only"
                     ),
                 )
@@ -107,9 +103,8 @@ async def _patched_assets_callback(update, context):
     if not query or not a:
         return
     data = query.data or ""
-    # Delegate every non-selection callback to the native handler.
     if not data.startswith("asset:"):
-        return await _ORIGINAL(query_update=update, context=context)
+        return await _ORIGINAL(update, context)
     await query.answer()
     uid = int(query.from_user.id)
     if uid not in a.authorized_users:
