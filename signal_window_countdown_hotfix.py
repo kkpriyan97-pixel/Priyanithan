@@ -1,9 +1,11 @@
-"""Live next-signal-window countdown for selected assets.
+"""Live selected-asset signal-window countdown with boundary catch-up.
 
-After an asset is selected, Telegram shows a live countdown to the next
-5-minute scan boundary. The existing scan_loop remains the authority that
-actually starts analysis, so the UI cannot create a fake signal. No broker
-order execution is enabled.
+If an asset is selected just after a 5-minute boundary, the bot must not
+silently skip that just-closed candle and move the user to the next boundary.
+Within a short post-boundary grace period, trigger exactly one immediate
+selected-asset scan, then return to the normal 5-minute schedule.
+
+No broker order execution is enabled.
 """
 import asyncio
 import threading
@@ -12,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 PATCHED = False
 UPDATE_SECONDS = 1
+BOUNDARY_GRACE_SECONDS = 45
 
 
 def _app():
@@ -22,22 +25,59 @@ def _app():
     return sys.modules.get("app")
 
 
-def _next_boundary(ts=None):
+def _floor_boundary(ts=None):
     if ts is None:
         ts = time.time()
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    minute = ((dt.minute // 5) + 1) * 5
-    if minute >= 60:
-        target = (dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    else:
-        target = dt.replace(minute=minute, second=0, microsecond=0)
-    return target.timestamp()
+    minute = (dt.minute // 5) * 5
+    return dt.replace(minute=minute, second=0, microsecond=0).timestamp()
+
+
+def _next_boundary(ts=None):
+    if ts is None:
+        ts = time.time()
+    current = _floor_boundary(ts)
+    elapsed = ts - current
+    # During the first 45 seconds after a boundary, that boundary is the
+    # active generation window. This prevents 15:20 from being skipped and
+    # incorrectly displayed as 15:25 when the asset is selected at 15:20:xx.
+    if 0 <= elapsed <= BOUNDARY_GRACE_SECONDS:
+        return current
+    return current + 300.0
 
 
 def _clock(seconds):
     seconds = max(0, int(seconds))
     m, s = divmod(seconds, 60)
     return f"00:{m:02d}:{s:02d}"
+
+
+async def _kick_current_boundary_scan(a, uid, pair, bot):
+    now = time.time()
+    boundary = _floor_boundary(now)
+    elapsed = now - boundary
+    if elapsed < 0 or elapsed > BOUNDARY_GRACE_SECONDS:
+        return
+    key = (int(uid), pair, int(boundary))
+    kicked = getattr(a, "_SIGNAL_WINDOW_KICKED", None)
+    if kicked is None:
+        kicked = set()
+        a._SIGNAL_WINDOW_KICKED = kicked
+    if key in kicked:
+        return
+    kicked.add(key)
+    scan = getattr(a, "scan_cycle", None)
+    application = getattr(a, "telegram_application", None)
+    if not callable(scan) or application is None:
+        a.log.warning("SIGNAL WINDOW IMMEDIATE SCAN unavailable: scan_cycle/application not ready")
+        return
+    try:
+        a.log.info("SIGNAL WINDOW IMMEDIATE SCAN: pair=%s uid=%s boundary=%s", pair, uid, a.fmt_ts(boundary))
+        await scan(application)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        a.log.exception("SIGNAL WINDOW IMMEDIATE SCAN FAILED: pair=%s uid=%s: %s", pair, uid, exc)
 
 
 async def _window_countdown(a, bot, uid, pair):
@@ -47,7 +87,7 @@ async def _window_countdown(a, bot, uid, pair):
             text=(
                 f"🎯 {pair} — SIGNAL WINDOW ARMED\n\n"
                 "🤖 Candice AI: LIVE\n"
-                "🕯️ Waiting for the next closed 1-minute candle\n\n"
+                "🕯️ Fresh 1-minute candle scan active\n\n"
                 "⏳ NEXT SIGNAL GENERATION\n"
                 "🔢 00:00:00\n\n"
                 "⚡ At 00:00 → AI analysis starts\n"
@@ -59,8 +99,9 @@ async def _window_countdown(a, bot, uid, pair):
         return
     last = None
     while a.selected_asset.get(uid) == pair and uid not in a.active_signal:
-        boundary = _next_boundary()
-        remaining = boundary - time.time()
+        now = time.time()
+        boundary = _next_boundary(now)
+        remaining = boundary - now
         if remaining <= 0:
             try:
                 await bot.edit_message_text(
@@ -76,6 +117,8 @@ async def _window_countdown(a, bot, uid, pair):
                 )
             except Exception:
                 pass
+            # Do not wait for the next 5-minute cycle here. The selected-asset
+            # scan is kicked exactly once at this boundary by the callback.
             return
         whole = int(remaining)
         text = (
@@ -121,11 +164,20 @@ async def _patched_assets_callback(update, context):
         f"✅ ASSET SELECTED — {pair}\n\n"
         "🟢 Fresh 1-minute candle verified\n"
         "🤖 Candice AI analysis ON\n"
-        "⏱️ Next signal window = next 5 minutes\n"
+        "⏱️ Signal generation = current 5-minute window when available\n"
         "⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n"
         "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF"
     )
-    asyncio.create_task(_window_countdown(a, context.bot, uid, pair), name=f"signal-window-{uid}-{pair}")
+    # If the user selects the asset immediately after 15:20/15:25/etc.,
+    # analyze the just-closed candle now instead of silently waiting for 15:25.
+    asyncio.create_task(
+        _kick_current_boundary_scan(a, uid, pair, context.bot),
+        name=f"signal-window-kick-{uid}-{pair}",
+    )
+    asyncio.create_task(
+        _window_countdown(a, context.bot, uid, pair),
+        name=f"signal-window-{uid}-{pair}",
+    )
 
 
 _ORIGINAL = None
@@ -136,7 +188,7 @@ def _patch():
     a = _app()
     if not a:
         return False
-    if getattr(a, "_SIGNAL_WINDOW_COUNTDOWN_V1", False):
+    if getattr(a, "_SIGNAL_WINDOW_COUNTDOWN_V2", False):
         PATCHED = True
         return True
     original = getattr(a, "assets_callback", None)
@@ -144,8 +196,8 @@ def _patch():
         return False
     _ORIGINAL = original
     a.assets_callback = _patched_assets_callback
-    a._SIGNAL_WINDOW_COUNTDOWN_V1 = True
-    a.log.warning("SIGNAL WINDOW COUNTDOWN V1 ACTIVE: live countdown to next 5m scan boundary")
+    a._SIGNAL_WINDOW_COUNTDOWN_V2 = True
+    a.log.warning("SIGNAL WINDOW COUNTDOWN V2 ACTIVE: current-boundary catch-up + next 5m cycle")
     PATCHED = True
     return True
 
@@ -159,4 +211,4 @@ def _boot():
             pass
         time.sleep(0.1)
 
-threading.Thread(target=_boot, name="signal-window-countdown", daemon=True).start()
+threading.Thread(target=_boot, name="signal-window-countdown-v2", daemon=True).start()
