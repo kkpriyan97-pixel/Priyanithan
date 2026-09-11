@@ -21,3 +21,8 @@ try:
     import final_result_precision_hotfix  # noqa: F401
 except Exception:
     pass
+
+try:
+    import digital_countdown_hotfix  # noqa: F401
+except Exception:
+    pass
