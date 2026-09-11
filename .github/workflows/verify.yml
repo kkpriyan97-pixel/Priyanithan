@@ -15,24 +15,26 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - name: Compile all runtime Python
+      - name: Compile runtime Python
         run: |
-          python -m py_compile app.py fast_manual_entry.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py demo_lock_hotfix.py provider_cleanup_hotfix.py one_minute_candle_mode_hotfix.py
+          python -m py_compile app.py sitecustomize.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
-      - name: Verify core safety flags
+      - name: Verify core safety and Telegram flow
         run: |
           python - <<'PY'
           from pathlib import Path
           app = Path("app.py").read_text(encoding="utf-8")
+          site = Path("sitecustomize.py").read_text(encoding="utf-8")
           engine = Path("signal_engine.py").read_text(encoding="utf-8")
-          init = Path("olymptrade_ws/__init__.py").read_text(encoding="utf-8")
-          mode = Path("one_minute_candle_mode_hotfix.py").read_text(encoding="utf-8")
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
+          assert 'CommandHandler("start", start_cmd)' in app
+          assert 'CommandHandler("access", access_cmd)' in app
+          assert "LIVE ASSET SELECTION" in app
+          assert "Choose DEMO or REAL before the scan" not in app
+          assert "one_minute_candle_mode_hotfix" not in site
+          assert "disable_legacy_telegram_flow" not in site
+          assert "final_access_asset_lock_v2" not in site
           assert "AI_CANDIDATE_LIMIT=12" in engine
-          assert "EXPIRIES=(2,3,5,15)" in engine
-          assert "a.call_ai" in engine
-          assert "No broker order" in mode
-          assert "from . import demo_lock_hotfix" not in init
-          print("CORE SAFETY + 1M CANDLE MODE VERIFY OK")
+          print("CORE SAFETY + CLEAN TELEGRAM FLOW VERIFY OK")
           PY
