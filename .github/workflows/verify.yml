@@ -28,6 +28,9 @@ jobs:
           builder = Path("build_application_hotfix.py").read_text(encoding="utf-8")
           session = Path("candice_signal_session_hotfix.py").read_text(encoding="utf-8")
           status = Path("candice_session_status_hotfix.py").read_text(encoding="utf-8")
+          recovery = Path("loss_recovery_ai_hotfix.py").read_text(encoding="utf-8")
+          memory = Path("candice_memory_integration_hotfix.py").read_text(encoding="utf-8")
+          window = Path("signal_window_countdown_hotfix.py").read_text(encoding="utf-8")
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
           assert "LIVE ASSET SELECTION" in app
@@ -46,6 +49,12 @@ jobs:
           assert 'SIGNAL_SESSION' in session
           assert 'Asia/Dubai' in session
           assert '_session_cmd' in status
+          assert 'CANDICE_MEMORY_INTEGRATION_V3' in memory
+          assert 'LOSS_RECOVERY_AI_V2' in recovery
+          assert 'record_candice_result' in memory and '_record_result' in recovery
+          assert 'def _session_active' in window
+          assert 'UPDATE_SECONDS = 2' in window
+          assert 'SIGNAL WINDOW BLOCKED BY SESSION' in window
           print("CORE STATIC VERIFY OK")
           PY
       - name: Smoke test Candice session timing
