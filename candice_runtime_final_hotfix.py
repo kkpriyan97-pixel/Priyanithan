@@ -1,13 +1,11 @@
 """Final runtime guard for Candice session status and asset selection.
 
-This is intentionally small and deterministic: one session clock (2h signal /
-1h research), one /session handler, and one asset-selection handler. It does
-not place orders, enable auto trading, enable martingale, force signals, or
-weaken any AI gate.
+One deterministic session clock (2h signal / 1h research), one /session
+handler, and one asset-selection handler. No broker order execution, auto
+trading, martingale, forced signals, or weakened AI gates.
 """
 from __future__ import annotations
 
-import asyncio
 import sys
 import threading
 import time
@@ -79,6 +77,9 @@ async def _session_cmd(update, context):
     await update.message.reply_text(_session_text(a))
 
 
+_ORIGINAL_ASSET_CALLBACK = None
+
+
 async def _asset_callback(update, context):
     a = _app()
     q = update.callback_query
@@ -86,7 +87,9 @@ async def _asset_callback(update, context):
         return
     data = q.data or ""
     if not data.startswith("asset:"):
-        return await _ORIGINAL_ASSET_CALLBACK(update, context)
+        if _ORIGINAL_ASSET_CALLBACK is not None:
+            return await _ORIGINAL_ASSET_CALLBACK(update, context)
+        return
     await q.answer()
     uid = int(q.from_user.id)
     if uid not in getattr(a, "authorized_users", set()):
@@ -107,7 +110,7 @@ async def _asset_callback(update, context):
             f"✅ ASSET SELECTED — {pair}\n\n"
             "🟢 Fresh 1-minute candle verified\n"
             "🤖 Candice AI analysis ON\n"
-            f"🚀 SIGNAL SESSION ACTIVE\n"
+            "🚀 SIGNAL SESSION ACTIVE\n"
             f"🏁 Signal session ends: {s['end_uae']}\n"
             f"🚀 Next signal session: {s['next_signal_uae']}\n"
             "⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n"
@@ -131,19 +134,14 @@ async def _asset_callback(update, context):
     await q.message.reply_text(text)
 
 
-_ORIGINAL_ASSET_CALLBACK = None
-_ORIGINAL_BUILD = None
-
-
 def _patch():
-    global PATCHED, _ORIGINAL_ASSET_CALLBACK, _ORIGINAL_BUILD
+    global PATCHED, _ORIGINAL_ASSET_CALLBACK
     a = _app()
     if a is None:
         return False
 
-    # Make session_state available immediately and independently of background
-    # hotfix timing. Later session layers can wrap analyze/scan, but all UI uses
-    # this deterministic clock.
+    # Install the canonical clock immediately. The session-gate hotfix may
+    # still wrap analyze/scan, but UI and /session always use this clock.
     a.session_state = session_state
     a.signal_session_active = lambda ts=None: bool(session_state(ts)["active"])
     a.candice_session_state = session_state()
@@ -155,13 +153,12 @@ def _patch():
         a.assets_callback = _asset_callback
         a._CANDICE_FINAL_ASSET_CALLBACK = True
 
-    # Replace the builder so /session is registered exactly once, without a
-    # startup/background registration race.
+    # app.py resolves build_application from builtins. Replace it with a
+    # self-contained builder that directly registers the final handlers, so
+    # background patch timing cannot leave /session or asset selection stale.
     import builtins
     builder = getattr(builtins, "build_application", None)
     if callable(builder) and not getattr(builder, "_CANDICE_FINAL_BUILDER", False):
-        _ORIGINAL_BUILD = builder
-
         def final_build_application():
             app = _app()
             application = app.Application.builder().token(app.TELEGRAM_BOT_TOKEN).updater(None).build()
@@ -169,11 +166,10 @@ def _patch():
             application.add_handler(app.CommandHandler("access", app.access_cmd))
             application.add_handler(app.CommandHandler("assets", app.assets_cmd))
             application.add_handler(app.CommandHandler("session", _session_cmd))
-            application.add_handler(app.CallbackQueryHandler(app.assets_callback, pattern=r"^(asset:|assets:)"))
+            application.add_handler(app.CallbackQueryHandler(_asset_callback, pattern=r"^(asset:|assets:)"))
             app._CANDICE_SESSION_HANDLER_REGISTERED = True
-            app.log.warning("CANDICE FINAL RUNTIME: /session + 2H/1H clock + asset UI registered")
+            app.log.warning("CANDICE FINAL RUNTIME: /session + canonical asset UI registered")
             return application
-
         final_build_application._CANDICE_FINAL_BUILDER = True
         builtins.build_application = final_build_application
 
