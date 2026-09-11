@@ -45,6 +45,9 @@ jobs:
           assert 'RESEARCH_ONLY' in session
           assert 'SIGNAL_SESSION' in session
           assert 'Asia/Dubai' in session
+          assert 'SIGNAL_HOURS = 2' in session
+          assert 'RESEARCH_HOURS = 1' in session
+          assert 'CYCLE_HOURS = SIGNAL_HOURS + RESEARCH_HOURS' in session
           assert '_session_cmd' in status
           print("CORE STATIC VERIFY OK")
           PY
@@ -58,18 +61,21 @@ jobs:
           assert s.signal_session_active(ts(0,30)) is True
           assert s.signal_session_active(ts(1,59)) is True
           assert s.signal_session_active(ts(2,0)) is False
-          assert s.signal_session_active(ts(3,59)) is False
-          assert s.signal_session_active(ts(4,0)) is True
-          assert s.signal_session_active(ts(5,59)) is True
+          assert s.signal_session_active(ts(2,59)) is False
+          assert s.signal_session_active(ts(3,0)) is True
+          assert s.signal_session_active(ts(4,59)) is True
+          assert s.signal_session_active(ts(5,0)) is False
+          assert s.signal_session_active(ts(5,59)) is False
+          assert s.signal_session_active(ts(6,0)) is True
           state = s.session_state(ts(2,30))
           assert state["mode"] == "RESEARCH_ONLY"
-          assert state["next_signal_utc"].endswith("04:00:00 UTC")
-          # The 02:00-04:00 UTC research window ends at 08:00 UAE (UTC+4).
-          assert state["end_uae"].endswith("08:00:00 UAE")
-          active = s.session_state(ts(4,30))
+          assert state["next_signal_utc"].endswith("03:00:00 UTC")
+          # The 02:00-03:00 UTC research interval ends at 07:00 UAE (UTC+4).
+          assert state["end_uae"].endswith("07:00:00 UAE")
+          active = s.session_state(ts(3,30))
           assert active["mode"] == "SIGNAL_SESSION"
-          assert active["end_uae"].endswith("10:00:00 UAE")
-          print("CANDICE SESSION SMOKE TEST OK")
+          assert active["end_uae"].endswith("09:00:00 UAE")
+          print("CANDICE 2H SIGNAL / 1H INTERVAL SMOKE TEST OK")
           PY
       - name: Smoke test Candice memory brain
         run: |
