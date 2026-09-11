@@ -18,6 +18,11 @@ except Exception:
     pass
 
 try:
+    import live_asset_probe_hotfix  # noqa: F401
+except Exception:
+    pass
+
+try:
     import live_ai_monitor_hotfix  # noqa: F401
 except Exception:
     pass
