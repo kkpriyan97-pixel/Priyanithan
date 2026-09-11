@@ -1,10 +1,9 @@
 """Runtime wiring for Candice visual Telegram cards.
 
-The important fix here is that Render runs app.py as __main__, so replacing
-builtins.build_application is not enough: app.py calls its own module-local
-build_application(). We therefore replace that exact function on the live app
-module. This makes the visual callback deterministic for both SIGNAL and
-RESEARCH asset screens.
+This module is intentionally late-binding: Render runs app.py as __main__,
+and sitecustomize can import this module before app.py has finished defining
+all of its functions. The patch therefore waits for the real module-local
+build_application() to exist before marking the visual runtime active.
 
 No trading execution, martingale, forced signal, or AI-gate changes are made.
 """
@@ -55,7 +54,7 @@ def _asset(pair, state):
             _fmt(state["remaining_seconds"]),
         )
     return c._card(
-        "research", "RESEARCH INTERVAL", pair, "", 
+        "research", "RESEARCH INTERVAL", pair, "",
         [
             "Fresh 1-minute candle verified",
             "Candice AI research ON",
@@ -259,28 +258,41 @@ def _rebuild(a):
         return application
 
     builder._CANDICE_VISUAL_BUILDER = True
-    # Critical: app.py calls its own module-local build_application().
-    # Replace that exact function, not only builtins.build_application.
     a.build_application = builder
+    return builder
 
 
 def _patch():
     global PATCHED
     a = _app()
-    if a is None or not callable(getattr(a, "verify_live_pair", None)):
+    if a is None:
         return False
-    if getattr(a, "_CANDICE_VISUAL_RUNTIME", False):
+
+    # IMPORTANT STARTUP-RACE FIX:
+    # sitecustomize imports this module while app.py may still be defining
+    # functions. Do not declare the patch active until the actual
+    # module-local build_application exists. Otherwise app.py can overwrite
+    # our builder a few milliseconds later and Telegram falls back to the
+    # old text callback.
+    native_builder = getattr(a, "build_application", None)
+    if not callable(native_builder):
+        return False
+
+    visual_builder = getattr(native_builder, "_CANDICE_VISUAL_BUILDER", False)
+    if getattr(a, "_CANDICE_VISUAL_RUNTIME", False) and visual_builder:
         PATCHED = True
         return True
 
-    # Preserve native callback for pagination/refresh.
-    if callable(getattr(a, "assets_callback", None)):
+    # Preserve native callback for pagination/refresh once it exists.
+    if callable(getattr(a, "assets_callback", None)) and not callable(
+        getattr(a, "_CANDICE_NATIVE_ASSETS_CALLBACK", None)
+    ):
         a._CANDICE_NATIVE_ASSETS_CALLBACK = a.assets_callback
 
     a._CANDICE_VISUAL_ASSET_CALLBACK = _visual_asset_callback
-    a._CANDICE_VISUAL_RUNTIME = True
     _patch_scheduler(a)
     _rebuild(a)
+    a._CANDICE_VISUAL_RUNTIME = True
     a.log.warning(
         "CANDICE VISUAL RUNTIME ACTIVE: 3D-style asset/session cards + live image countdown"
     )
