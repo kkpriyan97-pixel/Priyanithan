@@ -1,22 +1,30 @@
 """Fresh 1-minute asset probe for Telegram asset selection.
 
-Asset discovery only needs to prove that the broker has a fresh 1-minute
-candle. The full 40+ candle requirement remains reserved for AI analysis.
-OlympTrade may return a smaller recent candle window, so discovery uses a
-small direct request and strict timestamp freshness validation.
-No broker order execution is enabled here.
+Render runs app.py as __main__. Resolve that live module instead of importing a
+second app.py copy, otherwise ot_client is isolated and every asset appears
+"OlympTrade not connected". Full 40+ candle requirements remain reserved for
+AI analysis. No broker order execution is enabled here.
 """
 import asyncio
+import sys
 import threading
 import time
 
 PATCHED = False
 
 
+def _app():
+    module = sys.modules.get("__main__")
+    if module is not None and getattr(module, "__file__", "").endswith("app.py"):
+        return module
+    import app
+    return app
+
+
 def _patch():
     global PATCHED
     try:
-        import app
+        app = _app()
     except Exception:
         return False
     if getattr(app, "_FRESH_ASSET_PROBE_V1", False):
