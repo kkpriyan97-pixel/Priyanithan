@@ -8,7 +8,6 @@ import asyncio
 import re
 import sys
 import time
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 _UAE = ZoneInfo("Asia/Dubai")
@@ -44,8 +43,6 @@ def _install_tick_capture(module):
 
     async def on_tick(message):
         try:
-            # Accept common OlympTrade tick payload shapes without assuming a
-            # single wire format.
             candidates = []
             if isinstance(message, dict):
                 candidates.append(message)
@@ -106,11 +103,20 @@ async def _ai_snapshot(module, signal, current_price, elapsed, remaining):
 
 async def _live_monitor(module, signal):
     bot = signal.get("_bot")
+    uid = signal.get("uid")
     if bot is None:
         return
     sender = getattr(module, "send_to_recipients", None)
     if not callable(sender):
-        return
+        # Native app.py uses send_text(bot, text, chat_id), while older signal
+        # engines use send_to_recipients(bot, text). Support both paths.
+        send_text = getattr(module, "send_text", None)
+        if not callable(send_text) or uid is None:
+            module.log.warning("LIVE AI MONITOR: no Telegram sender available")
+            return
+        async def sender(target_bot, text):
+            return await send_text(target_bot, text, int(uid))
+
     start = float(signal.get("signal_time", time.time()))
     expiry = int(signal.get("expiry_min", 5)) * 60
     last_ai = 0.0
@@ -126,18 +132,16 @@ async def _live_monitor(module, signal):
             if callable(getter):
                 try:
                     data = await getter(signal["pair"], 60, 80, 90) if getattr(module, "get_candles", None) is getter else await getter(signal["pair"], 60, 120)
-                    if isinstance(data, tuple):
-                        df = data[0]
-                    else:
-                        df = data
+                    df = data[0] if isinstance(data, tuple) else data
                     if df is not None and not getattr(df, "empty", True):
                         current = float(df["close"].iloc[-1])
                 except Exception:
                     current = None
         if current is not None:
             direction = str(signal["direction"]).upper()
-            move = ((current - float(signal["entry"])) / float(signal["entry"]) * 100.0)
-            aligned = (direction == "UP" and current >= float(signal["entry"])) or (direction == "DOWN" and current <= float(signal["entry"]))
+            entry = float(signal["entry"])
+            move = ((current - entry) / entry * 100.0) if entry else 0.0
+            aligned = (direction == "UP" and current >= entry) or (direction == "DOWN" and current <= entry)
             ai = None
             if first or time.time() - last_ai >= 60:
                 ai = await _ai_snapshot(module, signal, current, elapsed, remaining)
@@ -148,8 +152,8 @@ async def _live_monitor(module, signal):
                 reason = str(ai.get("reason", ""))[:180]
                 text = (
                     "🔴 LIVE AI MONITOR\n\n"
-                    f"📈 {signal['pair']} — {signal['direction']}\n"
-                    f"💰 Entry: {signal['entry']}\n"
+                    f"📈 {signal['pair']} — {direction}\n"
+                    f"💰 Entry: {entry}\n"
                     f"📍 Live: {current}\n"
                     f"📐 Move: {move:+.4f}%\n"
                     f"🤖 AI: {status} ({conf}%)\n"
@@ -160,8 +164,8 @@ async def _live_monitor(module, signal):
             else:
                 text = (
                     "🔴 LIVE MARKET MONITOR\n\n"
-                    f"📈 {signal['pair']} — {signal['direction']}\n"
-                    f"💰 Entry: {signal['entry']}\n"
+                    f"📈 {signal['pair']} — {direction}\n"
+                    f"💰 Entry: {entry}\n"
                     f"📍 Live: {current}\n"
                     f"📐 Move: {move:+.4f}%\n"
                     f"📊 Direction status: {'ALIGNED' if aligned else 'AGAINST ENTRY'}\n"
