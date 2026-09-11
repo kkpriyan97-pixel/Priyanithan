@@ -1,7 +1,8 @@
-"""Live selected-asset signal-window countdown with reliable boundary scan.
+"""Live selected-asset signal-window countdown with session-aware boundaries.
 
-The countdown is UI only; the actual selected-asset scan is explicitly
-triggered at the current/new 5-minute boundary.  No broker order execution.
+The countdown is UI only; actual scans are triggered only inside Candice's
+signal session. During the 1-hour research interval the UI must never claim
+that analysis is running or trigger a signal scan.
 """
 import asyncio
 import threading
@@ -9,7 +10,7 @@ import time
 from datetime import datetime, timezone
 
 PATCHED = False
-UPDATE_SECONDS = 1
+UPDATE_SECONDS = 2
 BOUNDARY_GRACE_SECONDS = 45
 SCAN_READY_RETRY_SECONDS = 0.25
 SCAN_READY_TIMEOUT_SECONDS = 15
@@ -47,14 +48,39 @@ def _clock(seconds):
     return f"00:{m:02d}:{s:02d}"
 
 
-async def _run_boundary_scan(a, uid, pair, bot, boundary):
-    """Run exactly one selected-asset scan for this 5-minute boundary.
+def _session_active(a):
+    try:
+        state = a.session_state()
+        return bool(state.get("active"))
+    except Exception:
+        # If the session gate is not ready, fail closed: do not show an OPEN
+        # window or trigger a scan until the authoritative gate is available.
+        return False
 
-    Hotfix startup and Telegram webhook startup are asynchronous, so the old
-    implementation could reach the boundary before scan_cycle/application was
-    installed and then permanently skip the scan.  Wait briefly for the
-    already-starting native engine instead of dropping the window.
-    """
+
+def _session_text(a, pair):
+    try:
+        state = a.session_state()
+        end = state.get("signal_end") if state.get("active") else state.get("cycle_end")
+        return (
+            f"🧠 {pair} — RESEARCH INTERVAL\n\n"
+            "📡 Candice is researching the live market 24/7.\n"
+            "🚫 Signal generation is paused during this interval.\n\n"
+            f"🏁 Research ends: {a.fmt_ts(end.timestamp()) if end else '—'}\n"
+            "⚠️ No forced signal • Manual trade only"
+        )
+    except Exception:
+        return (
+            f"🧠 {pair} — RESEARCH INTERVAL\n\n"
+            "🚫 Signal generation is paused until the next signal session.\n"
+            "⚠️ Manual trade only"
+        )
+
+
+async def _run_boundary_scan(a, uid, pair, bot, boundary):
+    if not _session_active(a):
+        a.log.info("SIGNAL WINDOW BLOCKED BY SESSION: pair=%s uid=%s boundary=%s", pair, uid, a.fmt_ts(boundary))
+        return False
     key = (int(uid), str(pair).upper(), int(boundary))
     kicked = getattr(a, "_SIGNAL_WINDOW_KICKED", None)
     if kicked is None:
@@ -62,38 +88,31 @@ async def _run_boundary_scan(a, uid, pair, bot, boundary):
         a._SIGNAL_WINDOW_KICKED = kicked
     if key in kicked:
         return False
-
     deadline = time.monotonic() + SCAN_READY_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if not _session_active(a):
+            return False
         scan = getattr(a, "scan_cycle", None)
         application = getattr(a, "telegram_application", None)
         if callable(scan) and application is not None:
             kicked.add(key)
             try:
-                a.log.info(
-                    "SIGNAL WINDOW SCAN TRIGGERED: pair=%s uid=%s boundary=%s",
-                    pair, uid, a.fmt_ts(boundary),
-                )
+                a.log.info("SIGNAL WINDOW SCAN TRIGGERED: pair=%s uid=%s boundary=%s", pair, uid, a.fmt_ts(boundary))
                 await scan(application)
                 return True
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                a.log.exception(
-                    "SIGNAL WINDOW SCAN FAILED: pair=%s uid=%s boundary=%s: %s",
-                    pair, uid, a.fmt_ts(boundary), exc,
-                )
+                a.log.exception("SIGNAL WINDOW SCAN FAILED: pair=%s uid=%s boundary=%s: %s", pair, uid, a.fmt_ts(boundary), exc)
                 return False
         await asyncio.sleep(SCAN_READY_RETRY_SECONDS)
-
-    a.log.error(
-        "SIGNAL WINDOW SCAN UNAVAILABLE AFTER RETRY: pair=%s uid=%s boundary=%s",
-        pair, uid, a.fmt_ts(boundary),
-    )
+    a.log.error("SIGNAL WINDOW SCAN UNAVAILABLE AFTER RETRY: pair=%s uid=%s boundary=%s", pair, uid, a.fmt_ts(boundary))
     return False
 
 
 async def _kick_current_boundary_scan(a, uid, pair, bot):
+    if not _session_active(a):
+        return
     now = time.time()
     boundary = _floor_boundary(now)
     elapsed = now - boundary
@@ -122,6 +141,17 @@ async def _window_countdown(a, bot, uid, pair):
 
     last = None
     while a.selected_asset.get(uid) == pair and uid not in a.active_signal:
+        if not _session_active(a):
+            text = _session_text(a, pair)
+            if text != last:
+                try:
+                    await bot.edit_message_text(chat_id=uid, message_id=msg.message_id, text=text)
+                    last = text
+                except Exception:
+                    pass
+            await asyncio.sleep(5)
+            continue
+
         now = time.time()
         boundary = _next_boundary(now)
         remaining = boundary - now
@@ -140,9 +170,6 @@ async def _window_countdown(a, bot, uid, pair):
                 )
             except Exception:
                 pass
-            # Critical: the countdown itself owns the boundary trigger.  This
-            # guarantees future 5-minute windows are not skipped even if the
-            # selection-time catch-up task was not needed or already finished.
             await _run_boundary_scan(a, uid, pair, bot, boundary)
             return
 
@@ -159,13 +186,14 @@ async def _window_countdown(a, bot, uid, pair):
         )
         if text != last:
             try:
-                await bot.edit_message_text(
-                    chat_id=uid, message_id=msg.message_id, text=text
-                )
+                await bot.edit_message_text(chat_id=uid, message_id=msg.message_id, text=text)
                 last = text
             except Exception as exc:
                 a.log.debug("SIGNAL WINDOW COUNTDOWN edit skipped: %s", exc)
         await asyncio.sleep(UPDATE_SECONDS)
+
+
+_ORIGINAL = None
 
 
 async def _patched_assets_callback(update, context):
@@ -184,33 +212,30 @@ async def _patched_assets_callback(update, context):
     pair = data.split(":", 1)[1].strip().upper()
     ok, err = await a.verify_live_pair(pair)
     if not ok:
-        await query.message.reply_text(
-            f"⚠️ {pair} is not currently live: {err}\n\nChoose another live asset."
-        )
+        await query.message.reply_text(f"⚠️ {pair} is not currently live: {err}\n\nChoose another live asset.")
         return
     a.selected_asset[uid] = pair
     a.active_signal.pop(uid, None)
+    if _session_active(a):
+        status = (
+            "⏱️ Signal generation = current 5-minute window when available\n"
+            "🤖 Candice will analyze only inside the active signal session."
+        )
+    else:
+        status = (
+            "📡 Research mode is active now\n"
+            "🚫 Signal generation resumes in the next signal session."
+        )
     await query.message.reply_text(
         f"✅ ASSET SELECTED — {pair}\n\n"
         "🟢 Fresh 1-minute candle verified\n"
         "🤖 Candice AI analysis ON\n"
-        "⏱️ Signal generation = current 5-minute window when available\n"
+        f"{status}\n"
         "⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n"
         "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF"
     )
-    # Catch the just-opened boundary immediately (15:20, 15:25, ...). The
-    # helper waits briefly if the final scan engine is still booting.
-    asyncio.create_task(
-        _kick_current_boundary_scan(a, uid, pair, context.bot),
-        name=f"signal-window-kick-{uid}-{pair}",
-    )
-    asyncio.create_task(
-        _window_countdown(a, context.bot, uid, pair),
-        name=f"signal-window-{uid}-{pair}",
-    )
-
-
-_ORIGINAL = None
+    asyncio.create_task(_kick_current_boundary_scan(a, uid, pair, context.bot), name=f"signal-window-kick-{uid}-{pair}")
+    asyncio.create_task(_window_countdown(a, context.bot, uid, pair), name=f"signal-window-{uid}-{pair}")
 
 
 def _patch():
@@ -218,7 +243,7 @@ def _patch():
     a = _app()
     if not a:
         return False
-    if getattr(a, "_SIGNAL_WINDOW_COUNTDOWN_V3", False):
+    if getattr(a, "_SIGNAL_WINDOW_COUNTDOWN_V4", False):
         PATCHED = True
         return True
     original = getattr(a, "assets_callback", None)
@@ -226,10 +251,8 @@ def _patch():
         return False
     _ORIGINAL = original
     a.assets_callback = _patched_assets_callback
-    a._SIGNAL_WINDOW_COUNTDOWN_V3 = True
-    a.log.warning(
-        "SIGNAL WINDOW COUNTDOWN V3 ACTIVE: boundary trigger + engine-ready retry"
-    )
+    a._SIGNAL_WINDOW_COUNTDOWN_V4 = True
+    a.log.warning("SIGNAL WINDOW COUNTDOWN V4 ACTIVE: session-aware boundary trigger + 2s UI rate")
     PATCHED = True
     return True
 
@@ -243,7 +266,4 @@ def _boot():
             pass
         time.sleep(0.1)
 
-
-threading.Thread(
-    target=_boot, name="signal-window-countdown-v3", daemon=True
-).start()
+threading.Thread(target=_boot, name="signal-window-countdown-v4", daemon=True).start()
