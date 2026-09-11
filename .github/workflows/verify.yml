@@ -17,17 +17,18 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py build_application_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
           python - <<'PY'
-          import builtins
           from pathlib import Path
           app = Path("app.py").read_text(encoding="utf-8")
           site = Path("sitecustomize.py").read_text(encoding="utf-8")
           engine = Path("signal_engine.py").read_text(encoding="utf-8")
           builder = Path("build_application_hotfix.py").read_text(encoding="utf-8")
+          probe = Path("live_asset_probe_v2_hotfix.py").read_text(encoding="utf-8")
+          refresh = Path("live_asset_refresh_hotfix.py").read_text(encoding="utf-8")
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
           assert "LIVE ASSET SELECTION" in app
@@ -36,11 +37,14 @@ jobs:
           assert "disable_legacy_telegram_flow" not in site
           assert "final_access_asset_lock_v2" not in site
           assert 'import build_application_hotfix' in site
+          assert 'import live_asset_probe_v2_hotfix' in site
           assert 'CommandHandler("start", app.start_cmd)' in builder
           assert 'CommandHandler("access", app.access_cmd)' in builder
           assert 'CallbackQueryHandler(app.assets_callback' in builder
           assert "AI_CANDIDATE_LIMIT=12" in engine
           assert "EXPIRIES=(2,3,5,10,15)" in engine
-          assert callable(getattr(builtins, "build_application", None))
-          print("CORE SAFETY + RENDER BUILDER + TELEGRAM FLOW VERIFY OK")
+          assert "FALLBACK_PAIRS" in probe
+          assert "LIVE ASSET DISCOVERY V2 REASONS" in probe
+          assert "REFRESH LIVE ASSETS" in refresh
+          print("CORE SAFETY + TELEGRAM + LIVE ASSET DISCOVERY VERIFY OK")
           PY
