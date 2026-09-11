@@ -1,11 +1,9 @@
-"""Strict one-shot same-pair recovery after a verified LOSS.
+"""Canonical one-shot same-pair recovery after a verified LOSS.
 
-After a verified loss, keep the same pair for one recovery attempt only.
-Candice re-checks fresh 1m/5m structure and may approve only a 1- or 2-minute
-manual signal. The recovery never changes broker state and never places an
-order. A recovery WIN returns the user to fresh asset selection. A recovery
-LOSS also exits recovery mode and returns to asset selection; no martingale or
-repeated recovery chain is allowed.
+This module owns the single result lifecycle monitor. It waits until the memory
+integration is ready, then patches monitor_result last so memory cannot replace
+the recovery flow. Recovery is one attempt only, with strict 1/2 minute manual
+signals. No Martingale, no broker orders, no forced signal.
 """
 import asyncio
 import threading
@@ -18,14 +16,15 @@ RECOVERY_MIN_CONF = 72
 
 
 def _app():
-    m = __import__("sys").modules.get("__main__")
+    import sys
+    m = sys.modules.get("__main__")
     if m is not None and getattr(m, "__file__", "").endswith("app.py"):
         return m
-    return __import__("sys").modules.get("app")
+    return sys.modules.get("app")
 
 
 async def _candice_recovery(a, pair, df1, df5, tech):
-    """Use the existing AI provider with a recovery-specific, strict prompt."""
+    """Use the existing AI provider with a recovery-specific strict prompt."""
     if not getattr(a, "OPENROUTER_API_KEY", ""):
         return None, "Candice AI provider unavailable"
     prompt = (
@@ -36,9 +35,9 @@ async def _candice_recovery(a, pair, df1, df5, tech):
         "direction has clear immediate momentum, candle confirmation, RSI is not "
         "extreme against the direction, and the 5m context does not conflict. "
         "The recovery duration MUST be exactly 1 or 2 minutes. Prefer 1 minute "
-        "only when the immediate candle structure is exceptionally clear; otherwise "
-        "use 2 minutes. Return compact JSON with decision, direction, confidence, "
-        "duration_min, reason. Never invent data.\n\n"
+        "only when immediate structure is exceptionally clear; otherwise use 2. "
+        "Return compact JSON with decision, direction, confidence, duration_min, reason. "
+        "Never invent data.\n\n"
         f"Pair: {pair}\nTechnical direction: {tech.get('signal')}\n"
         f"Technical confidence: {tech.get('confidence')}\n5m trend: {tech.get('trend_5m')}\n"
         f"Technical reason: {tech.get('reason')}\nFresh 1m candles: {len(df1)}\nFresh 5m candles: {len(df5)}\n"
@@ -76,7 +75,7 @@ async def _candice_recovery(a, pair, df1, df5, tech):
 
 
 async def _find_recovery(a, pair):
-    """Re-check the same pair for up to 2 minutes; never force a signal."""
+    """Re-check the same pair for up to two minutes; never force a signal."""
     deadline = time.time() + RECOVERY_MAX_WAIT
     last_reason = "no qualified short recovery setup"
     while time.time() < deadline:
@@ -101,6 +100,15 @@ async def _find_recovery(a, pair):
     return None, last_reason
 
 
+def _record_result(a, signal, result, expiry):
+    recorder = getattr(a, "record_candice_result", None)
+    if callable(recorder):
+        try:
+            recorder(signal, result, expiry)
+        except Exception as exc:
+            a.log.warning("CANDICE RESULT MEMORY HOOK FAILED: %s", exc)
+
+
 async def _recovery_result(a, bot, uid, signal):
     expiry_ts = float(signal.get("created_at", time.time())) + int(signal["duration"]) * 60
     await asyncio.sleep(max(1.0, expiry_ts - time.time()))
@@ -111,6 +119,7 @@ async def _recovery_result(a, bot, uid, signal):
         await a.send_asset_menu(bot, uid, "🔁 Recovery unresolved → select a fresh asset.")
         return
     result = a.verify_result(float(signal["price"]), expiry, signal["direction"])
+    _record_result(a, signal, result, expiry)
     await a.send_text(bot, "📊 SHORT RECOVERY RESULT\n\n" f"📈 {signal['pair']}\n" f"{'⬆️' if signal['direction']=='UP' else '⬇️'} {signal['direction']}\n" f"💰 Entry: {a.fmt_price(signal['price'])}\n" f"🏁 Expiry: {a.fmt_price(expiry)}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🔎 Verification: {source}\n\n{'✅' if result=='WIN' else '❌' if result=='LOSS' else '➖'} {result}\n\n⚠️ RECOVERY IS ONE-SHOT — AUTO TRADE OFF", uid)
     a.active_signal.pop(uid, None); a.selected_asset.pop(uid, None)
     await a.send_asset_menu(bot, uid, "🔁 Recovery cycle complete → select a fresh asset.")
@@ -118,15 +127,22 @@ async def _recovery_result(a, bot, uid, signal):
 
 async def _patched_monitor_result(bot, uid, signal):
     a = _app()
+    # A recovery result monitor is already active only when the signal is marked
+    # recovery. Normal signals enter this function exactly once.
     expiry_ts = float(signal.get("created_at", time.time())) + int(signal["duration"]) * 60
     await asyncio.sleep(max(1.0, expiry_ts - time.time()))
     expiry, expiry_price_ts, source = await a.get_expiry_price(signal["pair"], expiry_ts)
     if expiry is None:
         await a.send_text(bot, f"⚠️ RESULT UNRESOLVED — {signal['pair']}\nExpiry boundary price unavailable: {source}\nNo result was guessed.", uid)
-        a.active_signal.pop(uid, None); return
+        a.active_signal.pop(uid, None)
+        a.selected_asset.pop(uid, None)
+        await a.send_asset_menu(bot, uid, "⚠️ Result unresolved → select a fresh asset.")
+        return
     result = a.verify_result(float(signal["price"]), expiry, signal["direction"])
-    await a.send_text(bot, "📊 TRADE RESULT\n\n" f"📈 {signal['pair']}\n" f"{'⬆️' if signal['direction']=='UP' else '⬇️'} {signal['direction']}\n" f"💰 Entry: {a.fmt_price(signal['price'])}\n" f"🏁 Expiry: {a.fmt_price(expiry)}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🔎 Verification: {source}\n\n" f"{'✅' if result=='WIN' else '❌' if result=='LOSS' else '➖'} {result}\n\n⚠️ RESULT ONLY — AUTO TRADE OFF", uid)
+    _record_result(a, signal, result, expiry)
+    await a.send_text(bot, "📊 TRADE RESULT\n\n" f"📈 {signal['pair']}\n" f"{'⬆️' if signal['direction']=='UP' else '⬇️' if signal['direction']=='DOWN' else '➡️'} {signal['direction']}\n" f"💰 Entry: {a.fmt_price(signal['price'])}\n" f"🏁 Expiry: {a.fmt_price(expiry)}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🕐 Expiry boundary: {a.fmt_ts(expiry_ts)}\n" f"🔎 Verification: {source}\n" f"📌 Price candle: {a.fmt_ts(expiry_price_ts)}\n\n" f"{'✅' if result=='WIN' else '❌' if result=='LOSS' else '➖'} {result}\n\n⚠️ RESULT ONLY — AUTO TRADE OFF", uid)
     a.active_signal.pop(uid, None)
+
     if result == "LOSS" and not signal.get("recovery", False):
         pair = str(signal["pair"]).upper()
         a.active_signal[uid] = {"recovery_pending": True, "pair": pair}
@@ -136,35 +152,46 @@ async def _patched_monitor_result(bot, uid, signal):
         if recovery:
             a.active_signal[uid] = recovery
             await a.send_signal(bot, uid, recovery)
-            asyncio.create_task(_recovery_result(a, bot, uid, recovery)); return
+            asyncio.create_task(_recovery_result(a, bot, uid, recovery), name=f"recovery-result-{uid}-{pair}")
+            return
         a.selected_asset.pop(uid, None)
         await a.send_asset_menu(bot, uid, "⚠️ No safe short recovery setup → select a fresh asset.")
+        return
+
+    a.selected_asset.pop(uid, None)
+    if signal.get("recovery"):
+        note = "✅ Recovery WIN → select a fresh asset." if result == "WIN" else "❌ Recovery ended → select a fresh asset."
     else:
-        a.selected_asset.pop(uid, None)
-        if signal.get("recovery"):
-            note = "✅ Recovery WIN → select a fresh asset." if result == "WIN" else "❌ Recovery ended → select a fresh asset."
-        else:
-            note = "✅ WIN → select a fresh asset." if result == "WIN" else "➖ DRAW → select a fresh asset."
-        await a.send_asset_menu(bot, uid, note)
+        note = "✅ WIN → select a fresh asset." if result == "WIN" else "➖ DRAW → select a fresh asset."
+    await a.send_asset_menu(bot, uid, note)
 
 
 def _patch():
     global PATCHED
     a = _app()
-    if not a or getattr(a, "_LOSS_RECOVERY_AI_V1", False): return bool(a)
-    original = getattr(a, "monitor_result", None)
-    if not callable(original): return False
+    if not a or getattr(a, "_LOSS_RECOVERY_AI_V2", False):
+        return bool(a)
+    # Memory must finish installing its analyze/send hooks first. This removes
+    # the previous race where memory replaced this monitor and silently disabled
+    # recovery after LOSS.
+    if not getattr(a, "_CANDICE_MEMORY_INTEGRATION_V3", False):
+        return False
+    if not callable(getattr(a, "monitor_result", None)):
+        return False
     a.monitor_result = _patched_monitor_result
-    a._LOSS_RECOVERY_AI_V1 = True
-    a.log.warning("LOSS RECOVERY AI V1 ACTIVE: one-shot same-pair 1/2m strict recovery")
+    a._LOSS_RECOVERY_AI_V2 = True
+    a.log.warning("LOSS RECOVERY AI V2 ACTIVE: canonical result monitor + one-shot same-pair recovery")
+    PATCHED = True
     return True
 
 
 def _boot():
     for _ in range(1800):
         try:
-            if _patch(): return
-        except Exception: pass
+            if _patch():
+                return
+        except Exception:
+            pass
         time.sleep(0.1)
 
 threading.Thread(target=_boot, name="loss-recovery-ai", daemon=True).start()
