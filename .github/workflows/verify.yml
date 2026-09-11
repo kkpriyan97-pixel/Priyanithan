@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py candice_research_brain_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
@@ -37,6 +37,7 @@ jobs:
           memory = Path("candice_memory_brain.py").read_text(encoding="utf-8")
           memory_runtime = Path("candice_memory_integration_hotfix.py").read_text(encoding="utf-8")
           duration = Path("duration_selection_hotfix.py").read_text(encoding="utf-8")
+          research = Path("candice_research_brain_hotfix.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
@@ -55,6 +56,7 @@ jobs:
           assert 'import duration_selection_hotfix' in site
           assert 'import signal_live_update_hotfix' in site
           assert 'import native_live_signal_monitor_hotfix' in site
+          assert 'import candice_research_brain_hotfix' in site
           assert 'CommandHandler("start", app.start_cmd)' in builder
           assert 'CommandHandler("access", app.access_cmd)' in builder
           assert 'CallbackQueryHandler(app.assets_callback' in builder
@@ -86,6 +88,12 @@ jobs:
           assert "def _choose(signal, df1, df5):" in duration
           assert 'signal["duration"]' in duration
           assert "CANDICE DURATION SELECTION V1 ACTIVE" in duration
+          assert "CANDICE 24/7 RESEARCH BRAIN V1 ACTIVE" in research
+          assert "RESEARCH_INTERVAL_SECONDS = 60" in research
+          assert "TIMEFRAMES = (1, 3, 5, 10, 15)" in research
+          assert "brain.observe(snapshot)" in research
+          assert "OBSERVATION_ONLY" in research
+          assert "No broker order" not in research or "never" in research.lower()
           print("CORE STATIC VERIFY OK")
           PY
       - name: Smoke test Candice memory brain
