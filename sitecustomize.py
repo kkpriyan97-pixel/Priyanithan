@@ -52,6 +52,10 @@ try:
 except Exception:
     pass
 try:
+    import duration_selection_hotfix  # noqa: F401
+except Exception:
+    pass
+try:
     import signal_window_countdown_hotfix  # noqa: F401
 except Exception:
     pass
