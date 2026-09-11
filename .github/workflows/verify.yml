@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
@@ -36,6 +36,7 @@ jobs:
           live_ai = Path("live_ai_monitor_hotfix.py").read_text(encoding="utf-8")
           memory = Path("candice_memory_brain.py").read_text(encoding="utf-8")
           memory_runtime = Path("candice_memory_integration_hotfix.py").read_text(encoding="utf-8")
+          duration = Path("duration_selection_hotfix.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
@@ -51,6 +52,7 @@ jobs:
           assert 'import loss_recovery_ai_hotfix' in site
           assert 'import selected_scan_cycle_hotfix' in site
           assert 'import candice_memory_integration_hotfix' in site
+          assert 'import duration_selection_hotfix' in site
           assert 'import signal_live_update_hotfix' in site
           assert 'import native_live_signal_monitor_hotfix' in site
           assert 'CommandHandler("start", app.start_cmd)' in builder
@@ -80,6 +82,10 @@ jobs:
           assert "brain.record_result" in memory_runtime
           assert "MIN_EVIDENCE = 5" in memory_runtime
           assert "LOW_WIN_RATE = 45.0" in memory_runtime
+          assert "ALLOWED_DURATIONS = (2, 3, 5, 10, 15)" in duration
+          assert "def _choose(signal, df1, df5):" in duration
+          assert 'signal["duration"]' in duration
+          assert "CANDICE DURATION SELECTION V1 ACTIVE" in duration
           print("CORE STATIC VERIFY OK")
           PY
       - name: Smoke test Candice memory brain
@@ -105,4 +111,30 @@ jobs:
               assert similar
               assert brain.context_for_ai({"asset": "TEST", "timeframe": "1M", "strategy": "MOMENTUM", "regime": "TREND"})["strategy"]["samples"] == 1
           print("CANDICE MEMORY SMOKE TEST OK")
+          PY
+      - name: Smoke test duration selector
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from duration_selection_hotfix import _choose
+
+          def frame(n=40, step=0.001, body=0.8):
+              rows = []
+              p = 100.0
+              for i in range(n):
+                  o = p
+                  c = p + step
+                  h = max(o, c) + abs(step) * 0.25
+                  l = min(o, c) - abs(step) * 0.05
+                  rows.append({"timestamp": 1700000000 + i * 60, "open": o, "high": h, "low": l, "close": c})
+                  p = c
+              return pd.DataFrame(rows)
+
+          df1 = frame(step=0.02)
+          df5 = frame(step=0.01)
+          signal = {"direction": "UP", "trend_5m": "UP", "ai_confidence": 90}
+          duration, reason = _choose(signal, df1, df5)
+          assert duration in (2, 3, 5, 10, 15)
+          assert duration != 5
+          print("CANDICE DURATION SMOKE TEST OK", duration, reason)
           PY
