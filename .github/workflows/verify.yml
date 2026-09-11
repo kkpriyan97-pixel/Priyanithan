@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py candice_research_brain_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py candice_research_brain_hotfix.py candice_ai_memory_context_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
@@ -38,6 +38,7 @@ jobs:
           memory_runtime = Path("candice_memory_integration_hotfix.py").read_text(encoding="utf-8")
           duration = Path("duration_selection_hotfix.py").read_text(encoding="utf-8")
           research = Path("candice_research_brain_hotfix.py").read_text(encoding="utf-8")
+          ai_memory = Path("candice_ai_memory_context_hotfix.py").read_text(encoding="utf-8")
 
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
@@ -57,6 +58,7 @@ jobs:
           assert 'import signal_live_update_hotfix' in site
           assert 'import native_live_signal_monitor_hotfix' in site
           assert 'import candice_research_brain_hotfix' in site
+          assert 'import candice_ai_memory_context_hotfix' in site
           assert 'CommandHandler("start", app.start_cmd)' in builder
           assert 'CommandHandler("access", app.access_cmd)' in builder
           assert 'CallbackQueryHandler(app.assets_callback' in builder
@@ -93,7 +95,11 @@ jobs:
           assert "TIMEFRAMES = (1, 3, 5, 10, 15)" in research
           assert "brain.observe(snapshot)" in research
           assert "OBSERVATION_ONLY" in research
-          assert "No broker order" not in research or "never" in research.lower()
+          assert "CANDICE AI MEMORY CONTEXT V1 ACTIVE" in ai_memory
+          assert "brain.context_for_ai" in ai_memory
+          assert "openrouter.ai/api/v1/chat/completions" in ai_memory
+          assert "Never force approval" in ai_memory
+          assert "never" in ai_memory.lower() and "orders" in ai_memory.lower()
           print("CORE STATIC VERIFY OK")
           PY
       - name: Smoke test Candice memory brain
@@ -145,4 +151,23 @@ jobs:
           assert duration in (2, 3, 5, 10, 15)
           assert duration != 5
           print("CANDICE DURATION SMOKE TEST OK", duration, reason)
+          PY
+      - name: Smoke test AI memory request injection
+        run: |
+          python - <<'PY'
+          import candice_ai_memory_context_hotfix as hook
+
+          class FakeBrain:
+              def context_for_ai(self, current):
+                  return {"strategy": {"key": "TEST|5M|TREND_CONFIRM|TREND", "samples": 6, "wins": 5, "losses": 1, "historical_win_rate": 83.33}, "similar_results": [{"data": {"outcome": "WIN", "duration": 5, "lesson": "test"}}]}
+
+          original = hook._memory_context
+          hook._memory_context = lambda pair, direction, trend: {"strategy_key": "TEST|5M|TREND_CONFIRM|TREND", "samples": 6, "wins": 5, "losses": 1, "historical_win_rate": 83.33, "similar_results": [{"outcome": "WIN", "direction": "UP", "duration": 5, "lesson": "test"}]}
+          payload = {"messages": [{"role": "user", "content": "Asset: TEST\nDirection candidate: UP\n5m trend: UP\nReason: structure"}]}
+          assert hook._extract_fields(payload) == ("TEST", "UP", "UP")
+          ctx = hook._memory_context("TEST", "UP", "UP")
+          assert ctx["samples"] == 6
+          assert ctx["historical_win_rate"] == 83.33
+          hook._memory_context = original
+          print("CANDICE AI MEMORY CONTEXT SMOKE TEST OK")
           PY
