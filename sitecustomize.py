@@ -107,3 +107,7 @@ try:
     import candice_session_countdown_ui_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_session_automation_hotfix  # noqa: F401
+except Exception:
+    pass
