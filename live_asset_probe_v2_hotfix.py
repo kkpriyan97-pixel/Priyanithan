@@ -1,24 +1,31 @@
 """V2 live asset discovery diagnostics and broker-symbol fallback.
 
-The previous probe showed candidates=28/live=0 but hid every rejection reason.
-V2 adds the historically working broker symbol _BRN as a fallback candidate,
-probes sequentially to avoid flooding the candle endpoint, and logs a bounded
-set of exact rejection reasons. Only a genuinely fresh 1-minute candle is
-accepted. No broker order execution is enabled.
+Resolve app.py as the running __main__ module. The old ``import app`` path could
+create a second module with ot_client=None, producing false "not connected"
+rejections while the real websocket was connected. V2 probes a bounded set of
+broker candidates and logs exact rejection reasons. No broker order execution.
 """
 import asyncio
+import sys
 import threading
 import time
 
 PATCHED = False
-
 FALLBACK_PAIRS = ("_BRN", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD")
+
+
+def _app():
+    module = sys.modules.get("__main__")
+    if module is not None and getattr(module, "__file__", "").endswith("app.py"):
+        return module
+    import app
+    return app
 
 
 def _patch():
     global PATCHED
     try:
-        import app
+        app = _app()
     except Exception:
         return False
     if getattr(app, "_FRESH_ASSET_PROBE_V2", False):
@@ -56,18 +63,17 @@ def _patch():
         candidates.update(getattr(app, "ENV_PAIRS", []))
         if not candidates:
             candidates.update(getattr(app, "SEED_PAIRS", []))
-        # Keep a known broker-native fallback in case instrument event 1054 is
-        # not delivered on this websocket session.
         candidates.update(FALLBACK_PAIRS)
         candidates = sorted(str(p).strip().upper() for p in candidates if str(p).strip())
         live = []
         failures = []
-        # Small concurrency protects the broker endpoint from a 28-request burst.
         sem = asyncio.Semaphore(3)
+
         async def one(pair):
             async with sem:
                 ok, err = await probe(pair)
                 return pair, ok, err
+
         results = await asyncio.gather(*(one(p) for p in candidates), return_exceptions=True)
         for item in results:
             if isinstance(item, Exception):
@@ -78,6 +84,7 @@ def _patch():
                 live.append(pair)
             elif len(failures) < 10:
                 failures.append(f"{pair}: {err or 'rejected'}")
+
         app.log.warning(
             "LIVE ASSET DISCOVERY V2: candidates=%s live=%s rejected=%s",
             len(candidates), len(live), len(candidates) - len(live),
@@ -90,7 +97,7 @@ def _patch():
     app.discover_live_assets = discover_live_assets
     app._FRESH_ASSET_PROBE_V2 = True
     try:
-        app.log.warning("FRESH ASSET PROBE V2 ACTIVE: broker fallback + rejection diagnostics + bounded candle concurrency")
+        app.log.warning("FRESH ASSET PROBE V2 ACTIVE: running-app state + broker fallback + rejection diagnostics")
     except Exception:
         pass
     PATCHED = True
@@ -105,5 +112,6 @@ def _boot():
         except Exception:
             pass
         time.sleep(0.1)
+
 
 threading.Thread(target=_boot, name="fresh-asset-probe-v2", daemon=True).start()
