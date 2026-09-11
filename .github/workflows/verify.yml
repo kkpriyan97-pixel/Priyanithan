@@ -70,7 +70,6 @@ jobs:
           assert 'CommandHandler("start", app.start_cmd)' in builder
           assert 'CommandHandler("access", app.access_cmd)' in builder
           assert 'CommandHandler("session", _session_cmd)' in builder
-          assert 'CANDICE /session COMMAND REGISTERED IN APPLICATION BUILD' in builder
           assert 'CallbackQueryHandler(app.assets_callback' in builder
           assert "AI_CANDIDATE_LIMIT=12" in engine
           assert "EXPIRIES=(2,3,5,10,15)" in engine
@@ -151,6 +150,9 @@ jobs:
           assert state["mode"] == "RESEARCH_ONLY"
           assert state["next_signal_utc"].endswith("04:00:00 UTC")
           assert state["end_uae"].endswith("06:00:00 UAE")
+          active = s.session_state(ts(4, 30))
+          assert active["mode"] == "SIGNAL_SESSION"
+          assert active["end_uae"].endswith("06:00:00 UAE")
           print("CANDICE SESSION SMOKE TEST OK")
           PY
       - name: Smoke test Candice memory brain
