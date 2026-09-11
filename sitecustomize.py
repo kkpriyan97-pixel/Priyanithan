@@ -11,43 +11,39 @@ try:
     import build_application_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import signal_gate_compat_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import live_asset_probe_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import live_asset_refresh_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import live_asset_probe_v2_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import live_ai_monitor_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import final_result_precision_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import digital_countdown_hotfix  # noqa: F401
 except Exception:
     pass
-
 try:
     import loss_recovery_ai_hotfix  # noqa: F401
+except Exception:
+    pass
+try:
+    import signal_window_countdown_hotfix  # noqa: F401
 except Exception:
     pass
