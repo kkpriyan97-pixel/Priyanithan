@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -13,27 +12,18 @@ import requests
 from flask import Flask, request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
-
 from olymptrade_ws import OlympTradeClient
 from olymptrade_ws.olympconfig import parameters
 
-# When Render executes `python app.py`, Python names this module `__main__`.
-# Keep `app` as an alias to the same object so startup hotfixes cannot create a
-# second app.py module with an isolated ot_client / Telegram state.
+# Render runs this file as __main__. Keep the import name pointed at the same
+# module so startup hotfixes never create a second isolated broker state.
 if __name__ == "__main__":
     sys.modules.setdefault("app", sys.modules[__name__])
-
-# ============================================================
-# PRIYANITHAN — FRESH MAIN ENGINE
-# Direct OlympTrade candles -> technical filter -> AI -> Telegram.
-# Manual trading only. No broker order is ever submitted here.
-# ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ACCESS_CODE = os.getenv("ACCESS_CODE", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 OLYMPTRADE_ACCESS_TOKEN = os.getenv("OLYMPTRADE_ACCESS_TOKEN", "").strip()
-
 AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "72"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
@@ -41,10 +31,8 @@ CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
 CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
-
 PAIR_ENV = os.getenv("OLYMP_PAIRS", "AUTO").strip()
 ENV_PAIRS = [x.strip().upper() for x in PAIR_ENV.split(",") if x.strip() and x.strip().upper() != "AUTO"]
-
 SEED_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
     "EURJPY", "GBPJPY", "EURGBP", "AUDJPY", "CADJPY", "CHFJPY",
@@ -52,24 +40,18 @@ SEED_PAIRS = [
     "AUDUSD_OTC", "NZDUSD_OTC", "EURJPY_OTC", "GBPJPY_OTC", "AUDJPY_OTC",
     "CADJPY_OTC", "XAUUSD_OTC", "XAGUSD_OTC", "BTCUSD_OTC", "ASIA_X",
 ]
-
 ALLOWED_DURATIONS = (2, 3, 5, 10, 15)
 UAE_TZ = ZoneInfo("Asia/Dubai")
 LIVE_1M_MAX_AGE = 90.0
 LIVE_5M_MAX_AGE = 360.0
 ASSET_PAGE_SIZE = 10
-
 AUTO_TRADE = False
 MARTINGALE = False
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("priyanithan")
 APP_VERSION = "7.0-FRESH-LIVE-ASSET"
 app = Flask(__name__)
-
 ot_client = None
 runtime_loop = None
 telegram_application = None
@@ -102,10 +84,7 @@ def fmt_ts(ts):
 def wait_seconds_to_next_5m():
     now = now_uae()
     target_minute = ((now.minute // 5) + 1) * 5
-    if target_minute >= 60:
-        target = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    else:
-        target = now.replace(minute=target_minute, second=0, microsecond=0)
+    target = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0) if target_minute >= 60 else now.replace(minute=target_minute, second=0, microsecond=0)
     return max(1.0, (target - now).total_seconds())
 
 
@@ -144,14 +123,7 @@ def health():
 @app.get("/status")
 def status():
     connected = bool(ot_client and getattr(getattr(ot_client, "connection", None), "is_connected", False))
-    return {
-        "version": APP_VERSION,
-        "olymptrade_connected": connected,
-        "live_assets_cached": len(asset_cache),
-        "selected_users": len(selected_asset),
-        "auto_trade": False,
-        "martingale": False,
-    }
+    return {"version": APP_VERSION, "olymptrade_connected": connected, "live_assets_cached": len(asset_cache), "selected_users": len(selected_asset), "auto_trade": False, "martingale": False}
 
 
 @app.post("/telegram/webhook")
@@ -163,9 +135,7 @@ def telegram_webhook():
         return "Bad Request", 400
     try:
         update = Update.de_json(payload, telegram_application.bot)
-        future = asyncio.run_coroutine_threadsafe(
-            telegram_application.update_queue.put(update), runtime_loop
-        )
+        future = asyncio.run_coroutine_threadsafe(telegram_application.update_queue.put(update), runtime_loop)
         future.result(timeout=5)
         return "OK", 200
     except Exception as exc:
@@ -174,7 +144,6 @@ def telegram_webhook():
 
 
 def run_http_server():
-    """Bind the Render-required HTTP port while the async trading engine runs."""
     try:
         port = int(os.getenv("PORT", "10000"))
     except ValueError:
@@ -197,21 +166,14 @@ def normalize_candles(raw):
             continue
         try:
             ts = candle.get("timestamp", candle.get("t", candle.get("time")))
-            row = {
-                "timestamp": float(ts) if ts is not None else time.time(),
-                "open": float(candle.get("open", candle.get("o"))),
-                "high": float(candle.get("high", candle.get("h"))),
-                "low": float(candle.get("low", candle.get("l"))),
-                "close": float(candle.get("close", candle.get("c"))),
-            }
-            rows.append(row)
+            rows.append({"timestamp": float(ts) if ts is not None else time.time(), "open": float(candle.get("open", candle.get("o"))), "high": float(candle.get("high", candle.get("h"))), "low": float(candle.get("low", candle.get("l"))), "close": float(candle.get("close", candle.get("c")))})
         except (TypeError, ValueError):
             continue
     if not rows:
         return None
     df = pd.DataFrame(rows).sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
     if float(df["timestamp"].iloc[-1]) > 100_000_000_000:
-        df["timestamp"] = df["timestamp"] / 1000.0
+        df["timestamp"] /= 1000.0
     return df
 
 
@@ -247,10 +209,7 @@ async def connect_olymptrade():
         return
     while True:
         try:
-            client = OlympTradeClient(
-                access_token=OLYMPTRADE_ACCESS_TOKEN,
-                log_raw_messages=False,
-            )
+            client = OlympTradeClient(access_token=OLYMPTRADE_ACCESS_TOKEN, log_raw_messages=False)
             client.register_callback(parameters.E_TICK_UPDATE, on_tick)
             client.register_callback(1054, on_instruments)
             await client.start()
@@ -265,3 +224,319 @@ async def connect_olymptrade():
             ot_client = None
             log.exception("OLYMPTRADE CONNECTION ERROR: %s", exc)
             await asyncio.sleep(5)
+
+
+async def get_candles(pair, timeframe, count, max_age):
+    client = ot_client
+    if client is None or not client.connection.is_connected:
+        return None, "OlympTrade not connected"
+    try:
+        raw = await client.market.get_candles(pair, timeframe, count)
+    except Exception as exc:
+        return None, f"request failed: {exc}"
+    df = normalize_candles(raw)
+    if df is None or len(df) < 40:
+        return None, f"insufficient candles ({0 if df is None else len(df)})"
+    latest = float(df["timestamp"].iloc[-1])
+    age = time.time() - latest
+    if latest > time.time() + 120:
+        return None, f"future candle rejected age={age:.1f}s"
+    if age > max_age:
+        return None, f"STALE candle rejected age={age:.1f}s"
+    return df, None
+
+
+async def get_expiry_price(pair, expiry_ts):
+    client = ot_client
+    if client is None or not client.connection.is_connected:
+        return None, None, "OlympTrade not connected"
+    last_error = "no expiry candle"
+    for _ in range(8):
+        try:
+            raw = await client.market.get_candles(pair, 60, 20)
+            df = normalize_candles(raw)
+            if df is not None and not df.empty:
+                rows = sorted((float(r["timestamp"]), float(r["close"])) for _, r in df.iterrows() if float(r["close"]) > 0)
+                exact = [x for x in rows if abs(x[0] - expiry_ts) <= 2.0]
+                if exact:
+                    return exact[-1][1], exact[-1][0], "candle-exact"
+                containing = [x for x in rows if x[0] <= expiry_ts < x[0] + 60.0]
+                if containing:
+                    return containing[-1][1], containing[-1][0], "candle-boundary"
+                closed = [x for x in rows if x[0] <= expiry_ts - 0.5]
+                if closed:
+                    return closed[-1][1], closed[-1][0], "candle-closed"
+                last_error = "no candle at or before expiry boundary"
+            else:
+                last_error = "no valid expiry candles"
+        except Exception as exc:
+            last_error = str(exc)
+        await asyncio.sleep(2)
+    return None, None, last_error
+
+
+def verify_result(entry, expiry, direction):
+    if expiry == entry:
+        return "DRAW"
+    return "WIN" if (expiry > entry if direction == "UP" else expiry < entry) else "LOSS"
+
+
+def asset_keyboard(live, page=0):
+    start = page * ASSET_PAGE_SIZE
+    chunk = live[start:start + ASSET_PAGE_SIZE]
+    rows = [[InlineKeyboardButton(f"🟢 {pair}", callback_data=f"asset:{pair}")] for pair in chunk]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ PREV", callback_data=f"assets:{page - 1}"))
+    if start + ASSET_PAGE_SIZE < len(live):
+        nav.append(InlineKeyboardButton("NEXT ▶️", callback_data=f"assets:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🔄 REFRESH LIVE ASSETS", callback_data="assets:refresh")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def verify_live_pair(pair):
+    df, err = await get_candles(pair, 60, 80, LIVE_1M_MAX_AGE)
+    if df is None:
+        return False, err
+    latest = float(df["timestamp"].iloc[-1])
+    asset_cache[pair] = {"ts": latest, "checked": time.time()}
+    return True, None
+
+
+async def discover_live_assets():
+    candidates = set(broker_catalog)
+    candidates.update(ENV_PAIRS)
+    if not candidates:
+        candidates.update(SEED_PAIRS)
+    candidates = sorted(candidates)
+    sem = asyncio.Semaphore(10)
+    async def check(pair):
+        async with sem:
+            ok, _ = await verify_live_pair(pair)
+            return pair if ok else None
+    results = await asyncio.gather(*(check(pair) for pair in candidates), return_exceptions=True)
+    live = sorted({r for r in results if isinstance(r, str)})
+    log.warning("LIVE ASSET DISCOVERY: candidates=%s live=%s rejected=%s", len(candidates), len(live), len(candidates) - len(live))
+    return live
+
+
+async def send_asset_menu(bot, user_id, note=None):
+    live = await discover_live_assets()
+    if not live:
+        text = "⚠️ NO LIVE ASSETS AVAILABLE\n\nOlympTrade returned no fresh 1-minute candle.\nClosed/stale assets are never shown.\n\nTap REFRESH after the broker connection is live."
+        if note:
+            text = note + "\n\n" + text
+        await send_text(bot, text, user_id)
+        return False
+    text = "📊 LIVE ASSET SELECTION\n\nChoose one asset below.\n🟢 = fresh OlympTrade candle verified\n⏱️ Next signal window = next 5 minutes\n⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n⚠️ Manual trade only — AUTO TRADE OFF"
+    if note:
+        text = note + "\n\n" + text
+    await bot.send_message(chat_id=user_id, text=text, reply_markup=asset_keyboard(live, 0))
+    return True
+
+
+async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    if not ACCESS_CODE:
+        await update.message.reply_text("❌ ACCESS_CODE is not configured on Render.")
+        return
+    args = context.args or []
+    if not args or args[0].strip() != ACCESS_CODE:
+        await update.message.reply_text("❌ Invalid access code.")
+        return
+    authorized_users.add(int(user.id))
+    await update.message.reply_text("✅ ACCESS VERIFIED\n\n📊 LIVE ASSET SELECTION")
+    await send_asset_menu(context.bot, int(user.id))
+
+
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    if int(user.id) not in authorized_users:
+        await update.message.reply_text("Use /access YOUR_ACCESS_CODE first.")
+        return
+    await send_asset_menu(context.bot, int(user.id))
+
+
+async def assets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or int(user.id) not in authorized_users:
+        await update.message.reply_text("❌ Access required. Use /access YOUR_ACCESS_CODE first.")
+        return
+    await send_asset_menu(context.bot, int(user.id))
+
+
+async def assets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    uid = int(query.from_user.id)
+    if uid not in authorized_users:
+        await query.message.reply_text("❌ Access required.")
+        return
+    data = query.data or ""
+    if data == "assets:refresh":
+        await query.edit_message_text("🔄 Checking fresh OlympTrade candles...")
+        live = await discover_live_assets()
+        if not live:
+            await query.edit_message_text("⚠️ NO LIVE ASSETS AVAILABLE\n\nOlympTrade returned no fresh 1-minute candle.\nTap /assets again when the broker connection is live.", reply_markup=asset_keyboard([], 0))
+            return
+        await query.edit_message_text("📊 LIVE ASSET SELECTION\n\n🟢 Fresh OlympTrade candle verified. Choose an asset:\n⏱️ Next signal window = next 5 minutes\n⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n⚠️ Manual trade only — AUTO TRADE OFF", reply_markup=asset_keyboard(live, 0))
+        return
+    if data.startswith("assets:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            page = 0
+        live = await discover_live_assets()
+        await query.edit_message_reply_markup(reply_markup=asset_keyboard(live, page))
+        return
+    if data.startswith("asset:"):
+        pair = data.split(":", 1)[1].strip().upper()
+        ok, err = await verify_live_pair(pair)
+        if not ok:
+            await query.message.reply_text(f"⚠️ {pair} is not currently live: {err}\n\nChoose another live asset.")
+            return
+        selected_asset[uid] = pair
+        active_signal.pop(uid, None)
+        await query.message.reply_text(f"✅ ASSET SELECTED — {pair}\n\n🟢 Fresh 1-minute candle verified\n🤖 Candice AI analysis ON\n⏱️ Next signal window = next 5 minutes\n⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF")
+
+
+def technical_analysis(pair, df1, df5):
+    close = df1["close"]
+    last = float(close.iloc[-1]); prev = float(close.iloc[-2])
+    body = abs(float(df1["close"].iloc[-1]) - float(df1["open"].iloc[-1]))
+    rng = max(1e-12, float(df1["high"].iloc[-1]) - float(df1["low"].iloc[-1]))
+    body_ratio = body / rng
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean().iloc[-1]
+    loss = (-delta.clip(upper=0)).rolling(14).mean().iloc[-1]
+    rs = gain / loss if loss and loss > 0 else 99
+    rv = 100 - (100 / (1 + rs))
+    h5dir = "UP" if float(df5["close"].iloc[-1]) > float(df5["close"].iloc[-2]) else "DOWN"
+    up = down = 0; reasons = []
+    if last > prev: up += 1
+    elif last < prev: down += 1
+    if rv < 35: up += 1; reasons.append("RSI oversold")
+    elif rv > 65: down += 1; reasons.append("RSI overbought")
+    if body_ratio >= 0.55:
+        if last > float(df1["open"].iloc[-1]): up += 1; reasons.append("strong bullish candle")
+        elif last < float(df1["open"].iloc[-1]): down += 1; reasons.append("strong bearish candle")
+    if h5dir == "UP": up += 1
+    else: down += 1
+    signal = "UP" if up > down else "DOWN" if down > up else "NO SIGNAL"
+    confidence = int(min(95, 50 + abs(up - down) * 10))
+    return {"pair": pair, "signal": signal, "confidence": confidence, "trend_5m": h5dir, "reason": "; ".join(reasons) or "mixed structure"}
+
+
+def verify_signal_inputs(pair, df1, df5):
+    if df1 is None or df5 is None:
+        return False, "missing timeframe data"
+    if len(df1) < 40 or len(df5) < 40:
+        return False, "insufficient analysis candles"
+    age = time.time() - float(df1["timestamp"].iloc[-1])
+    if age < -120 or age > LIVE_1M_MAX_AGE:
+        return False, f"1m candle age={age:.1f}s"
+    return True, None
+
+
+async def analyze_asset(pair):
+    df1, err1 = await get_candles(pair, 60, 80, LIVE_1M_MAX_AGE)
+    if df1 is None: return None, err1
+    df5, err5 = await get_candles(pair, 300, 80, LIVE_5M_MAX_AGE)
+    if df5 is None: return None, err5
+    ok, reason = verify_signal_inputs(pair, df1, df5)
+    if not ok: return None, reason
+    tech = technical_analysis(pair, df1, df5)
+    if tech["signal"] == "NO SIGNAL": return None, "technical structure is mixed"
+    ai_reason = tech["reason"]
+    ai_confidence = max(0, min(95, tech["confidence"] + 8))
+    if OPENROUTER_API_KEY:
+        try:
+            prompt = ("You are Candice, a conservative trading-signal analyst. Return only APPROVE or REJECT plus confidence 0-100. Never invent market data. Reject weak or conflicting structure.\n\n" f"Asset: {pair}\nDirection candidate: {tech['signal']}\nTechnical confidence: {tech['confidence']}\n5m trend: {tech['trend_5m']}\nReason: {tech['reason']}")
+            response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0}, timeout=20)
+            content = response.json()["choices"][0]["message"]["content"]
+            upper = str(content).upper()
+            if "REJECT" in upper: return None, "Candice AI rejected the setup"
+            import re
+            match = re.search(r"(\d{2,3})", str(content))
+            if match: ai_confidence = int(match.group(1))
+            ai_reason = str(content).replace("\n", " ")[:220]
+        except Exception as exc:
+            log.warning("AI analysis unavailable: %s", exc)
+    if ai_confidence < AI_MIN_CONFIDENCE:
+        return None, f"AI confidence {ai_confidence}% below minimum {AI_MIN_CONFIDENCE}%"
+    return {"pair": pair, "direction": tech["signal"], "price": float(df1["close"].iloc[-1]), "duration": 5, "created_at": time.time(), "ai_confidence": ai_confidence, "confidence": tech["confidence"], "trend_5m": tech["trend_5m"], "candle_time": fmt_ts(float(df1["timestamp"].iloc[-1])), "ai_reason": ai_reason}, None
+
+
+async def monitor_result(bot, uid, signal):
+    expiry_ts = float(signal.get("created_at", time.time())) + signal["duration"] * 60
+    await asyncio.sleep(max(1.0, expiry_ts - time.time()))
+    expiry, expiry_price_ts, source = await get_expiry_price(signal["pair"], expiry_ts)
+    if expiry is None:
+        await send_text(bot, f"⚠️ RESULT UNRESOLVED — {signal['pair']}\nExpiry boundary price unavailable: {source}\nNo result was guessed.", uid)
+        active_signal.pop(uid, None); return
+    result = verify_result(float(signal["price"]), expiry, signal["direction"])
+    await send_text(bot, "📊 TRADE RESULT\n\n" f"📈 {signal['pair']}\n" f"{'⬆️' if signal['direction']=='UP' else '⬇️'} {signal['direction']}\n" f"💰 Entry: {fmt_price(signal['price'])}\n" f"🏁 Expiry: {fmt_price(expiry)}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🕐 Expiry boundary: {fmt_ts(expiry_ts)}\n" f"🔎 Verification: {source}\n" f"📌 Price candle: {fmt_ts(expiry_price_ts)}\n\n" f"{'✅' if result=='WIN' else '❌' if result=='LOSS' else '➖'} {result}\n\n⚠️ RESULT ONLY — AUTO TRADE OFF", uid)
+    active_signal.pop(uid, None)
+    if result == "LOSS":
+        selected_asset.pop(uid, None)
+        await send_asset_menu(bot, uid, "🔁 LOSS → AI will re-check live assets. Choose the next asset.")
+
+
+async def send_signal(bot, uid, signal):
+    arrow = "⬆️ UP" if signal["direction"] == "UP" else "⬇️ DOWN"
+    text = ("🔥 PRIYANITHAN AI SIGNAL 🔥\n\n" f"📈 {signal['pair']}\n" f"{arrow}\n" f"💰 Entry: {fmt_price(signal['price'])}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🤖 Candice AI: APPROVED ({signal['ai_confidence']}%)\n" f"📊 Technical: {signal['confidence']}%\n" f"🕯️ 5m Trend: {signal['trend_5m']}\n" f"🕐 Candle: {signal['candle_time']}\n" f"🧠 {signal['ai_reason']}\n\n⚠️ MANUAL TRADE — AUTO TRADE OFF")
+    await send_text(bot, text, uid)
+
+
+async def scan_loop():
+    while True:
+        await asyncio.sleep(wait_seconds_to_next_5m())
+        for uid, pair in list(selected_asset.items()):
+            if uid in active_signal: continue
+            signal, err = await analyze_asset(pair)
+            if signal is None:
+                log.info("AI SCAN NO SIGNAL pair=%s reason=%s", pair, err); continue
+            active_signal[uid] = signal
+            await send_signal(application.bot, uid, signal)
+            asyncio.create_task(monitor_result(application.bot, uid, signal))
+
+
+async def telegram_runtime(application):
+    global runtime_loop, telegram_application
+    telegram_application = application
+    runtime_loop = asyncio.get_running_loop()
+    await application.initialize(); await application.start()
+    webhook_url = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan.onrender.com").rstrip("/") + "/telegram/webhook"
+    await application.bot.set_webhook(webhook_url)
+    log.warning("TELEGRAM WEBHOOK ACTIVE: %s", webhook_url)
+    try:
+        while True: await asyncio.sleep(3600)
+    finally:
+        await application.stop(); await application.shutdown()
+
+
+async def main_async():
+    global application
+    application = build_application()
+    loop = asyncio.get_running_loop()
+    loop.create_task(connect_olymptrade())
+    loop.create_task(telegram_runtime(application))
+    loop.create_task(scan_loop())
+    while True: await asyncio.sleep(3600)
+
+
+def run():
+    threading.Thread(target=run_http_server, name="render-http", daemon=True).start()
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    run()
