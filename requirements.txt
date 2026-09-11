@@ -5,3 +5,4 @@ pandas
 ta
 matplotlib
 websockets<14
+Pillow
