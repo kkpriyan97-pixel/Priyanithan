@@ -1,10 +1,9 @@
-"""Candice recurring 2-hour signal / 2-hour research cycle.
+"""Candice recurring 2-hour signal / 1-hour research cycle.
 
-Candice alternates between a two-hour SIGNAL_SESSION and a two-hour
-RESEARCH_ONLY period. The cycle repeats continuously. Signal generation is
-blocked at the final analysis boundary as well as at the selected scan
-boundary, so the legacy/native 5-minute scan cannot bypass the session gate.
-The independent 24/7 research brain remains unaffected.
+Candice alternates between a two-hour SIGNAL_SESSION and a one-hour
+RESEARCH_ONLY interval. The cycle repeats continuously. Signal generation is
+blocked during the one-hour interval, while the independent 24/7 research
+brain remains active.
 
 This layer never places broker orders, uses broker credentials, enables
 auto-trading, enables martingale, forces signals, or weakens AI gates.
@@ -19,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 PATCHED = False
 SIGNAL_HOURS = 2
-RESEARCH_HOURS = 2
+RESEARCH_HOURS = 1
 CYCLE_HOURS = SIGNAL_HOURS + RESEARCH_HOURS
 UAE_TZ = ZoneInfo("Asia/Dubai")
 
@@ -64,7 +63,7 @@ def signal_session_active(ts=None):
 
 def _patch(module):
     global PATCHED
-    if getattr(module, "_CANDICE_SIGNAL_SESSION_V4", False):
+    if getattr(module, "_CANDICE_SIGNAL_SESSION_V5", False):
         PATCHED = True
         return True
     scan = getattr(module, "scan_cycle", None)
@@ -106,9 +105,9 @@ def _patch(module):
     module.signal_session_active = signal_session_active
     module.session_state = session_state
     module.candice_session_state = session_state()
-    module._CANDICE_SIGNAL_SESSION_V4 = True
+    module._CANDICE_SIGNAL_SESSION_V5 = True
     module.log.warning(
-        "CANDICE 2H/2H SESSION V4 ACTIVE: ALL SIGNAL PATHS GATED; research remains 24/7"
+        "CANDICE 2H/1H SESSION V5 ACTIVE: 2H SIGNAL + 1H RESEARCH; research remains 24/7"
     )
     PATCHED = True
     return True
@@ -124,4 +123,4 @@ def _boot():
             pass
         time.sleep(0.2)
 
-threading.Thread(target=_boot, name="candice-signal-session-v4", daemon=True).start()
+threading.Thread(target=_boot, name="candice-signal-session-v5", daemon=True).start()
