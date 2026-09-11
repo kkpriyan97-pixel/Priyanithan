@@ -1,9 +1,9 @@
 """Digital Telegram countdown for approved manual signals.
 
 Edits the already-sent signal message in place so the user sees a live
-HH:MM:SS countdown until the exact signal expiry. At zero it changes to an
-expiry/verifying state; the existing result monitor remains responsible for
-WIN/LOSS verification. No broker order is created or modified.
+HH:MM:SS countdown until the exact signal expiry. The countdown runs as a
+background asyncio task, so the existing result monitor starts immediately.
+No broker order is created or modified.
 """
 import asyncio
 import sys
@@ -104,8 +104,6 @@ async def _countdown_signal(module, bot, uid, signal):
                 await bot.edit_message_text(chat_id=uid, message_id=message.message_id, text=text)
                 last_text = text
             except Exception as exc:
-                # Telegram may reject an occasional duplicate edit; keep the
-                # timer alive and retry on the next interval.
                 module.log.debug("DIGITAL COUNTDOWN edit skipped: %s", exc)
         await asyncio.sleep(min(UPDATE_SECONDS, max(0.5, remaining)))
 
@@ -133,7 +131,15 @@ async def _patched_send_signal(bot, uid, signal):
     module = _app()
     if module is None:
         return
-    await _countdown_signal(module, bot, uid, signal)
+    # IMPORTANT: return immediately after scheduling the UI task. The caller
+    # must continue to create the independent exact-expiry result monitor.
+    task = asyncio.create_task(
+        _countdown_signal(module, bot, uid, signal),
+        name=f"digital-countdown-{signal.get('pair', 'asset')}-{uid}",
+    )
+    module._DIGITAL_COUNTDOWN_TASKS = getattr(module, "_DIGITAL_COUNTDOWN_TASKS", set())
+    module._DIGITAL_COUNTDOWN_TASKS.add(task)
+    task.add_done_callback(module._DIGITAL_COUNTDOWN_TASKS.discard)
 
 
 def _patch(module):
