@@ -1,10 +1,10 @@
-"""Candice recurring two-hour signal-session gate.
+"""Candice recurring 2-hour signal / 2-hour research cycle.
 
-Candice operates in repeating two-hour wall-clock slots. During each active
-slot, the existing selected-asset signal scan is allowed to run. Outside the
-slot, signal scans are blocked while the separate 24/7 research/learning brain
-continues. This layer never places broker orders, changes credentials, lowers
-AI gates, or forces a signal.
+Candice alternates between a two-hour SIGNAL_SESSION and a two-hour
+RESEARCH_ONLY period. The cycle repeats continuously. Signal scans are
+blocked during research periods while the independent 24/7 research brain
+continues. No broker orders, credentials, auto-trading, martingale, forced
+signals, or weakened AI gates are introduced.
 """
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 PATCHED = False
-SESSION_HOURS = 2
+SIGNAL_HOURS = 2
+RESEARCH_HOURS = 2
+CYCLE_HOURS = SIGNAL_HOURS + RESEARCH_HOURS
 UAE_TZ = ZoneInfo("Asia/Dubai")
 
 
@@ -29,22 +31,27 @@ def _app():
 def session_state(ts=None):
     ts = time.time() if ts is None else float(ts)
     now_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
-    slot_hour = (now_utc.hour // SESSION_HOURS) * SESSION_HOURS
-    start_utc = now_utc.replace(hour=slot_hour, minute=0, second=0, microsecond=0)
-    end_utc = start_utc + timedelta(hours=SESSION_HOURS)
-    active = start_utc <= now_utc < end_utc
-    boundary = end_utc if active else start_utc
+    cycle_hour = (now_utc.hour // CYCLE_HOURS) * CYCLE_HOURS
+    cycle_start = now_utc.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
+    signal_end = cycle_start + timedelta(hours=SIGNAL_HOURS)
+    cycle_end = cycle_start + timedelta(hours=CYCLE_HOURS)
+    active = cycle_start <= now_utc < signal_end
+    boundary = signal_end if active else cycle_end
+    next_signal = cycle_start if active else cycle_end
     remaining = max(0.0, boundary.timestamp() - ts)
     return {
         "active": active,
         "mode": "SIGNAL_SESSION" if active else "RESEARCH_ONLY",
-        "start_ts": start_utc.timestamp(),
-        "end_ts": end_utc.timestamp(),
+        "start_ts": cycle_start.timestamp(),
+        "end_ts": boundary.timestamp(),
         "remaining_seconds": remaining,
-        "start_utc": start_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "end_utc": end_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "start_uae": start_utc.astimezone(UAE_TZ).strftime("%Y-%m-%d %H:%M:%S UAE"),
-        "end_uae": end_utc.astimezone(UAE_TZ).strftime("%Y-%m-%d %H:%M:%S UAE"),
+        "start_utc": cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "end_utc": boundary.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "start_uae": cycle_start.astimezone(UAE_TZ).strftime("%Y-%m-%d %H:%M:%S UAE"),
+        "end_uae": boundary.astimezone(UAE_TZ).strftime("%Y-%m-%d %H:%M:%S UAE"),
+        "next_signal_ts": next_signal.timestamp(),
+        "next_signal_utc": next_signal.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "next_signal_uae": next_signal.astimezone(UAE_TZ).strftime("%Y-%m-%d %H:%M:%S UAE"),
     }
 
 
@@ -54,7 +61,7 @@ def signal_session_active(ts=None):
 
 def _patch(module):
     global PATCHED
-    if getattr(module, "_CANDICE_SIGNAL_SESSION_V2", False):
+    if getattr(module, "_CANDICE_SIGNAL_SESSION_V3", False):
         PATCHED = True
         return True
     scan = getattr(module, "scan_cycle", None)
@@ -67,8 +74,8 @@ def _patch(module):
         module.candice_session_state = state
         if not state["active"]:
             module.log.info(
-                "CANDICE SESSION GATE: RESEARCH_ONLY next=%s remaining=%ss",
-                state["start_utc"], int(state["remaining_seconds"]),
+                "CANDICE SESSION GATE: RESEARCH_ONLY next_signal=%s remaining=%ss",
+                state["next_signal_utc"], int(state["remaining_seconds"]),
             )
             return
         module.log.info(
@@ -81,9 +88,9 @@ def _patch(module):
     module.signal_session_active = signal_session_active
     module.session_state = session_state
     module.candice_session_state = session_state()
-    module._CANDICE_SIGNAL_SESSION_V2 = True
+    module._CANDICE_SIGNAL_SESSION_V3 = True
     module.log.warning(
-        "CANDICE 2-HOUR SESSION V2 ACTIVE: repeating 2h signal/research cycle"
+        "CANDICE 2H/2H SESSION V3 ACTIVE: 2h signal + 2h research repeating cycle"
     )
     PATCHED = True
     return True
@@ -99,4 +106,4 @@ def _boot():
             pass
         time.sleep(0.2)
 
-threading.Thread(target=_boot, name="candice-signal-session-v2", daemon=True).start()
+threading.Thread(target=_boot, name="candice-signal-session-v3", daemon=True).start()
