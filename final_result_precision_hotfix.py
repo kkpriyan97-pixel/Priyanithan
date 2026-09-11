@@ -25,14 +25,15 @@ def _app():
 
 
 async def _raw_expiry_price(a, pair, expiry_ts):
-    """Return the best price at the expiry boundary from ticks or raw candles."""
-    # Prefer a timestamped live tick at/after the expiry boundary.
+    """Return the best price at the expiry boundary from a tick or raw candles."""
+    # Only accept a tick that is genuinely close to the expiry boundary.
+    # A later tick must never be mistaken for the historical expiry price.
     ticks = getattr(a, "latest_ticks", {})
     item = ticks.get(pair) if isinstance(ticks, dict) else None
     if isinstance(item, dict):
         try:
             tick_ts = float(item.get("ts", 0) or 0)
-            if tick_ts >= expiry_ts - 3:
+            if abs(tick_ts - expiry_ts) <= 5.0:
                 for key in ("price", "p", "last", "close", "value", "ask", "bid"):
                     try:
                         value = float(item.get(key))
@@ -56,28 +57,24 @@ async def _raw_expiry_price(a, pair, expiry_ts):
         if df is None or getattr(df, "empty", True):
             return None, None, "no expiry candles"
 
-        # Candle timestamps are treated as candle-open timestamps by the
-        # broker adapter. The candle immediately before the expiry boundary is
-        # therefore the safest closed-candle result. If the feed uses close
-        # timestamps, an exact expiry timestamp is also accepted.
         rows = []
         for _, row in df.iterrows():
             try:
                 ts = float(row["timestamp"])
                 close = float(row["close"])
-                if close <= 0:
-                    continue
-                rows.append((ts, close))
+                if close > 0:
+                    rows.append((ts, close))
             except (TypeError, ValueError, KeyError):
                 continue
         if not rows:
             return None, None, "no valid expiry candles"
         rows.sort(key=lambda x: x[0])
 
+        # If the feed timestamps candle closes, an exact expiry timestamp is
+        # ideal. Otherwise use the latest candle that was already closed at
+        # the expiry boundary. This avoids using a candle from after expiry.
         exact = [x for x in rows if abs(x[0] - expiry_ts) <= 2.0]
         if exact:
-            # If an exact boundary candle exists, use it; this supports feeds
-            # whose timestamp represents the candle close.
             ts, price = exact[-1]
             return price, ts, "candle-exact"
 
@@ -114,10 +111,9 @@ async def _monitor_signal_precise(a, bot, uid, pair, direction, entry, duration,
             outcome = "WIN" if expiry_price < entry else ("DRAW" if expiry_price == entry else "LOSS")
 
         icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖", "UNRESOLVED": "⚠️"}[outcome]
-        verified = (
-            f"\n🔎 Verification: {expiry_source}"
-            f"\n🕐 Expiry boundary: {datetime.fromtimestamp(expiry_ts, tz=timezone.utc).astimezone(getattr(a, 'UAE', timezone.utc)).strftime('%H:%M:%S UAE') if hasattr(getattr(a, 'UAE', None), 'utcoffset') else datetime.fromtimestamp(expiry_ts, tz=timezone.utc).strftime('%H:%M:%S UTC')}"
-        )
+        tz = getattr(a, "UAE_TZ", timezone.utc)
+        expiry_label = datetime.fromtimestamp(expiry_ts, tz=timezone.utc).astimezone(tz).strftime("%H:%M:%S UAE")
+        verified = f"\n🔎 Verification: {expiry_source}\n🕐 Expiry boundary: {expiry_label}"
         if expiry_price_ts is not None:
             verified += f"\n📌 Price timestamp: {datetime.fromtimestamp(expiry_price_ts, tz=timezone.utc).strftime('%H:%M:%S UTC')}"
 
