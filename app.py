@@ -38,7 +38,6 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 PAIR_ENV = os.getenv("OLYMP_PAIRS", "AUTO").strip()
 ENV_PAIRS = [x.strip().upper() for x in PAIR_ENV.split(",") if x.strip() and x.strip().upper() != "AUTO"]
 
-# Used only as discovery candidates. Every asset must pass a fresh OlympTrade candle check.
 SEED_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
     "EURJPY", "GBPJPY", "EURGBP", "AUDJPY", "CADJPY", "CHFJPY",
@@ -64,14 +63,13 @@ log = logging.getLogger("priyanithan")
 APP_VERSION = "7.0-FRESH-LIVE-ASSET"
 app = Flask(__name__)
 
-# Runtime state.
 ot_client = None
 runtime_loop = None
 telegram_application = None
 authorized_users = set()
-selected_asset = {}          # telegram user id -> pair
-active_signal = {}           # telegram user id -> signal metadata
-asset_cache = {}             # pair -> last successful validation
+selected_asset = {}
+active_signal = {}
+asset_cache = {}
 broker_catalog = set()
 state_lock = threading.Lock()
 
@@ -201,7 +199,6 @@ def normalize_candles(raw):
 
 
 async def on_tick(message):
-    # Keep this callback intentionally lightweight. Candle requests are the source of truth.
     return None
 
 
@@ -273,44 +270,76 @@ async def get_candles(pair, timeframe, count, max_age):
     return df, None
 
 
-async def verify_live_pair(pair):
-    df, err = await get_candles(pair, 60, 80, LIVE_1M_MAX_AGE)
-    if df is None:
-        return False, err
-    latest = float(df["timestamp"].iloc[-1])
-    asset_cache[pair] = {"ts": latest, "checked": time.time()}
-    return True, None
+async def get_expiry_price(pair, expiry_ts):
+    """Read the price at/just before the exact expiry boundary.
+
+    This deliberately bypasses get_candles(), whose 40-candle requirement is
+    appropriate for analysis but not for result verification. OlympTrade can
+    validly return only 20 recent candles for this endpoint.
+    """
+    client = ot_client
+    if client is None or not client.connection.is_connected:
+        return None, None, "OlympTrade not connected"
+
+    last_error = "no expiry candle"
+    for attempt in range(8):
+        try:
+            raw = await client.market.get_candles(pair, 60, 20)
+            df = normalize_candles(raw)
+            if df is None or df.empty:
+                last_error = "no valid expiry candles"
+            else:
+                rows = []
+                for _, row in df.iterrows():
+                    try:
+                        ts = float(row["timestamp"])
+                        close = float(row["close"])
+                        if close > 0:
+                            rows.append((ts, close))
+                    except (TypeError, ValueError, KeyError):
+                        continue
+                rows.sort(key=lambda x: x[0])
+                if rows:
+                    # Prefer an exact boundary candle. If timestamps represent
+                    # candle starts, accept the candle containing expiry.
+                    exact = [x for x in rows if abs(x[0] - expiry_ts) <= 2.0]
+                    if exact:
+                        return exact[-1][1], exact[-1][0], "candle-exact"
+
+                    containing = [x for x in rows if x[0] <= expiry_ts < x[0] + 60.0]
+                    if containing:
+                        return containing[-1][1], containing[-1][0], "candle-boundary"
+
+                    closed = [x for x in rows if x[0] <= expiry_ts - 0.5]
+                    if closed:
+                        return closed[-1][1], closed[-1][0], "candle-closed"
+
+                    last_error = "no candle at or before expiry boundary"
+                else:
+                    last_error = "no valid expiry candles"
+        except Exception as exc:
+            last_error = str(exc)
+            log.warning("EXPIRY PRICE READ FAILED pair=%s attempt=%s: %s", pair, attempt + 1, exc)
+        await asyncio.sleep(2.0)
+    return None, None, last_error
 
 
-async def discover_live_assets():
-    # Prefer broker catalogue; use configured/common candidates only when catalogue is empty.
-    candidates = set(broker_catalog)
-    candidates.update(ENV_PAIRS)
-    if not candidates:
-        candidates.update(SEED_PAIRS)
-    candidates = sorted(candidates)
-    sem = asyncio.Semaphore(10)
+def verify_result(entry, expiry, direction):
+    if expiry == entry:
+        return "DRAW"
+    if direction == "UP":
+        return "WIN" if expiry > entry else "LOSS"
+    return "WIN" if expiry < entry else "LOSS"
 
-    async def check(pair):
-        async with sem:
-            ok, err = await verify_live_pair(pair)
-            return pair if ok else None
 
-    results = await asyncio.gather(*(check(pair) for pair in candidates), return_exceptions=True)
-    live = sorted({r for r in results if isinstance(r, str)})
-    log.warning(
-        "LIVE ASSET DISCOVERY: candidates=%s live=%s rejected=%s",
-        len(candidates), len(live), len(candidates) - len(live),
-    )
-    return live
+def extract_pairs_for_menu(message):
+    return extract_pairs(message)
 
 
 def asset_keyboard(live, page=0):
     start = page * ASSET_PAGE_SIZE
     chunk = live[start:start + ASSET_PAGE_SIZE]
-    rows = []
-    for pair in chunk:
-        rows.append([InlineKeyboardButton(f"🟢 {pair}", callback_data=f"asset:{pair}")])
+    rows = [[InlineKeyboardButton(f"🟢 {pair}", callback_data=f"asset:{pair}")] for pair in chunk]
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("◀️ PREV", callback_data=f"assets:{page - 1}"))
@@ -322,27 +351,43 @@ def asset_keyboard(live, page=0):
     return InlineKeyboardMarkup(rows)
 
 
+async def verify_live_pair(pair):
+    df, err = await get_candles(pair, 60, 80, LIVE_1M_MAX_AGE)
+    if df is None:
+        return False, err
+    latest = float(df["timestamp"].iloc[-1])
+    asset_cache[pair] = {"ts": latest, "checked": time.time()}
+    return True, None
+
+
+async def discover_live_assets():
+    candidates = set(broker_catalog)
+    candidates.update(ENV_PAIRS)
+    if not candidates:
+        candidates.update(SEED_PAIRS)
+    candidates = sorted(candidates)
+    sem = asyncio.Semaphore(10)
+
+    async def check(pair):
+        async with sem:
+            ok, _ = await verify_live_pair(pair)
+            return pair if ok else None
+
+    results = await asyncio.gather(*(check(pair) for pair in candidates), return_exceptions=True)
+    live = sorted({r for r in results if isinstance(r, str)})
+    log.warning("LIVE ASSET DISCOVERY: candidates=%s live=%s rejected=%s", len(candidates), len(live), len(candidates) - len(live))
+    return live
+
+
 async def send_asset_menu(bot, user_id, note=None):
     live = await discover_live_assets()
     if not live:
-        text = (
-            "⚠️ NO LIVE ASSETS AVAILABLE\n\n"
-            "OlympTrade returned no fresh 1-minute candle.\n"
-            "Closed/stale assets are never shown.\n\n"
-            "Tap REFRESH after the broker connection is live."
-        )
+        text = "⚠️ NO LIVE ASSETS AVAILABLE\n\nOlympTrade returned no fresh 1-minute candle.\nClosed/stale assets are never shown.\n\nTap REFRESH after the broker connection is live."
         if note:
             text = note + "\n\n" + text
         await send_text(bot, text, user_id)
         return False
-    text = (
-        "📊 LIVE ASSET SELECTION\n\n"
-        "Choose one asset below.\n"
-        "🟢 = fresh OlympTrade candle verified\n"
-        "⏱️ Signal cycle = every 5 minutes\n"
-        "⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n"
-        "⚠️ Manual trade only — AUTO TRADE OFF"
-    )
+    text = "📊 LIVE ASSET SELECTION\n\nChoose one asset below.\n🟢 = fresh OlympTrade candle verified\n⏱️ Signal cycle = every 5 minutes\n⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n⚠️ Manual trade only — AUTO TRADE OFF"
     if note:
         text = note + "\n\n" + text
     await bot.send_message(chat_id=user_id, text=text, reply_markup=asset_keyboard(live, 0))
@@ -392,137 +437,82 @@ async def assets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid not in authorized_users:
         await query.message.reply_text("❌ Access required.")
         return
-
     data = query.data or ""
     if data == "assets:refresh":
         await query.edit_message_text("🔄 Checking fresh OlympTrade candles...")
         live = await discover_live_assets()
         if not live:
-            await query.edit_message_text(
-                "⚠️ NO LIVE ASSETS AVAILABLE\n\n"
-                "OlympTrade returned no fresh 1-minute candle.\n"
-                "Tap /assets again when the broker connection is live.",
-                reply_markup=asset_keyboard([], 0),
-            )
+            await query.edit_message_text("⚠️ NO LIVE ASSETS AVAILABLE\n\nOlympTrade returned no fresh 1-minute candle.\nTap /assets again when the broker connection is live.", reply_markup=asset_keyboard([], 0))
             return
-        await query.edit_message_text(
-            "📊 LIVE ASSET SELECTION\n\n🟢 Fresh OlympTrade candle verified. Choose an asset:",
-            reply_markup=asset_keyboard(live, 0),
-        )
+        await query.edit_message_text("📊 LIVE ASSET SELECTION\n\n🟢 Fresh OlympTrade candle verified. Choose an asset:", reply_markup=asset_keyboard(live, 0))
         return
-
     if data.startswith("assets:"):
         try:
             page = int(data.split(":", 1)[1])
         except ValueError:
             page = 0
         live = await discover_live_assets()
-        await query.edit_message_text(
-            "📊 LIVE ASSET SELECTION\n\n🟢 Fresh OlympTrade candle verified. Choose an asset:",
-            reply_markup=asset_keyboard(live, page),
+        await query.edit_message_reply_markup(reply_markup=asset_keyboard(live, page))
+        return
+    if data.startswith("asset:"):
+        pair = data.split(":", 1)[1].strip().upper()
+        ok, err = await verify_live_pair(pair)
+        if not ok:
+            await query.message.reply_text(f"⚠️ {pair} is not currently live: {err}\n\nChoose another live asset.")
+            return
+        selected_asset[uid] = pair
+        active_signal.pop(uid, None)
+        await query.message.reply_text(
+            f"✅ ASSET SELECTED — {pair}\n\n"
+            "🟢 Fresh 1-minute candle verified\n"
+            "🤖 Candice AI analysis ON\n"
+            "⏱️ Next signal window = next 5 minutes\n"
+            "⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n"
+            "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF"
         )
-        return
-
-    if not data.startswith("asset:"):
-        return
-    pair = data.split(":", 1)[1].strip().upper()
-    ok, err = await verify_live_pair(pair)
-    if not ok:
-        await query.edit_message_text(
-            f"❌ {pair} is no longer live.\n\n{err}\n\nRefresh and choose another asset."
-        )
-        return
-
-    selected_asset[uid] = pair
-    active_signal.pop(uid, None)
-    next_in = int(round(wait_seconds_to_next_5m()))
-    await query.edit_message_text(
-        f"✅ ASSET SELECTED: {pair}\n\n"
-        "🟢 LIVE CANDLE VERIFIED\n"
-        "🤖 AI analysis: ON\n"
-        "⏱️ Signal cycle: every 5 minutes\n"
-        "📊 AI duration: 2 / 3 / 5 / 10 / 15 MIN\n"
-        f"⏳ Next signal window in ~{next_in}s\n\n"
-        "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF"
-    )
-    log.warning("USER ASSET SELECTED: user=%s pair=%s", uid, pair)
-
-
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
-    rs = gain / loss.replace(0, 1e-12)
-    return 100 - (100 / (1 + rs))
 
 
 def technical_analysis(pair, df1, df5):
-    c = df1["close"]
-    e9 = ema(c, 9).iloc[-1]
-    e21 = ema(c, 21).iloc[-1]
-    e50 = ema(c, 50).iloc[-1]
-    macd = ema(c, 12) - ema(c, 26)
-    macd_sig = ema(macd, 9)
-    rv = float(rsi(c).iloc[-1])
-    last = float(c.iloc[-1])
-    prev = float(c.iloc[-2])
-    body = abs(last - float(df1["open"].iloc[-1]))
+    close = df1["close"]
+    last = float(close.iloc[-1])
+    prev = float(close.iloc[-2])
+    body = abs(float(df1["close"].iloc[-1]) - float(df1["open"].iloc[-1]))
     rng = max(1e-12, float(df1["high"].iloc[-1]) - float(df1["low"].iloc[-1]))
     body_ratio = body / rng
-
-    h5 = df5["close"]
-    h5e9 = ema(h5, 9).iloc[-1]
-    h5e21 = ema(h5, 21).iloc[-1]
-    h5dir = "UP" if h5e9 > h5e21 else "DOWN" if h5e9 < h5e21 else "FLAT"
-
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean().iloc[-1]
+    loss = (-delta.clip(upper=0)).rolling(14).mean().iloc[-1]
+    rs = gain / loss if loss and loss > 0 else 99
+    rv = 100 - (100 / (1 + rs))
+    h5dir = "UP" if float(df5["close"].iloc[-1]) > float(df5["close"].iloc[-2]) else "DOWN"
     up = 0
     down = 0
     reasons = []
-    if e9 > e21:
-        up += 2; reasons.append("1m EMA9>EMA21")
-    elif e9 < e21:
-        down += 2; reasons.append("1m EMA9<EMA21")
-    if e21 > e50:
-        up += 1
-    elif e21 < e50:
-        down += 1
-    if macd.iloc[-1] > macd_sig.iloc[-1]:
-        up += 2; reasons.append("MACD bullish")
-    else:
-        down += 2; reasons.append("MACD bearish")
-    if 50 <= rv <= 68:
-        up += 1
-    elif 32 <= rv < 50:
-        down += 1
     if last > prev:
         up += 1
     elif last < prev:
+        down += 1
+    if rv < 35:
+        up += 1; reasons.append("RSI oversold")
+    elif rv > 65:
+        down += 1; reasons.append("RSI overbought")
+    if body_ratio >= 0.55:
+        if last > float(df1["open"].iloc[-1]):
+            up += 1; reasons.append("strong bullish candle")
+        else:
+            down += 1; reasons.append("strong bearish candle")
+    if last > float(df1["close"].iloc[-4]):
+        up += 1
+    elif last < float(df1["close"].iloc[-4]):
         down += 1
     if h5dir == "UP":
         up += 2; reasons.append("5m trend UP")
     elif h5dir == "DOWN":
         down += 2; reasons.append("5m trend DOWN")
-
     direction = "UP" if up > down else "DOWN" if down > up else "NONE"
     score = max(up, down)
     confidence = int(min(95, 50 + score * 6 + (5 if body_ratio >= 0.55 else 0)))
-    return {
-        "pair": pair,
-        "direction": direction,
-        "confidence": confidence,
-        "price": last,
-        "rsi": round(rv, 2),
-        "body_ratio": round(body_ratio, 2),
-        "trend_5m": h5dir,
-        "up_votes": up,
-        "down_votes": down,
-        "reasons": reasons,
-        "candle_time": fmt_ts(float(df1["timestamp"].iloc[-1])),
-    }
+    return {"pair": pair, "direction": direction, "confidence": confidence, "price": last, "rsi": round(rv, 2), "body_ratio": round(body_ratio, 2), "trend_5m": h5dir, "up_votes": up, "down_votes": down, "reasons": reasons, "candle_time": fmt_ts(float(df1["timestamp"].iloc[-1]))}
 
 
 def ai_request(prompt):
@@ -535,32 +525,12 @@ def ai_request(prompt):
         providers.append(("Groq", "https://api.groq.com/openai/v1/chat/completions", GROQ_API_KEY, GROQ_MODEL))
     if not providers:
         return None, "No AI provider configured"
-
-    system = (
-        "You are Candice, a disciplined professional market analyst. "
-        "Use ONLY the supplied live candle/indicator snapshot. Do not invent price data. "
-        "Approve only when direction is technically coherent with the 5m trend and the 1m structure. "
-        "Return JSON only: decision APPROVE/REJECT, direction UP/DOWN, confidence 0-100, "
-        "duration_min one of 2,3,5,10,15, reason short. Never return 1 minute."
-    )
-    body = {
-        "model": None,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 300,
-    }
+    system = ("You are Candice, a disciplined professional market analyst. Use ONLY the supplied live candle/indicator snapshot. Do not invent price data. Approve only when direction is technically coherent with the 5m trend and the 1m structure. Return JSON only: decision APPROVE/REJECT, direction UP/DOWN, confidence 0-100, duration_min one of 2,3,5,10,15, reason short. Never return 1 minute.")
+    body = {"model": None, "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}], "temperature": 0.1, "max_tokens": 300}
     for name, url, key, model in providers:
         body["model"] = model
         try:
-            r = requests.post(
-                url,
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json=body,
-                timeout=30,
-            )
+            r = requests.post(url, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, json=body, timeout=30)
             if r.status_code >= 400:
                 log.warning("AI %s HTTP %s", name, r.status_code)
                 continue
@@ -569,8 +539,7 @@ def ai_request(prompt):
             if isinstance(content, list):
                 content = "".join(str(x.get("text", "")) for x in content if isinstance(x, dict))
             content = str(content).strip().replace("```json", "").replace("```", "").strip()
-            result = json.loads(content)
-            return result, name
+            return json.loads(content), name
         except Exception as exc:
             log.warning("AI %s failed: %s", name, exc)
     return None, "All AI providers failed"
@@ -589,21 +558,7 @@ async def analyze_selected(uid, pair):
     if tech["direction"] == "NONE" or tech["confidence"] < 62:
         log.info("SELECTED TECHNICAL REJECT: pair=%s direction=%s confidence=%s", pair, tech["direction"], tech["confidence"])
         return None
-
-    prompt = json.dumps({
-        "market": "OlympTrade live candles",
-        "pair": pair,
-        "entry_price": tech["price"],
-        "1m_candle_time": tech["candle_time"],
-        "1m_direction": tech["direction"],
-        "technical_confidence": tech["confidence"],
-        "5m_trend": tech["trend_5m"],
-        "rsi": tech["rsi"],
-        "body_ratio": tech["body_ratio"],
-        "up_votes": tech["up_votes"],
-        "down_votes": tech["down_votes"],
-        "reasons": tech["reasons"],
-    })
+    prompt = json.dumps({"market": "OlympTrade live candles", "pair": pair, "entry_price": tech["price"], "1m_candle_time": tech["candle_time"], "1m_direction": tech["direction"], "technical_confidence": tech["confidence"], "5m_trend": tech["trend_5m"], "rsi": tech["rsi"], "body_ratio": tech["body_ratio"], "up_votes": tech["up_votes"], "down_votes": tech["down_votes"], "reasons": tech["reasons"]})
     ai, provider = await asyncio.to_thread(ai_request, prompt)
     if not isinstance(ai, dict):
         log.warning("AI REJECT: pair=%s provider=%s", pair, provider)
@@ -621,60 +576,40 @@ async def analyze_selected(uid, pair):
     if duration not in ALLOWED_DURATIONS:
         log.info("AI GATE REJECT: pair=%s invalid_duration=%s", pair, duration)
         return None
-    return {
-        **tech,
-        "ai_confidence": confidence,
-        "duration": duration,
-        "ai_reason": str(ai.get("reason", "Candice AI approved live structure"))[:220],
-        "provider": provider,
-        "created_at": time.time(),
-    }
+    return {**tech, "ai_confidence": confidence, "duration": duration, "ai_reason": str(ai.get("reason", "Candice AI approved live structure"))[:220], "provider": provider, "created_at": time.time()}
 
 
 async def send_signal(bot, uid, signal):
     arrow = "⬆️ UP" if signal["direction"] == "UP" else "⬇️ DOWN"
-    text = (
-        "🔥 PRIYANITHAN AI SIGNAL 🔥\n\n"
-        f"📈 {signal['pair']}\n"
-        f"{arrow}\n"
-        f"💰 Entry: {fmt_price(signal['price'])}\n"
-        f"⏱️ Duration: {signal['duration']} MIN\n"
-        f"🤖 Candice AI: APPROVED ({signal['ai_confidence']}%)\n"
-        f"📊 Technical: {signal['confidence']}%\n"
-        f"🕯️ 5m Trend: {signal['trend_5m']}\n"
-        f"🕐 Candle: {signal['candle_time']}\n"
-        f"🧠 {signal['ai_reason']}\n\n"
-        "⚠️ MANUAL TRADE — AUTO TRADE OFF"
-    )
+    text = ("🔥 PRIYANITHAN AI SIGNAL 🔥\n\n" f"📈 {signal['pair']}\n" f"{arrow}\n" f"💰 Entry: {fmt_price(signal['price'])}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🤖 Candice AI: APPROVED ({signal['ai_confidence']}%)\n" f"📊 Technical: {signal['confidence']}%\n" f"🕯️ 5m Trend: {signal['trend_5m']}\n" f"🕐 Candle: {signal['candle_time']}\n" f"🧠 {signal['ai_reason']}\n\n" "⚠️ MANUAL TRADE — AUTO TRADE OFF")
     await send_text(bot, text, uid)
 
 
 async def monitor_result(bot, uid, signal):
-    await asyncio.sleep(signal["duration"] * 60)
+    expiry_ts = float(signal.get("created_at", time.time())) + signal["duration"] * 60
+    await asyncio.sleep(max(1.0, expiry_ts - time.time()))
     pair = signal["pair"]
-    df, err = await get_candles(pair, 60, 20, 120)
-    if df is None:
-        await send_text(bot, f"⚠️ RESULT UNRESOLVED — {pair}\nFresh expiry candle unavailable: {err}", uid)
-        active_signal.pop(uid, None)
-        return
-    expiry = float(df["close"].iloc[-1])
     entry = float(signal["price"])
     direction = signal["direction"]
-    if expiry == entry:
-        result = "DRAW"
-    elif (direction == "UP" and expiry > entry) or (direction == "DOWN" and expiry < entry):
-        result = "WIN"
-    else:
-        result = "LOSS"
+    expiry, expiry_price_ts, source = await get_expiry_price(pair, expiry_ts)
+    if expiry is None:
+        await send_text(bot, f"⚠️ RESULT UNRESOLVED — {pair}\nExpiry boundary price unavailable: {source}\nNo result was guessed.", uid)
+        active_signal.pop(uid, None)
+        return
+    result = verify_result(entry, expiry, direction)
     await send_text(
         bot,
-        f"📊 TRADE RESULT\n\n"
+        "📊 TRADE RESULT\n\n"
         f"📈 {pair}\n"
         f"{'⬆️' if direction == 'UP' else '⬇️'} {direction}\n"
         f"💰 Entry: {fmt_price(entry)}\n"
         f"🏁 Expiry: {fmt_price(expiry)}\n"
-        f"⏱️ Duration: {signal['duration']} MIN\n\n"
-        f"{'✅' if result == 'WIN' else '❌' if result == 'LOSS' else '➖'} {result}",
+        f"⏱️ Duration: {signal['duration']} MIN\n"
+        f"🕐 Expiry boundary: {fmt_ts(expiry_ts)}\n"
+        f"🔎 Verification: {source}\n"
+        f"📌 Price candle: {fmt_ts(expiry_price_ts)}\n\n"
+        f"{'✅' if result == 'WIN' else '❌' if result == 'LOSS' else '➖'} {result}\n\n"
+        "⚠️ RESULT ONLY — AUTO TRADE OFF",
         uid,
     )
     active_signal.pop(uid, None)
@@ -722,46 +657,33 @@ async def telegram_runtime(application):
     telegram_application = application
     await application.initialize()
     await application.start()
-
-    tasks = [
-        asyncio.create_task(connect_olymptrade(), name="olymptrade-live"),
-        asyncio.create_task(selected_cycle(application), name="selected-5m-cycle"),
-    ]
+    tasks = [asyncio.create_task(connect_olymptrade(), name="olymptrade-live"), asyncio.create_task(selected_cycle(application), name="selected-5m-cycle")]
     webhook_base = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan.onrender.com").rstrip("/")
-    webhook_url = f"{webhook_base}/telegram/webhook"
-    await application.bot.set_webhook(
-        url=webhook_url,
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"],
-    )
-    log.warning("TELEGRAM WEBHOOK ACTIVE: %s", webhook_url)
-    log.warning("FINAL MODE: live asset buttons -> selected pair -> exact 5-minute cycle -> WIN/LOSS")
-    log.warning("AUTO_TRADE=%s MARTINGALE=%s DURATIONS=%s", AUTO_TRADE, MARTINGALE, ALLOWED_DURATIONS)
-
+    webhook_url = webhook_base + "/telegram/webhook"
     try:
-        await asyncio.Event().wait()
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await application.stop()
-        await application.shutdown()
+        await application.bot.set_webhook(webhook_url, drop_pending_updates=True)
+        log.warning("TELEGRAM WEBHOOK SET: %s", webhook_url)
+    except Exception as exc:
+        log.exception("TELEGRAM WEBHOOK SET FAILED: %s", exc)
+    while True:
+        await asyncio.sleep(3600)
 
 
-def main():
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
-    if not OLYMPTRADE_ACCESS_TOKEN:
-        raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN missing")
-
+async def run_async():
+    global telegram_application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("access", access_cmd))
     application.add_handler(CommandHandler("assets", assets_cmd))
     application.add_handler(CallbackQueryHandler(assets_callback, pattern=r"^(asset:|assets:)"))
+    telegram_application = application
+    flask_thread = threading.Thread(target=start_flask, name="flask", daemon=True)
+    flask_thread.start()
+    await telegram_runtime(application)
 
-    threading.Thread(target=start_flask, name="flask", daemon=True).start()
-    asyncio.run(telegram_runtime(application))
+
+def main():
+    asyncio.run(run_async())
 
 
 if __name__ == "__main__":
