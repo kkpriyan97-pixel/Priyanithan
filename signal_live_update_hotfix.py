@@ -1,9 +1,9 @@
-"""Live signal status updates immediately after a qualified signal is sent.
+"""Live monitoring + result/recovery bridge for final signal-engine alerts.
 
-The final signal engine currently sends its approved signal directly through
-send_to_recipients(). This patch wraps that path so every approved signal also
-starts a read-only Telegram monitoring stream immediately. It never places,
-changes, or closes a broker order and never changes the AI gate.
+The final signal engine sends approved alerts through send_to_recipients().
+This patch keeps that path read-only but connects it to the native result
+verification and strict one-shot Candice recovery lifecycle. No broker order
+is ever placed, changed, or closed.
 """
 import asyncio
 import re
@@ -26,7 +26,7 @@ def _parse_signal(text):
     pair_m = re.search(r"📈\s*([^\n]+)", text)
     dir_m = re.search(r"(?:⬆️|⬇️)\s*(UP|DOWN)", text, re.I)
     entry_m = re.search(r"💰\s*Entry:\s*([^\n]+)", text)
-    dur_m = re.search(r"⏱️\s*Expiry:\s*(\d+)\s*MIN", text, re.I)
+    dur_m = re.search(r"⏱️\s*Duration:\s*(\d+)\s*MIN", text, re.I)
     if not (pair_m and dir_m and entry_m and dur_m):
         return None
     try:
@@ -71,11 +71,15 @@ async def _monitor(a, bot, recipients, signal):
         live_price = None
         source = "waiting for live candle"
         try:
-            raw = await a.ot_client.market.get_candles(pair, 60, 2)
-            df = a.normalize_candles(raw)
-            if df is not None and not df.empty:
-                live_price = float(df["close"].iloc[-1])
-                source = "live 1m candle"
+            client = getattr(a, "ot_client", None)
+            if client is not None and client.connection.is_connected:
+                raw = await client.market.get_candles(pair, 60, 2)
+                df = a.normalize_candles(raw)
+                if df is not None and not df.empty:
+                    live_price = float(df["close"].iloc[-1])
+                    source = "live 1m candle"
+            else:
+                source = "OlympTrade not connected"
         except Exception as exc:
             source = f"price unavailable: {str(exc)[:70]}"
 
@@ -122,33 +126,63 @@ async def _patched_send_to_recipients(bot, text):
     if not sent or a is None:
         return sent
 
-    # Only approved trade-signal messages start live monitoring. Status and
-    # rejection messages are intentionally excluded.
     signal = _parse_signal(str(text))
     if signal is None or "🧠 Candice AI: APPROVED" not in str(text):
         return sent
 
-    recipients = set()
     try:
         recipients = set(a.recipients())
     except Exception:
-        pass
+        recipients = set()
     if not recipients:
         return sent
 
-    # Replace any stale monitor for this user/pair with the newly approved one.
+    # Keep the live 30s stream independent from the expiry/result task.
     key = f"{signal['pair']}:{signal['direction']}"
-    active = getattr(a, "_LIVE_SIGNAL_MONITORS", {})
-    old = active.get(key)
+    active_monitors = getattr(a, "_LIVE_SIGNAL_MONITORS", {})
+    old = active_monitors.get(key)
     if old and not old.done():
         old.cancel()
-    task = asyncio.create_task(
+    active_monitors[key] = asyncio.create_task(
         _monitor(a, bot, recipients, signal),
         name=f"live-signal-update-{signal['pair']}-{signal['direction']}",
     )
-    active[key] = task
-    a._LIVE_SIGNAL_MONITORS = active
-    a.log.warning("LIVE SIGNAL UPDATE ACTIVE: %s %s %sM; first update sent immediately", signal["pair"], signal["direction"], signal["duration"])
+    a._LIVE_SIGNAL_MONITORS = active_monitors
+
+    # The standalone signal engine does not call app.monitor_result(). Bridge
+    # every delivered signal into that lifecycle so exact result verification
+    # and the existing strict one-shot recovery AI are always reached.
+    monitor_result = getattr(a, "monitor_result", None)
+    if callable(monitor_result):
+        result_tasks = getattr(a, "_SIGNAL_RESULT_TASKS", {})
+        for uid in recipients:
+            uid = int(uid)
+            state = {
+                "pair": signal["pair"],
+                "direction": signal["direction"],
+                "price": signal["entry"],
+                "duration": signal["duration"],
+                "created_at": signal["created_at"],
+                "ai_confidence": 0,
+                "confidence": 0,
+                "trend_5m": "UNKNOWN",
+                "candle_time": "signal-engine",
+                "ai_reason": "FINAL SIGNAL ENGINE APPROVED",
+            }
+            a.active_signal[uid] = state
+            old_result = result_tasks.get(uid)
+            if old_result and not old_result.done():
+                old_result.cancel()
+            result_tasks[uid] = asyncio.create_task(
+                monitor_result(bot, uid, state),
+                name=f"signal-result-{uid}-{signal['pair']}",
+            )
+        a._SIGNAL_RESULT_TASKS = result_tasks
+
+    a.log.warning(
+        "LIVE SIGNAL UPDATE + RESULT BRIDGE ACTIVE: %s %s %sM; 30s updates, exact expiry result, recovery lifecycle",
+        signal["pair"], signal["direction"], signal["duration"],
+    )
     return sent
 
 
@@ -160,7 +194,7 @@ def _patch():
     a = _app()
     if not a:
         return False
-    if getattr(a, "_SIGNAL_LIVE_UPDATE_V1", False):
+    if getattr(a, "_SIGNAL_LIVE_UPDATE_V2", False):
         PATCHED = True
         return True
     original = getattr(a, "send_to_recipients", None)
@@ -168,8 +202,8 @@ def _patch():
         return False
     _ORIGINAL = original
     a.send_to_recipients = _patched_send_to_recipients
-    a._SIGNAL_LIVE_UPDATE_V1 = True
-    a.log.warning("LIVE SIGNAL UPDATE V1 ACTIVE: approved signals get immediate + 30s read-only updates")
+    a._SIGNAL_LIVE_UPDATE_V2 = True
+    a.log.warning("LIVE SIGNAL UPDATE V2 ACTIVE: final signals bridge to live monitoring + exact result + recovery")
     PATCHED = True
     return True
 
