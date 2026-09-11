@@ -67,3 +67,7 @@ try:
     import native_live_signal_monitor_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_research_brain_hotfix  # noqa: F401
+except Exception:
+    pass
