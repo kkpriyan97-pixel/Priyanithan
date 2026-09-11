@@ -17,7 +17,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Compile runtime Python
         run: |
-          python -m py_compile app.py sitecustomize.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
+          python -m py_compile app.py sitecustomize.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py
           python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
       - name: Verify core safety and Telegram flow
         run: |
@@ -31,6 +31,7 @@ jobs:
           refresh = Path("live_asset_refresh_hotfix.py").read_text(encoding="utf-8")
           recovery = Path("loss_recovery_ai_hotfix.py").read_text(encoding="utf-8")
           live = Path("signal_live_update_hotfix.py").read_text(encoding="utf-8")
+          native_live = Path("native_live_signal_monitor_hotfix.py").read_text(encoding="utf-8")
           assert "AUTO_TRADE = False" in app
           assert "MARTINGALE = False" in app
           assert "LIVE ASSET SELECTION" in app
@@ -42,6 +43,7 @@ jobs:
           assert 'import live_asset_probe_v2_hotfix' in site
           assert 'import loss_recovery_ai_hotfix' in site
           assert 'import signal_live_update_hotfix' in site
+          assert 'import native_live_signal_monitor_hotfix' in site
           assert 'CommandHandler("start", app.start_cmd)' in builder
           assert 'CommandHandler("access", app.access_cmd)' in builder
           assert 'CallbackQueryHandler(app.assets_callback' in builder
@@ -53,5 +55,8 @@ jobs:
           assert "ONE recovery attempt" in recovery
           assert "LIVE SIGNAL UPDATE V2 ACTIVE" in live
           assert "monitor_result" in live
-          print("CORE SAFETY + TELEGRAM + LIVE ASSET + RECOVERY VERIFY OK")
+          assert "module.send_signal = _patched_send_signal" in native_live
+          assert "_live_monitor" in native_live
+          assert "No broker order" in native_live
+          print("CORE SAFETY + TELEGRAM + LIVE ASSET + RECOVERY + NATIVE LIVE MONITOR VERIFY OK")
           PY
