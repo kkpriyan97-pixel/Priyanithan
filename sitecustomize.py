@@ -46,3 +46,8 @@ try:
     import digital_countdown_hotfix  # noqa: F401
 except Exception:
     pass
+
+try:
+    import loss_recovery_ai_hotfix  # noqa: F401
+except Exception:
+    pass
