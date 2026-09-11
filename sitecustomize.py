@@ -16,3 +16,8 @@ try:
     import live_ai_monitor_hotfix  # noqa: F401
 except Exception:
     pass
+
+try:
+    import final_result_precision_hotfix  # noqa: F401
+except Exception:
+    pass
