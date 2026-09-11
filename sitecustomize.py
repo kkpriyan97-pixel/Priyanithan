@@ -15,6 +15,10 @@ try:
 except Exception:
     pass
 try:
+    import disable_legacy_telegram_flow  # noqa: F401
+except Exception:
+    pass
+try:
     import final_access_asset_lock_v2  # noqa: F401
 except Exception:
     pass
