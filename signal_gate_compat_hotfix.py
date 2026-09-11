@@ -35,7 +35,8 @@ def _patch():
     except Exception:
         return False
 
-    signal_engine.EXPIRIES = (1, 2, 4, 5, 15)
+    # Must match the native selected-asset UI and final signal engine.
+    signal_engine.EXPIRIES = (2, 3, 5, 10, 15)
 
     if not getattr(app, "_SIGNAL_GATE_COMPAT_V1", False):
         original = getattr(app, "call_ai", None)
@@ -58,7 +59,7 @@ def _patch():
             app.call_ai = safe_call_ai
             app._SIGNAL_GATE_COMPAT_V1 = True
             try:
-                app.log.warning("SIGNAL GATE COMPAT V1 ACTIVE: AI wording normalization + expiry set 1/2/4/5/15")
+                app.log.warning("SIGNAL GATE COMPAT V1 ACTIVE: AI wording normalization + expiry set 2/3/5/10/15")
             except Exception:
                 pass
     return True
