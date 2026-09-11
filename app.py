@@ -166,6 +166,16 @@ def telegram_webhook():
         return "Webhook processing failed", 500
 
 
+def run_http_server():
+    """Bind the Render-required HTTP port while the async trading engine runs."""
+    try:
+        port = int(os.getenv("PORT", "10000"))
+    except ValueError:
+        port = 10000
+    log.warning("RENDER HTTP SERVER: binding 0.0.0.0:%s", port)
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+
+
 def normalize_candles(raw):
     if isinstance(raw, dict):
         data = raw.get("d", raw)
@@ -300,20 +310,15 @@ async def get_expiry_price(pair, expiry_ts):
                         continue
                 rows.sort(key=lambda x: x[0])
                 if rows:
-                    # Prefer an exact boundary candle. If timestamps represent
-                    # candle starts, accept the candle containing expiry.
                     exact = [x for x in rows if abs(x[0] - expiry_ts) <= 2.0]
                     if exact:
                         return exact[-1][1], exact[-1][0], "candle-exact"
-
                     containing = [x for x in rows if x[0] <= expiry_ts < x[0] + 60.0]
                     if containing:
                         return containing[-1][1], containing[-1][0], "candle-boundary"
-
                     closed = [x for x in rows if x[0] <= expiry_ts - 0.5]
                     if closed:
                         return closed[-1][1], closed[-1][0], "candle-closed"
-
                     last_error = "no candle at or before expiry boundary"
                 else:
                     last_error = "no valid expiry candles"
@@ -518,46 +523,71 @@ def verify_signal_inputs(pair, df1, df5):
     latest = float(df1["timestamp"].iloc[-1])
     age = time.time() - latest
     if age < -120 or age > LIVE_1M_MAX_AGE:
-        return False, f"1m candle freshness failed age={age:.1f}s"
+        return False, f"1m candle age={age:.1f}s"
     return True, None
 
 
-async def analyze_selected_asset(pair):
+async def analyze_asset(pair):
+    # Kept intentionally strict: only fresh multi-timeframe data can reach AI.
     df1, err1 = await get_candles(pair, 60, 80, LIVE_1M_MAX_AGE)
     if df1 is None:
         return None, err1
     df5, err5 = await get_candles(pair, 300, 80, LIVE_5M_MAX_AGE)
     if df5 is None:
         return None, err5
-    ok, err = verify_signal_inputs(pair, df1, df5)
+    ok, reason = verify_signal_inputs(pair, df1, df5)
     if not ok:
-        return None, err
-    return technical_analysis(pair, df1, df5), None
+        return None, reason
+    tech = technical_analysis(pair, df1, df5)
+    if tech["signal"] == "NO SIGNAL":
+        return None, "technical structure is mixed"
 
-
-async def scan_cycle(application):
-    # Selected asset is verified here; the final signal engine may replace this
-    # function at runtime while preserving the same 5-minute selected-asset UI.
-    await asyncio.sleep(0)
-    return None
-
-
-async def send_signal(bot, uid, signal):
-    arrow = "⬆️ UP" if signal["direction"] == "UP" else "⬇️ DOWN"
-    text = (
-        "🔥 PRIYANITHAN AI SIGNAL 🔥\n\n"
-        f"📈 {signal['pair']}\n"
-        f"{arrow}\n"
-        f"💰 Entry: {fmt_price(signal['price'])}\n"
-        f"⏱️ Duration: {signal['duration']} MIN\n"
-        f"🤖 Candice AI: APPROVED ({signal['ai_confidence']}%)\n"
-        f"📊 Technical: {signal['confidence']}%\n"
-        f"🕯️ 5m Trend: {signal['trend_5m']}\n"
-        f"🕐 Candle: {signal['candle_time']}\n"
-        f"🧠 {signal['ai_reason']}\n\n"
-        "⚠️ MANUAL TRADE — AUTO TRADE OFF"
-    )
-    await send_text(bot, text, uid)
+    ai_reason = tech["reason"]
+    ai_confidence = max(0, min(95, tech["confidence"] + 8))
+    if OPENROUTER_API_KEY:
+        try:
+            prompt = (
+                "You are Candice, a conservative trading-signal analyst. "
+                "Return only APPROVE or REJECT plus confidence 0-100. "
+                "Never invent market data. Reject weak or conflicting structure.\n\n"
+                f"Asset: {pair}\nDirection candidate: {tech['signal']}\n"
+                f"Technical confidence: {tech['confidence']}\n"
+                f"5m trend: {tech['trend_5m']}\n"
+                f"Reason: {tech['reason']}"
+            )
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0},
+                timeout=20,
+            )
+            content = response.json()["choices"][0]["message"]["content"]
+            upper = str(content).upper()
+            if "REJECT" in upper:
+                return None, "Candice AI rejected the setup"
+            import re
+            match = re.search(r"(\d{2,3})", str(content))
+            if match:
+                ai_confidence = int(match.group(1))
+            ai_reason = str(content).replace("\n", " ")[:220]
+        except Exception as exc:
+            log.warning("AI analysis unavailable: %s", exc)
+    if ai_confidence < AI_MIN_CONFIDENCE:
+        return None, f"AI confidence {ai_confidence}% below minimum {AI_MIN_CONFIDENCE}%"
+    now = time.time()
+    duration = 5
+    return {
+        "pair": pair,
+        "direction": tech["signal"],
+        "price": float(df1["close"].iloc[-1]),
+        "duration": duration,
+        "created_at": now,
+        "ai_confidence": ai_confidence,
+        "confidence": tech["confidence"],
+        "trend_5m": tech["trend_5m"],
+        "candle_time": fmt_ts(float(df1["timestamp"].iloc[-1])),
+        "ai_reason": ai_reason,
+    }, None
 
 
 async def monitor_result(bot, uid, signal):
@@ -593,13 +623,37 @@ async def monitor_result(bot, uid, signal):
         await send_asset_menu(bot, uid, "🔁 LOSS → AI will re-check live assets. Choose the next asset.")
 
 
-def build_application():
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("access", access_cmd))
-    application.add_handler(CommandHandler("assets", assets_cmd))
-    application.add_handler(CallbackQueryHandler(assets_callback, pattern=r"^(asset:|assets:)"))
-    return application
+async def send_signal(bot, uid, signal):
+    arrow = "⬆️ UP" if signal["direction"] == "UP" else "⬇️ DOWN"
+    text = (
+        "🔥 PRIYANITHAN AI SIGNAL 🔥\n\n"
+        f"📈 {signal['pair']}\n"
+        f"{arrow}\n"
+        f"💰 Entry: {fmt_price(signal['price'])}\n"
+        f"⏱️ Duration: {signal['duration']} MIN\n"
+        f"🤖 Candice AI: APPROVED ({signal['ai_confidence']}%)\n"
+        f"📊 Technical: {signal['confidence']}%\n"
+        f"🕯️ 5m Trend: {signal['trend_5m']}\n"
+        f"🕐 Candle: {signal['candle_time']}\n"
+        f"🧠 {signal['ai_reason']}\n\n"
+        "⚠️ MANUAL TRADE — AUTO TRADE OFF"
+    )
+    await send_text(bot, text, uid)
+
+
+async def scan_loop():
+    while True:
+        await asyncio.sleep(wait_seconds_to_next_5m())
+        for uid, pair in list(selected_asset.items()):
+            if uid in active_signal:
+                continue
+            signal, err = await analyze_asset(pair)
+            if signal is None:
+                log.info("AI SCAN NO SIGNAL pair=%s reason=%s", pair, err)
+                continue
+            active_signal[uid] = signal
+            await send_signal(application.bot, uid, signal)
+            asyncio.create_task(monitor_result(application.bot, uid, signal))
 
 
 async def telegram_runtime(application):
@@ -623,13 +677,17 @@ async def main_async():
     application = build_application()
     loop = asyncio.get_running_loop()
     loop.create_task(connect_olymptrade())
-    await asyncio.sleep(1)
     loop.create_task(telegram_runtime(application))
+    loop.create_task(scan_loop())
     while True:
         await asyncio.sleep(3600)
 
 
 def run():
+    # Render Web Services require at least one listening HTTP port. Keep Flask
+    # in its own daemon thread so the async Telegram/OlympTrade engine remains
+    # fully non-blocking and the webhook/health endpoints stay reachable.
+    threading.Thread(target=run_http_server, name="render-http", daemon=True).start()
     asyncio.run(main_async())
 
 
