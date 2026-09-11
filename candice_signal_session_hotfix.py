@@ -1,10 +1,13 @@
 """Candice recurring 2-hour signal / 2-hour research cycle.
 
 Candice alternates between a two-hour SIGNAL_SESSION and a two-hour
-RESEARCH_ONLY period. The cycle repeats continuously. Signal scans are
-blocked during research periods while the independent 24/7 research brain
-continues. No broker orders, credentials, auto-trading, martingale, forced
-signals, or weakened AI gates are introduced.
+RESEARCH_ONLY period. The cycle repeats continuously. Signal generation is
+blocked at the final analysis boundary as well as at the selected scan
+boundary, so the legacy/native 5-minute scan cannot bypass the session gate.
+The independent 24/7 research brain remains unaffected.
+
+This layer never places broker orders, uses broker credentials, enables
+auto-trading, enables martingale, forces signals, or weakens AI gates.
 """
 from __future__ import annotations
 
@@ -61,13 +64,27 @@ def signal_session_active(ts=None):
 
 def _patch(module):
     global PATCHED
-    if getattr(module, "_CANDICE_SIGNAL_SESSION_V3", False):
+    if getattr(module, "_CANDICE_SIGNAL_SESSION_V4", False):
         PATCHED = True
         return True
     scan = getattr(module, "scan_cycle", None)
-    if not callable(scan):
+    analyze = getattr(module, "analyze_asset", None)
+    if not callable(scan) or not callable(analyze):
         return False
+
     module._CANDICE_SESSION_ORIGINAL_SCAN_CYCLE = scan
+    module._CANDICE_SESSION_ORIGINAL_ANALYZE_ASSET = analyze
+
+    async def gated_analyze(pair):
+        state = session_state()
+        module.candice_session_state = state
+        if not state["active"]:
+            module.log.info(
+                "CANDICE ANALYSIS BLOCKED: RESEARCH_ONLY pair=%s next_signal=%s",
+                pair, state["next_signal_utc"],
+            )
+            return None, "Candice signal session is closed; research mode only"
+        return await module._CANDICE_SESSION_ORIGINAL_ANALYZE_ASSET(pair)
 
     async def gated_scan(application):
         state = session_state()
@@ -84,13 +101,14 @@ def _patch(module):
         )
         return await module._CANDICE_SESSION_ORIGINAL_SCAN_CYCLE(application)
 
+    module.analyze_asset = gated_analyze
     module.scan_cycle = gated_scan
     module.signal_session_active = signal_session_active
     module.session_state = session_state
     module.candice_session_state = session_state()
-    module._CANDICE_SIGNAL_SESSION_V3 = True
+    module._CANDICE_SIGNAL_SESSION_V4 = True
     module.log.warning(
-        "CANDICE 2H/2H SESSION V3 ACTIVE: 2h signal + 2h research repeating cycle"
+        "CANDICE 2H/2H SESSION V4 ACTIVE: ALL SIGNAL PATHS GATED; research remains 24/7"
     )
     PATCHED = True
     return True
@@ -106,4 +124,4 @@ def _boot():
             pass
         time.sleep(0.2)
 
-threading.Thread(target=_boot, name="candice-signal-session-v3", daemon=True).start()
+threading.Thread(target=_boot, name="candice-signal-session-v4", daemon=True).start()
