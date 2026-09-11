@@ -99,3 +99,7 @@ try:
     import candice_win_persistence_hotfix  # noqa: F401
 except Exception:
     pass
+try:
+    import candice_recovery_ui_final_hotfix  # noqa: F401
+except Exception:
+    pass
