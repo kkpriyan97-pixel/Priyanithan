@@ -39,7 +39,10 @@ def session_state(ts=None):
     cycle_end = cycle_start + timedelta(hours=CYCLE_HOURS)
     active = cycle_start <= now_utc < signal_end
     boundary = signal_end if active else cycle_end
-    next_signal = cycle_start if active else cycle_end
+    # "Next signal session" means the next FUTURE signal-session start.
+    # While currently in SIGNAL_SESSION, that is the following cycle start;
+    # during RESEARCH_ONLY it is the end of the current research interval.
+    next_signal = cycle_end if active else cycle_end
     remaining = max(0.0, boundary.timestamp() - ts)
     return {
         "active": active,
