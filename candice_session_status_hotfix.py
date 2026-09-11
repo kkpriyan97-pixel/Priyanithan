@@ -1,12 +1,12 @@
 """Telegram-visible Candice two-hour session status.
 
-Adds a /session command and a lightweight status panel for authorized users.
-It reports the current two-hour SIGNAL_SESSION or RESEARCH_ONLY state and a
-countdown. It never enables trading, changes credentials, or places orders.
+Adds a reliable /session command for authorized users. It reports the current
+2-hour signal / 2-hour research state, remaining time, UAE timing, and next
+signal session. It never enables trading, changes credentials, or places
+orders.
 """
 from __future__ import annotations
 
-import asyncio
 import sys
 import threading
 import time
@@ -22,25 +22,25 @@ def _app():
 
 
 def _status_text(a):
-    state = getattr(a, "candice_session_state", None)
-    if callable(state):
-        state = state()
+    fn = getattr(a, "session_state", None)
+    state = fn() if callable(fn) else getattr(a, "candice_session_state", {})
     if not isinstance(state, dict):
-        fn = getattr(a, "session_state", None)
-        state = fn() if callable(fn) else {}
+        state = {}
     active = bool(state.get("active"))
     remaining = max(0, int(state.get("remaining_seconds", 0)))
     h, rem = divmod(remaining, 3600)
     m, s = divmod(rem, 60)
     mode = "🟢 SIGNAL SESSION" if active else "🧠 RESEARCH ONLY"
-    end = str(state.get("end_utc", "UNKNOWN"))
+    end_uae = str(state.get("end_uae", "UNKNOWN"))
+    next_signal = str(state.get("next_signal_uae", "UNKNOWN"))
     return (
         "🤖 CANDICE AI SESSION\n\n"
         f"{mode}\n\n"
         f"⏳ Remaining: {h:02d}:{m:02d}:{s:02d}\n"
-        f"🏁 Session end (UTC): {end}\n\n"
+        f"🏁 Current period ends: {end_uae}\n"
+        f"🚀 Next signal session: {next_signal}\n\n"
         "📡 Market research: 24/7\n"
-        "📊 Signal generation: session only\n"
+        "📊 Signal generation: 2H session only\n"
         "⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF"
     )
 
@@ -48,7 +48,7 @@ def _status_text(a):
 async def _session_cmd(update, context):
     a = _app()
     user = update.effective_user
-    if a is None or user is None:
+    if a is None or user is None or update.message is None:
         return
     authorized = getattr(a, "authorized_users", set())
     if int(user.id) not in authorized:
@@ -59,7 +59,7 @@ async def _session_cmd(update, context):
 
 def _patch(a):
     global PATCHED
-    if getattr(a, "_CANDICE_SESSION_STATUS_V1", False):
+    if getattr(a, "_CANDICE_SESSION_STATUS_V2", False):
         PATCHED = True
         return True
     app = getattr(a, "telegram_application", None)
@@ -67,13 +67,16 @@ def _patch(a):
         return False
     try:
         from telegram.ext import CommandHandler
-        app.add_handler(CommandHandler("session", _session_cmd))
+        # build_application_hotfix already registers this handler. This fallback
+        # is only for runtimes where the application was constructed elsewhere.
+        if not getattr(a, "_CANDICE_SESSION_HANDLER_REGISTERED", False):
+            app.add_handler(CommandHandler("session", _session_cmd))
     except Exception as exc:
         a.log.warning("CANDICE SESSION STATUS: handler unavailable: %s", exc)
         return False
     a.candice_session_status_text = lambda: _status_text(a)
-    a._CANDICE_SESSION_STATUS_V1 = True
-    a.log.warning("CANDICE SESSION STATUS V1 ACTIVE: /session shows 2-hour state")
+    a._CANDICE_SESSION_STATUS_V2 = True
+    a.log.warning("CANDICE SESSION STATUS V2 ACTIVE: /session + UAE countdown")
     PATCHED = True
     return True
 
@@ -88,4 +91,4 @@ def _boot():
             pass
         time.sleep(0.2)
 
-threading.Thread(target=_boot, name="candice-session-status", daemon=True).start()
+threading.Thread(target=_boot, name="candice-session-status-v2", daemon=True).start()
