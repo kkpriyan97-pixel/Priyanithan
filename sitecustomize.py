@@ -18,7 +18,3 @@ try:
     import final_access_asset_lock_v2  # noqa: F401
 except Exception:
     pass
-try:
-    import telegram_polling_fallback  # noqa: F401
-except Exception:
-    pass
