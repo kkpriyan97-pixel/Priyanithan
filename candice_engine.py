@@ -100,13 +100,47 @@ def choose_expiry(s:dict)->int:
 def _ai_prompt(s,memory):
     return f'''You are Candice, a conservative professional FLEX/fixed-time market analyst. Manual alerts only; never place trades. Do not claim certainty. Approve only fresh, multi-indicator alignment with no material conflict. Prefer NO SIGNAL when evidence is weak, stale, contradictory, overextended, or near a likely reversal. Return ONLY JSON: {{"decision":"APPROVE|REJECT","direction":"UP|DOWN|","confidence":0-100,"expiry":2|3|5|15,"reason":"short evidence-based reason"}}. Technical evidence: {json.dumps(s)}. Historical memory: {json.dumps(memory)[:5000]}'''
 
-def ai_review(snapshot,memory):
-    key=os.getenv("OPENROUTER_API_KEY","").strip()
-    if not key:return {"decision":"REJECT","confidence":0,"reason":"AI provider not configured"}
-    model=os.getenv("OPENROUTER_MODEL","openrouter/free").strip()
+def _parse_ai_content(content):
     try:
-        r=requests.post("https://openrouter.ai/api/v1/chat/completions",headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json={"model":model,"messages":[{"role":"system","content":"Return strict JSON only."},{"role":"user","content":_ai_prompt(snapshot,memory)}],"temperature":0.1,"max_tokens":300},timeout=AI_TIMEOUT); r.raise_for_status(); content=r.json()["choices"][0]["message"]["content"]; a=json.loads(content[content.find("{"):content.rfind("}")+1]); return a if isinstance(a,dict) else {"decision":"REJECT","confidence":0,"reason":"invalid AI response"}
-    except Exception as exc:log.warning("AI review unavailable: %s",exc); return {"decision":"REJECT","confidence":0,"reason":"AI review unavailable"}
+        text=str(content or "").strip()
+        start=text.find("{"); end=text.rfind("}")
+        if start<0 or end<start:return None
+        obj=json.loads(text[start:end+1])
+        return obj if isinstance(obj,dict) else None
+    except Exception:
+        return None
+
+def _request_ai(url, key, model, ai_input):
+    payload={"model":model,"messages":[{"role":"system","content":"Return strict JSON only."},{"role":"user","content":_ai_prompt(ai_input.get("technical",ai_input),ai_input.get("memory",{}))}],"temperature":0.1,"max_tokens":300,"response_format":{"type":"json_object"}}
+    r=requests.post(url,headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
+    r.raise_for_status()
+    data=r.json(); choices=data.get("choices") or []
+    if not choices: raise ValueError("AI response has no choices")
+    content=(choices[0].get("message") or {}).get("content","")
+    parsed=_parse_ai_content(content)
+    if not parsed: raise ValueError("AI returned invalid JSON")
+    return parsed
+
+def ai_review(snapshot,memory):
+    ai_input={"technical":snapshot,"memory":memory}
+    providers=(
+        ("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"),
+        ("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),
+    )
+    attempted=False
+    for name,key,model,url in providers:
+        if not key:
+            continue
+        attempted=True
+        try:
+            result=_request_ai(url,key,model,ai_input)
+            log.info("AI PROVIDER=%s MODEL=%s DECISION=%s CONFIDENCE=%s EXPIRY=%s",name,model,result.get("decision",""),result.get("confidence",0),result.get("expiry",0))
+            return result
+        except Exception as exc:
+            log.warning("AI provider %s unavailable: %s",name,exc)
+    if not attempted:
+        return {"decision":"REJECT","confidence":0,"reason":"Cerebras/Groq AI provider not configured"}
+    return {"decision":"REJECT","confidence":0,"reason":"Cerebras and Groq AI review unavailable"}
 
 async def analyze(asset,broker,memory):
     df,err=await broker.candles(asset,60,ANALYSIS_CANDLE_COUNT,360)
