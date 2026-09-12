@@ -10,12 +10,13 @@ from candice_broker import Broker
 from candice_engine import analyze, session_state, technical_snapshot
 from candice_memory import record, summary, today_risk, authorized_users, authorize_user
 
-VERSION = '8.5-FULL-BOT-1M-WEBHOOK'
+VERSION = '8.6-FULL-BOT-1M-PREENTRY-TIMER'
 UAE = ZoneInfo('Asia/Dubai')
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 ACCESS = os.getenv('ACCESS_CODE', '').strip()
 OT_TOKEN = os.getenv('OLYMPIATRADE_ACCESS_TOKEN', os.getenv('OLYMPTRADE_ACCESS_TOKEN', '')).strip()
 INTERVAL = 60
+PRE_ENTRY_SECONDS = 10
 MAX_DAILY_LOSSES = max(1, int(os.getenv('DAILY_MAX_LOSSES', '5')))
 MAX_STREAK = max(1, int(os.getenv('MAX_CONSECUTIVE_LOSSES', '3')))
 AUTO_TRADE = False
@@ -55,8 +56,11 @@ def reset_daily():
     daily['date'] = now().date().isoformat()
     r = today_risk(UAE); daily['losses'] = int(r.get('losses', 0)); daily['streak'] = int(r.get('streak', 0))
 
+def entry_boundary(candle_ts: float) -> float:
+    return float(candle_ts) + 60.0
+
 def expiry_boundary(candle_ts: float, expiry: int) -> float:
-    return float(candle_ts) + 60.0 + int(expiry) * 60.0
+    return entry_boundary(candle_ts) + int(expiry) * 60.0
 
 def header(title): return f'━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n✨ {title}\n━━━━━━━━━━━━━━━━━━━━'
 
@@ -99,14 +103,14 @@ async def cmd_assets(update, ctx):
 async def cmd_status(update, ctx):
     reset_daily(); uid = update.effective_user.id
     await send_text(uid, f'{header("SYSTEM STATUS")}\n\n🛰️ Broker: {"🟢 CONNECTED" if broker.connected() else "🔴 DISCONNECTED"}\n'
-        f'📈 FLEX: {selected.get(uid, "NONE")}\n🔄 Scanner: every 1 minute\n👤 Authorized users: {len(users)}\n🧠 Session: {session_state()}\n'
+        f'📈 FLEX: {selected.get(uid, "NONE")}\n🔄 Scanner: every 1 minute\n⏱️ Pre-entry alert: {PRE_ENTRY_SECONDS}s\n👤 Authorized users: {len(users)}\n🧠 Session: {session_state()}\n'
         f'❌ Daily losses: {daily["losses"]}/{MAX_DAILY_LOSSES}\n🔥 Loss streak: {daily["streak"]}/{MAX_STREAK}\n\n'
         f'🚫 Auto-trade OFF\n🚫 Martingale OFF\n🚫 Forex mode OFF\n🖼️ Telegram media OFF')
 
 async def cmd_session(update, ctx):
     reset_daily()
     await send_text(update.effective_user.id, f'{header("LIVE SCAN CONTROL")}\n\n🟢 CONTINUOUS SIGNAL ENGINE\n🔄 Analysis: every 1 minute\n'
-        f'🕯️ Candle: closed 1M\n⏱️ Expiry: 2 / 3 / 5 / 15 MIN\n⏳ Signal countdown: ACTIVE\n🏁 Expiry verification: ACTIVE\n\n'
+        f'🕯️ Candle: closed 1M\n⏱️ Expiry: 1 / 2 / 3 / 5 / 10 / 15 MIN\n⏳ Pre-entry signal: {PRE_ENTRY_SECONDS} SEC BEFORE ENTRY\n🏁 Expiry verification: ACTIVE\n\n'
         f'🔬 Research: 24/7\n🛡️ Risk gates: ACTIVE\n🚫 Auto-trade OFF • Manual only')
 
 async def cmd_update(update, ctx): await cmd_session(update, ctx)
@@ -122,24 +126,41 @@ async def asset_callback(update, ctx):
     selected[uid] = asset; t = now().strftime('%H:%M:%S UAE')
     await edit_text(uid, q.message.message_id, f'{header("ASSET READY")}\n\n📈 {asset}\n\n🟢 MARKET STATUS • LIVE\n🔵 CANDLE • 1 MIN FRESH\n🕒 VERIFIED • {t}\n\n'
         f'🔥🔥🔥 CANDICE RESEARCH ACTIVE\n\n🟢 Trend structure\n🔵 Momentum confirmation\n🟣 Volatility / breakout check\n🟠 MACD confirmation\n🟡 AI decision gate\n\n'
-        f'⚡ READY FOR QUALIFIED SIGNAL\n⏱️ 2 / 3 / 5 / 15 MIN\n\n🛡️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
+        f'⚡ READY FOR QUALIFIED SIGNAL\n⏱️ 1 / 2 / 3 / 5 / 10 / 15 MIN\n📩 Signal alert • 10 SEC before entry\n\n🛡️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
 
-async def signal_countdown(cid, msg, s):
+async def pre_entry_countdown(cid, msg, s, entry_end):
     if msg is None: return
-    end = expiry_boundary(s.candle_ts, s.expiry); last_bucket = None
-    while time.time() < end and active.get(cid) is s:
-        rem = max(0, int(end - time.time())); mm, ss = divmod(rem, 60); bucket = rem // 5
-        if bucket != last_bucket:
-            last_bucket = bucket
-            text = (f'{header("ACTIVE SIGNAL")}\n\n📈 {s.asset}\n'
-                    f'{"🟢 ⬆️ TRADE UP" if s.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n🔥 Confidence • {s.confidence}%\n⏱️ Duration • {s.expiry} MIN\n💰 Entry • {s.entry:.6f}\n\n'
-                    f'⏳ COUNTDOWN • {mm:02d}:{ss:02d}\n🕒 Expiry • {datetime.fromtimestamp(end, UAE).strftime("%H:%M:%S UAE")}\n\n'
-                    f'🟢 Technical gate PASSED\n🟣 AI gate APPROVED\n🕯️ Entry candle • CLOSED 1M\n🚫 Auto-trade OFF • Manual only')
-            await edit_text(cid, msg.message_id, text)
-        await asyncio.sleep(1)
+    last = None
+    while active.get(cid) is s and time.time() < entry_end:
+        rem = max(0, int(entry_end - time.time()))
+        if rem != last:
+            last = rem
+            await edit_text(cid, msg.message_id, f'{header("ENTRY COUNTDOWN")}\n\n📈 {s.asset}\n{"🟢 ⬆️ TRADE UP" if s.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n\n'
+                f'⏰ ENTRY • {datetime.fromtimestamp(entry_end, UAE).strftime("%H:%M:%S UAE")}\n\n'
+                f'╭────────────╮\n│    ⏳ {rem:02d} SEC    │\n╰────────────╯\n\n'
+                f'🚀 ENTRY IN PROGRESS\n🧠 AI {s.confidence}% • ⏱️ {s.expiry} MIN\n🚫 AUTO-TRADE OFF • MANUAL ONLY')
+        await asyncio.sleep(0.2)
+    if active.get(cid) is s:
+        await edit_text(cid, msg.message_id, f'{header("ENTRY NOW")}\n\n📈 {s.asset}\n{"🟢 ⬆️ TRADE UP" if s.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n\n'
+            f'🚀 ENTRY • {datetime.fromtimestamp(entry_end, UAE).strftime("%H:%M:%S UAE")}\n⏱️ EXPIRY • {s.expiry} MIN\n\n🟢 SIGNAL ACTIVATED\n🚫 AUTO-TRADE OFF • MANUAL ONLY')
 
-async def result_monitor(uid, s, msg):
-    end = expiry_boundary(s.candle_ts, s.expiry); await signal_countdown(uid, msg, s)
+async def trade_timer(cid, msg, s, end):
+    if msg is None: return
+    last = None
+    while active.get(cid) is s and time.time() < end:
+        rem = max(0, int(end - time.time()))
+        if rem != last:
+            last = rem; mm, ss = divmod(rem, 60)
+            await edit_text(cid, msg.message_id, f'{header("TRADE ACTIVE")}\n\n📈 {s.asset}\n{"🟢 ⬆️ TRADE UP" if s.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n\n'
+                f'⏱️ {mm:02d}:{ss:02d}\n🏁 EXPIRY • {datetime.fromtimestamp(end, UAE).strftime("%H:%M:%S UAE")}\n\n🕯️ Entry candle • CLOSED 1M\n🧠 AI • {s.confidence}%\n🚫 AUTO-TRADE OFF • MANUAL ONLY')
+        await asyncio.sleep(0.2)
+
+async def result_monitor(uid, s, signal_msg):
+    entry_end = s.entry_ts
+    timer_msg = await send_text(uid, f'{header("ENTRY COUNTDOWN")}\n\n📈 {s.asset}\n{"🟢 ⬆️ TRADE UP" if s.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n\n⏰ ENTRY • {datetime.fromtimestamp(entry_end, UAE).strftime("%H:%M:%S UAE")}\n\n⏳ 10 SEC\n\n🚀 GET READY\n🚫 AUTO-TRADE OFF • MANUAL ONLY')
+    await pre_entry_countdown(uid, timer_msg, s, entry_end)
+    end = expiry_boundary(s.candle_ts, s.expiry)
+    await trade_timer(uid, timer_msg, s, end)
     await send_text(uid, f'{header("EXPIRY VERIFICATION")}\n\n📈 {s.asset}\n➡️ Direction • {s.direction}\n💰 Entry • {s.entry:.6f}\n'
         f'🕒 Boundary • {datetime.fromtimestamp(end, UAE).strftime("%H:%M:%S UAE")}\n\n🔎 Waiting for the boundary candle to close...')
     row = None; err = ''
@@ -167,7 +188,7 @@ async def scan_once():
     if daily['losses'] >= MAX_DAILY_LOSSES or daily['streak'] >= MAX_STREAK:
         log.warning('CANDICE RISK STOP losses=%s streak=%s', daily['losses'], daily['streak']); return
     assets = await broker.live_assets()
-    log.info('CANDICE SCAN START assets=%d users=%d interval=%ss', len(assets), len(users), INTERVAL)
+    log.info('CANDICE SCAN START assets=%d users=%d interval=%ss pre_entry=%ss', len(assets), len(users), INTERVAL, PRE_ENTRY_SECONDS)
     if not users or not assets: return
     sem = asyncio.Semaphore(6)
     async def research(asset):
@@ -189,22 +210,27 @@ async def scan_once():
         if e or df is None or df.empty: continue
         row = broker.closed_candle(df, time.time(), 60)
         if row is None: log.info('ENTRY REJECT pair=%s reason=no closed 1m candle', asset); continue
-        entry = float(row.close); candle_ts = float(row.timestamp); key = f'{uid}:{asset}:{int(candle_ts)}'
+        entry = float(row.close); candle_ts = float(row.timestamp); entry_ts = entry_boundary(candle_ts)
+        if entry_ts <= time.time() or entry_ts - time.time() > 60: log.info('ENTRY REJECT pair=%s reason=entry boundary not imminent', asset); continue
+        key = f'{uid}:{asset}:{int(candle_ts)}'
         if key in sent_keys: continue
+        if entry_ts - time.time() > PRE_ENTRY_SECONDS + 2: log.info('ENTRY WAIT pair=%s seconds_to_entry=%.1f', asset, entry_ts-time.time()); continue
         evidence = '\n'.join(f'🟢 {x}' for x in a.evidence) if a.evidence else '🟡 Multi-indicator alignment verified'
         text = (f'{header("NEW SIGNAL")}\n\n📈 {asset}\n\n{"🟢 ⬆️ TRADE UP" if a.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n'
-                f'🕒 Entry • {datetime.fromtimestamp(time.time(), UAE).strftime("%H:%M:%S UAE")}\n🕯️ Candle • {datetime.fromtimestamp(candle_ts, UAE).strftime("%H:%M:%S UAE")}\n\n'
+                f'⏰ ENTRY • {datetime.fromtimestamp(entry_ts, UAE).strftime("%H:%M:%S UAE")}\n🕯️ Candle • {datetime.fromtimestamp(candle_ts, UAE).strftime("%H:%M:%S UAE")}\n\n'
                 f'🔥 STRONG CONFIRMATION\n\n{evidence}\n\n⏱️ EXPIRY • {a.expiry} MIN\n🧠 AI CONFIDENCE • {a.confidence}%\n📊 TIMEFRAMES • {a.timeframe}\n\n'
-                f'⏳ TIMER • STARTING\n🛡️ FRESH CLOSED-CANDLE ENTRY\n⚠️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
+                f'📩 ALERT • {PRE_ENTRY_SECONDS} SEC BEFORE ENTRY\n🛡️ FRESH CLOSED-CANDLE ENTRY\n⚠️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
         msg = await send_text(uid, text)
         if msg is None:
             log.warning('SIGNAL NOT RESERVED pair=%s reason=telegram delivery failed', asset); continue
-        s = Signal(asset, a.direction, a.confidence, a.expiry, entry, time.time(), candle_ts, a.reason, a.evidence)
+        s = Signal(asset, a.direction, a.confidence, a.expiry, entry, entry_ts, candle_ts, a.reason, a.evidence)
         active[uid] = s; sent_keys.add(key); asyncio.create_task(result_monitor(uid, s, msg))
 
 async def scheduler():
     while True:
-        now_ts = time.time(); delay = 60 - (now_ts % 60); await asyncio.sleep(max(0.5, delay))
+        now_ts = time.time(); next_tick = (int(now_ts) // 60) * 60 + 50
+        if next_tick <= now_ts: next_tick += 60
+        await asyncio.sleep(max(0.2, next_tick - now_ts))
         try: await scan_once()
         except Exception: log.exception('scan cycle failed')
 
@@ -226,11 +252,11 @@ async def bot_main():
         kwargs = {'url': webhook_url, 'drop_pending_updates': True}
         if WEBHOOK_SECRET: kwargs['secret_token'] = WEBHOOK_SECRET
         await tg_app.bot.set_webhook(**kwargs)
-        log.warning('CANDICE TELEGRAM ONLINE — WEBHOOK MODE — %s — 1M SCANNER — TIMER ACTIVE — AUTO-TRADE OFF', webhook_url)
+        log.warning('CANDICE TELEGRAM ONLINE — WEBHOOK MODE — %s — 1M SCANNER — 10S PRE-ENTRY TIMER — AUTO-TRADE OFF', webhook_url)
     else:
         await tg_app.bot.delete_webhook(drop_pending_updates=True)
         await tg_app.updater.start_polling(drop_pending_updates=True)
-        log.warning('CANDICE TELEGRAM ONLINE — LOCAL POLLING MODE — 1M SCANNER — TIMER ACTIVE — AUTO-TRADE OFF')
+        log.warning('CANDICE TELEGRAM ONLINE — LOCAL POLLING MODE — 1M SCANNER — 10S PRE-ENTRY TIMER — AUTO-TRADE OFF')
     asyncio.create_task(broker.connect_forever()); asyncio.create_task(scheduler())
     while True: await asyncio.sleep(3600)
 
@@ -250,7 +276,7 @@ def telegram_webhook():
         return 'bad request', 400
 
 @flask_app.get('/')
-def home(): return f'{VERSION} ONLINE — FLEX market-data / 1-minute manual signals / timers active'
+def home(): return f'{VERSION} ONLINE — FLEX market-data / 1-minute manual signals / 10-second pre-entry timer'
 @flask_app.get('/health')
 def health(): return 'OK'
 def start_bot_thread(): asyncio.run(bot_main())
