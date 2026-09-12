@@ -95,10 +95,11 @@ jobs:
               is_connected=True
           class FakeMarket:
               async def get_candles(self,pair,size,count):
-                  latest=int(time.time())
-                  base=latest-(max(count,1200)-1)*60
+                  latest=(int(time.time())//60)*60-60
+                  n=max(count,1200)
+                  base=latest-(n-1)*60
                   rows=[]; p=100.0
-                  for i in range(max(count,1200)):
+                  for i in range(n):
                       o=p; c=p+0.05
                       rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
                       p=c
@@ -111,8 +112,10 @@ jobs:
               b=Broker('test-token'); b.client=FakeClient()
               df,e=await b.candles('ASIA_X',60,1200,360)
               assert e is None and len(df)==1200
-              row=await b.closed_candle_at('ASIA_X',float(df.timestamp.iloc[-1])+60,60,180)
-              assert row[0] is not None and row[1] is None
+              boundary=float(df.timestamp.iloc[-1])+60
+              row,err=await b.closed_candle_at('ASIA_X',boundary,60,180)
+              assert row is not None and err is None
+              assert float(row.timestamp)==float(df.timestamp.iloc[-1])
               a=await analyze('ASIA_X',b,{'samples':0})
               assert a.decision in {'APPROVE','REJECT'}
               assert a.expiry in set(EXPIRIES)|{0}
