@@ -159,7 +159,7 @@ async def result_monitor(uid, s, signal_msg):
     entry_end = s.entry_ts
     timer_msg = await send_text(uid, f'{header("ENTRY COUNTDOWN")}\n\n📈 {s.asset}\n{"🟢 ⬆️ TRADE UP" if s.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n\n⏰ ENTRY • {datetime.fromtimestamp(entry_end, UAE).strftime("%H:%M:%S UAE")}\n\n⏳ 10 SEC\n\n🚀 GET READY\n🚫 AUTO-TRADE OFF • MANUAL ONLY')
     await pre_entry_countdown(uid, timer_msg, s, entry_end)
-    end = expiry_boundary(s.candle_ts, s.expiry)
+    end = s.entry_ts + int(s.expiry) * 60.0
     await trade_timer(uid, timer_msg, s, end)
     await send_text(uid, f'{header("EXPIRY VERIFICATION")}\n\n📈 {s.asset}\n➡️ Direction • {s.direction}\n💰 Entry • {s.entry:.6f}\n'
         f'🕒 Boundary • {datetime.fromtimestamp(end, UAE).strftime("%H:%M:%S UAE")}\n\n🔎 Waiting for the boundary candle to close...')
@@ -210,11 +210,12 @@ async def scan_once():
         if e or df is None or df.empty: continue
         row = broker.closed_candle(df, time.time(), 60)
         if row is None: log.info('ENTRY REJECT pair=%s reason=no closed 1m candle', asset); continue
-        entry = float(row.close); candle_ts = float(row.timestamp); entry_ts = entry_boundary(candle_ts)
-        if entry_ts <= time.time() or entry_ts - time.time() > 60: log.info('ENTRY REJECT pair=%s reason=entry boundary not imminent', asset); continue
+        entry = float(row.close); candle_ts = float(row.timestamp)
+        entry_ts = float((int(time.time()) // 60 + 1) * 60)
+        if entry_ts - time.time() > PRE_ENTRY_SECONDS + 2 or entry_ts - time.time() < PRE_ENTRY_SECONDS - 2:
+            log.info('ENTRY REJECT pair=%s reason=not_in_10s_window seconds_to_entry=%.1f', asset, entry_ts-time.time()); continue
         key = f'{uid}:{asset}:{int(candle_ts)}'
         if key in sent_keys: continue
-        if entry_ts - time.time() > PRE_ENTRY_SECONDS + 2: log.info('ENTRY WAIT pair=%s seconds_to_entry=%.1f', asset, entry_ts-time.time()); continue
         evidence = '\n'.join(f'🟢 {x}' for x in a.evidence) if a.evidence else '🟡 Multi-indicator alignment verified'
         text = (f'{header("NEW SIGNAL")}\n\n📈 {asset}\n\n{"🟢 ⬆️ TRADE UP" if a.direction == "UP" else "🔴 ⬇️ TRADE DOWN"}\n'
                 f'⏰ ENTRY • {datetime.fromtimestamp(entry_ts, UAE).strftime("%H:%M:%S UAE")}\n🕯️ Candle • {datetime.fromtimestamp(candle_ts, UAE).strftime("%H:%M:%S UAE")}\n\n'
