@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 from candice_broker import Broker, FLEX_ASSETS
 from candice_engine import analyze, session_state, technical_snapshot
@@ -21,7 +21,11 @@ def session_text():
     s=session_state(); return f'''🤖 CANDICE AI v8\n\n{'🟢 SIGNAL SESSION' if s=='SIGNAL' else '🧠 RESEARCH ONLY'}\n\n📡 Market research: 24/7\n⏱ Scan: every 5 minutes\n🎯 Signal: selected FLEX asset only\n💠 Mode: FLEX / FIXED-TIME\n🚫 Forex mode: OFF\n🚫 Auto-trade: OFF\n🚫 Martingale: OFF\n\nUAE: {now().strftime('%H:%M:%S')}'''
 async def send_card(cid,kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason=''):
     if tg_app is None:return
-    try: await tg_app.bot.send_animation(chat_id=cid,animation=gif_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason),caption='Candice AI • Live Market • Manual Trade Only')
+    try:
+        payload=gif_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason)
+        payload.name='candice.gif'
+        await tg_app.bot.send_animation(chat_id=cid,animation=InputFile(payload,filename='candice.gif'),caption='Candice AI • Live Market • Manual Trade Only')
+        log.info('TELEGRAM GIF SENT kind=%s asset=%s',kind,asset)
     except Exception as e: log.warning('visual card failed: %s',e)
 def keyboard(assets):
     rows=[]
