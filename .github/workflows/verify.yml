@@ -33,8 +33,8 @@ jobs:
                           except Exception: pass
           assert constants.get('VERSION') == '8.5-FULL-BOT-1M-WEBHOOK'; assert constants.get('INTERVAL') == 60; assert constants.get('AUTO_TRADE') is False; assert constants.get('MARTINGALE') is False; assert constants.get('FOREX_MODE') is False
           assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app; assert 'signal_countdown' in app and 'entry_ts' in app; assert 'closed_candle_at' in app and 'closed_candle' in app; assert 'session_state()!=' not in app; assert 'set_webhook' in app and "WEBHOOK_PATH = '/telegram/webhook'" in app; assert 'start_polling' in app and 'delete_webhook' in app
-          assert ('EXPIRIES = (2, 3, 5, 15)' in engine) or ('EXPIRIES=(2,3,5,15)' in engine); assert '2|3|5|15' in engine; assert 'CEREBRAS_API_KEY' in engine and 'GROQ_API_KEY' in engine; assert 'OPENROUTER_API_KEY' not in engine
-          assert "RuntimeError('Candice v8 is read-only" in trade; assert '2 / 3 / 5 / 15' in readme; assert 'TELEGRAM_BOT_TOKEN=' in env and 'CEREBRAS_API_KEY=' in env and 'GROQ_API_KEY=' in env; assert 'OPENROUTER_API_KEY=' not in env
+          assert 'EXPIRIES = (1, 2, 3, 5, 10, 15)' in engine or 'EXPIRIES=(1,2,3,5,10,15)' in engine; assert all(x in engine for x in ('1,2,3,5,10,15','candidate_expiry','choose_expiry')); assert 'CEREBRAS_API_KEY' in engine and 'GROQ_API_KEY' in engine; assert 'OPENROUTER_API_KEY' not in engine
+          assert "RuntimeError('Candice v8 is read-only" in trade; assert '1 / 2 / 3 / 5 / 10 / 15' in readme; assert 'TELEGRAM_BOT_TOKEN=' in env and 'CEREBRAS_API_KEY=' in env and 'GROQ_API_KEY=' in env; assert 'OPENROUTER_API_KEY=' not in env
           assert 'chunk_size=min(600,count)' in broker; assert 'end_time=cursor' in broker; assert not any(Path('.').glob('*_hotfix.py')); print('STATIC SAFETY CONTRACT: PASS')
           PY
       - name: Runtime surface test
@@ -51,7 +51,7 @@ jobs:
           from candice_engine import technical_snapshot, choose_expiry, EXPIRIES, resample_ohlc, closed_1m
           from candice_broker import Broker
           from app import expiry_boundary
-          assert set(EXPIRIES)=={2,3,5,15}; base=1700000100; rows=[]; p=100.0
+          assert set(EXPIRIES)=={1,2,3,5,10,15}; base=1700000100; rows=[]; p=100.0
           for i in range(1200):
               o=p; c=p+0.05; rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c}); p=c
           df=pd.DataFrame(rows); closed=closed_1m(df,base+1200*60); assert len(closed)==1200; assert closed.timestamp.is_monotonic_increasing and closed.timestamp.is_unique; snap=technical_snapshot(closed); assert snap['direction']=='UP'; assert choose_expiry(snap) in EXPIRIES
