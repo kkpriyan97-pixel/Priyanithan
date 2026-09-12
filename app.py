@@ -38,21 +38,17 @@ def session_text():
     s=session_state(); state='🟢 SIGNAL SESSION ACTIVE' if s=='SIGNAL' else '🧠 RESEARCH ONLY'
     return common(state,f'''📡 Market research: 24/7\n⏱ Scan cycle: every 5 minutes\n🎯 Signal: selected FLEX asset only\n⏱ AI duration: 2 / 3 / 5 / 10 / 15 MIN\n\n🕐 UAE: {now().strftime('%H:%M:%S')}''','🧠')
 
-async def send_image(cid,kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason='',reply_markup=None,caption=''):
+async def send_image(cid,kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason='',reply_markup=None,caption='',**kwargs):
     if tg_app is None:
         log.warning('TELEGRAM IMAGE SKIPPED: bot not initialized kind=%s asset=%s',kind,asset); return
     try:
-        payload=png_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason,**{})
+        payload=png_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason,**kwargs)
         if not isinstance(payload,io.BytesIO): payload=io.BytesIO(payload)
         payload.seek(0); payload.name='candice-update.png'
         log.info('TELEGRAM IMAGE SEND START kind=%s asset=%s bytes=%s',kind,asset,payload.getbuffer().nbytes)
         await tg_app.bot.send_photo(chat_id=cid,photo=InputFile(payload,filename='candice-update.png'),caption=caption or 'CANDICE AI • Live Market • Manual Trade Only',reply_markup=reply_markup,read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
         log.info('TELEGRAM IMAGE SENT kind=%s asset=%s',kind,asset)
     except Exception as e: log.exception('TELEGRAM IMAGE FAILED kind=%s asset=%s: %s',kind,asset,e)
-
-async def send_update_text(cid):
-    if tg_app is None:return
-    await tg_app.bot.send_message(chat_id=cid,text='''🚀 CANDICE AI v8\n\nOperational events now use one unified full-size CANDICE image model.\n\nASSET SELECTED • AI SIGNAL • SESSION TIME • EXPIRY REACHED • TRADE RESULT • RECOVERY TIME\n\nFLEX / FIXED-TIME • MANUAL ONLY\n🚫 Auto-trade OFF • 🚫 Martingale OFF''')
 
 def keyboard(assets):
     rows=[]
@@ -62,8 +58,7 @@ def keyboard(assets):
 async def cmd_access(update,ctx):
     if not ACCESS or not ctx.args or ctx.args[0].strip()!=ACCESS:
         await update.message.reply_text('🔒 CANDICE AI\n\nAccess denied.'); return
-    users.add(update.effective_user.id)
-    await cmd_assets(update,ctx)
+    users.add(update.effective_user.id); await cmd_assets(update,ctx)
 
 async def cmd_start(update,ctx):
     if update.effective_user.id not in users:
@@ -77,18 +72,13 @@ async def cmd_update(update,ctx):
 
 async def cmd_assets(update,ctx):
     assets=await broker.live_assets()
-    body='''Select ONE live FLEX asset.\n\n🟢 Fresh 1-minute candle verification is required.\n🤖 Candice AI analysis: ON\n📡 Research: 24/7\n🚀 Signals: SIGNAL SESSION only\n⏱ AI duration: 2 / 3 / 5 / 10 / 15 MIN'''
-    if assets: body+='\n\n'+('\n'.join('• '+a for a in assets))
-    else: body+='\n\n⚠️ No live FLEX assets currently confirmed.'
-    await send_image(update.effective_user.id,'selected',asset='FLEX',reply_markup=keyboard(assets),caption='CANDICE AI • FLEX ASSET SELECTOR • Manual Trade Only')
+    await send_image(update.effective_user.id,'selected',asset='FLEX',reply_markup=keyboard(assets),caption='CANDICE AI • FLEX ASSET SELECTOR • Manual Trade Only',selector_assets=', '.join(assets) if assets else 'No live FLEX assets currently confirmed')
 
 async def cmd_status(update,ctx):
-    reset_daily()
-    await send_image(update.effective_user.id,'status',asset=selected.get(update.effective_user.id,'SYSTEM'),status_text=f'Broker: {"CONNECTED" if broker.connected() else "DISCONNECTED"} • Session: {session_state()}')
+    reset_daily(); await send_image(update.effective_user.id,'status',asset=selected.get(update.effective_user.id,'SYSTEM'),status_text=f'Broker: {"CONNECTED" if broker.connected() else "DISCONNECTED"} • Session: {session_state()}')
 
 async def cmd_session(update,ctx):
-    s=session_state()
-    await send_image(update.effective_user.id,'session',asset=selected.get(update.effective_user.id,'SYSTEM'),active=s=='SIGNAL',session_start='Current block',session_end='Current block',next_session='Next 3h block',countdown='Live')
+    s=session_state(); await send_image(update.effective_user.id,'session',asset=selected.get(update.effective_user.id,'SYSTEM'),active=s=='SIGNAL',session_start='Current block',session_end='Current block',next_session='Next 3h block',countdown='Live')
 
 async def asset_callback(update,ctx):
     q=update.callback_query; await q.answer(); uid=q.from_user.id
@@ -99,7 +89,8 @@ async def asset_callback(update,ctx):
         except Exception: await q.edit_message_text('⚠️ Asset is no longer confirmed live. Use /start again.')
         return
     selected[uid]=asset
-    await q.edit_message_caption(caption=f'🎯 CANDICE AI • ASSET SELECTED — {asset}\n🟢 Fresh 1-minute candle verified\n🤖 AI analysis ON • Research 24/7 • SIGNAL SESSION only')
+    try: await q.edit_message_caption(caption=f'🎯 CANDICE AI • ASSET SELECTED — {asset}\n🟢 Fresh 1-minute candle verified\n🤖 AI analysis ON • Research 24/7 • SIGNAL SESSION only')
+    except Exception: pass
     await send_image(uid,'selected',asset)
 
 @dataclass
