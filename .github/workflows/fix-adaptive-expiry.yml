@@ -1,1 +1,0 @@
-# Temporary adaptive-expiry repair workflow removed; expiry logic is now part of candice_engine.py and covered by verify.yml.
