@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from flask import Flask
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaAnimation, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 from candice_broker import Broker
 from candice_engine import analyze, session_state, technical_snapshot
 from candice_memory import record, summary, today_risk
-from candice_ui import png_bytes
+from candice_ui import gif_bytes
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(levelname)s %(name)s: %(message)s'); log=logging.getLogger('candice')
 VERSION='8.0-FRESH-CANDICE'; UAE=ZoneInfo('Asia/Dubai')
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); ACCESS=os.getenv('ACCESS_CODE','').strip(); OT_TOKEN=os.getenv('OLYMPTRADE_ACCESS_TOKEN','').strip()
@@ -30,28 +30,26 @@ def session_payload():
 async def send_image(cid,kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason='',reply_markup=None,caption='',**kwargs):
  if tg_app is None: log.warning('TELEGRAM IMAGE SKIPPED kind=%s asset=%s',kind,asset); return None
  try:
-  payload=png_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason,**kwargs); payload.seek(0); payload.name='candice-update.png'
-  msg=await tg_app.bot.send_photo(chat_id=cid,photo=InputFile(payload,filename='candice-update.png'),caption=caption or 'CANDICE AI • Live Market • Manual Trade Only',reply_markup=reply_markup,read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
-  log.info('TELEGRAM IMAGE SENT kind=%s asset=%s message_id=%s',kind,asset,msg.message_id); return msg
- except Exception as e: log.exception('TELEGRAM IMAGE FAILED kind=%s asset=%s: %s',kind,asset,e); return None
+  payload=gif_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason,**kwargs); payload.seek(0); payload.name='candice.gif'
+  msg=await tg_app.bot.send_animation(chat_id=cid,animation=InputFile(payload,filename='candice.gif'),caption=caption or 'CANDICE AI • Live Market • Manual Trade Only',reply_markup=reply_markup,read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
+  log.info('TELEGRAM GIF SENT kind=%s asset=%s message_id=%s',kind,asset,msg.message_id); return msg
+ except Exception as e: log.exception('TELEGRAM GIF FAILED kind=%s asset=%s: %s',kind,asset,e); return None
 async def edit_image(cid,message_id,kind,asset='ASIA_X',direction='',confidence=0,expiry=0,reason='',caption='',**kwargs):
  try:
-  payload=png_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason,**kwargs); payload.seek(0); payload.name='candice-update.png'
-  await tg_app.bot.edit_message_media(chat_id=cid,message_id=message_id,media=InputMediaPhoto(media=payload,filename='candice-update.png',caption=caption or 'CANDICE AI • Live Market • Manual Trade Only')); return True
- except Exception as e: log.warning('TELEGRAM IMAGE TIMER EDIT FAILED kind=%s message_id=%s: %s',kind,message_id,e); return False
+  payload=gif_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason,**kwargs); payload.seek(0); payload.name='candice.gif'
+  await tg_app.bot.edit_message_media(chat_id=cid,message_id=message_id,media=InputMediaAnimation(media=payload,filename='candice.gif',caption=caption or 'CANDICE AI • Live Market • Manual Trade Only')); return True
+ except Exception as e: log.warning('TELEGRAM GIF TIMER EDIT FAILED kind=%s message_id=%s: %s',kind,message_id,e); return False
 async def signal_timer(cid,msg,signal):
  if msg is None:return
  total=signal.expiry*60; end=signal.entry_ts+total
  while time.time()<end:
-  rem=int(end-time.time()); await asyncio.sleep(min(30,max(1,rem)))
-  rem=int(end-time.time())
+  rem=int(end-time.time()); await asyncio.sleep(min(30,max(1,rem))); rem=int(end-time.time())
   if rem<=0: break
-  await edit_image(cid,msg.message_id,'signal',signal.asset,signal.direction,signal.confidence,signal.expiry,signal.reason,entry=f'{signal.entry:.6f}',technical='PASSED',signal_time=datetime.fromtimestamp(signal.entry_ts,UAE).strftime('%H:%M:%S UAE'),total_seconds=total,remaining=rem,expiry_time=datetime.fromtimestamp(end,UAE).strftime('%H:%M:%S UAE'))
-  log.info('CANDICE SIGNAL TIMER asset=%s remaining=%s',signal.asset,rem)
+  await edit_image(cid,msg.message_id,'signal',signal.asset,signal.direction,signal.confidence,signal.expiry,signal.reason,entry=f'{signal.entry:.6f}',technical='PASSED',signal_time=datetime.fromtimestamp(signal.entry_ts,UAE).strftime('%H:%M:%S UAE'),total_seconds=total,remaining=rem,expiry_time=datetime.fromtimestamp(end,UAE).strftime('%H:%M:%S UAE')); log.info('CANDICE SIGNAL TIMER asset=%s remaining=%s',signal.asset,rem)
 async def session_timer(cid,msg):
  if msg is None:return
  while True:
-  p=session_payload(); await asyncio.sleep(30)
+  await asyncio.sleep(30)
   if not await edit_image(cid,msg.message_id,'session',selected.get(cid,'SYSTEM'),**session_payload()): break
 async def recovery_timer(cid,msg,asset):
  if msg is None:return
@@ -64,8 +62,7 @@ async def send_session_image(cid):
  p=session_payload(); msg=await send_image(cid,'session',selected.get(cid,'SYSTEM'),**p)
  if msg: timer_tasks[f'session:{cid}']=asyncio.create_task(session_timer(cid,msg))
  return msg
-def keyboard(assets):
- return InlineKeyboardMarkup([[InlineKeyboardButton(a,callback_data=f'asset:{a}') for a in assets[i:i+2]] for i in range(0,len(assets),2)] or [[InlineKeyboardButton('No live FLEX assets',callback_data='noop')]])
+def keyboard(assets): return InlineKeyboardMarkup([[InlineKeyboardButton(a,callback_data=f'asset:{a}') for a in assets[i:i+2]] for i in range(0,len(assets),2)] or [[InlineKeyboardButton('No live FLEX assets',callback_data='noop')]])
 async def cmd_access(update,ctx):
  if not ACCESS or not ctx.args or ctx.args[0].strip()!=ACCESS: await update.message.reply_text('🔒 CANDICE AI\n\nAccess denied.'); return
  users.add(update.effective_user.id); await cmd_assets(update,ctx)
