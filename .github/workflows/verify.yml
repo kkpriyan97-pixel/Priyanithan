@@ -1,0 +1,112 @@
+name: Candice Clean Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile all runtime modules
+        run: python -m py_compile app.py candice_broker.py candice_engine.py candice_memory.py olymptrade_ws/__init__.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
+      - name: Static safety contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('app.py').read_text()
+          engine=Path('candice_engine.py').read_text()
+          trade=Path('olymptrade_ws/api/trade.py').read_text()
+          assert "VERSION = '8.3-FULL-BOT-1M-LIFECYCLE'" in app
+          assert "INTERVAL = max(60, int(os.getenv('SCAN_INTERVAL_SECONDS', '60')))" in app
+          assert 'AUTO_TRADE = False' in app
+          assert 'MARTINGALE = False' in app
+          assert 'FOREX_MODE = False' in app
+          assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app
+          assert 'signal_countdown' in app and 'entry_ts' in app
+          assert 'closed_candle_at' in app and 'closed_candle' in app
+          assert 'session_state()!=' not in app
+          assert 'EXPIRIES = (2, 3, 5, 15)' in engine
+          assert '2|3|5|15' in engine
+          assert "RuntimeError('Candice v8 is read-only" in trade
+          assert not any(Path('.').glob('*_hotfix.py'))
+          print('STATIC SAFETY CONTRACT: PASS')
+          PY
+      - name: Deterministic technical lifecycle test
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          from candice_engine import technical_snapshot, choose_expiry, EXPIRIES, resample_ohlc, closed_1m
+          from candice_broker import Broker
+          from app import expiry_boundary
+          assert set(EXPIRIES)=={2,3,5,15}
+          base=1700000100
+          rows=[]; p=100.0
+          for i in range(1200):
+              o=p; c=p+0.05
+              rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
+              p=c
+          df=pd.DataFrame(rows)
+          closed=closed_1m(df,base+1200*60)
+          assert len(closed)==1200
+          assert closed.timestamp.is_monotonic_increasing and closed.timestamp.is_unique
+          snap=technical_snapshot(closed)
+          assert snap['direction']=='UP'
+          assert choose_expiry(snap) in EXPIRIES
+          for mins in (3,5,10,15):
+              agg=resample_ohlc(closed,mins)
+              assert len(agg)>=60
+              assert agg.timestamp.is_monotonic_increasing and agg.timestamp.is_unique
+              assert technical_snapshot(agg)['direction']=='UP'
+          last=float(df.timestamp.iloc[-1])
+          assert Broker.closed_candle(df,last+60,60).timestamp==last
+          assert Broker.closed_candle(df,last,60).timestamp==last-60
+          for expiry in EXPIRIES:
+              assert expiry_boundary(last,expiry)==last+60+expiry*60
+          print('TECHNICAL LIFECYCLE: PASS')
+          PY
+      - name: Read-only broker to engine integration test
+        run: |
+          python - <<'PY'
+          import asyncio
+          import time
+          from candice_broker import Broker
+          from candice_engine import analyze, EXPIRIES
+          class Conn:
+              is_connected=True
+          class Market:
+              async def get_candles(self,pair,size,count):
+                  latest=(int(time.time())//60)*60-60
+                  n=max(count,1200)
+                  base=latest-(n-1)*60
+                  rows=[]; p=100.0
+                  for i in range(n):
+                      o=p; c=p+0.05
+                      rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
+                      p=c
+                  return rows[-count:]
+          class Client:
+              connection=Conn()
+              market=Market()
+          async def main():
+              broker=Broker('test-token')
+              broker.client=Client()
+              df,err=await broker.candles('ASIA_X',60,1200,360)
+              assert err is None and len(df)==1200
+              boundary=float(df.timestamp.iloc[-1])+60
+              row,err=await broker.closed_candle_at('ASIA_X',boundary,60,180)
+              assert err is None and row is not None
+              decision=await analyze('ASIA_X',broker,{'samples':0})
+              assert decision.decision in {'APPROVE','REJECT'}
+              assert decision.expiry in set(EXPIRIES)|{0}
+              print('BROKER -> ENGINE READ-ONLY INTEGRATION: PASS')
+          asyncio.run(main())
+          PY
