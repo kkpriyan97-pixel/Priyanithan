@@ -1,0 +1,207 @@
+name: Candice Card Upgrade
+
+on:
+  push:
+    paths:
+      - '.github/workflows/candice-card-upgrade.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Pillow
+        run: pip install Pillow
+      - name: Replace visual card
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('app.py')
+          text=p.read_text()
+          start=text.index('def _card_base(')
+          end=text.index('def build_signal_card(', start)
+          new=r'''def _card_base(asset, direction, entry_ts, candle_ts, expiry, confidence, timeframe, evidence, timer_text='', timer_label='ENTRY IN'):
+    """Large 1080x1350 Candice card matching the supplied reference design."""
+    from math import sin, pi
+    W, H = 1080, 1350
+    down = str(direction).upper() == 'DOWN'
+    accent = (255, 48, 82) if down else (25, 255, 125)
+    cyan = (15, 205, 255)
+    blue = (60, 120, 255)
+    white = (245, 249, 255)
+    muted = (155, 195, 225)
+    dark = (3, 10, 28)
+    img = Image.new('RGB', (W, H), dark)
+    px = img.load()
+    # Deep navy radial-style glow background.
+    for y in range(H):
+        for x in range(W):
+            g1 = max(0.0, 1.0 - (((x-820)**2 + (y-250)**2) ** 0.5) / 900.0)
+            g2 = max(0.0, 1.0 - (((x-180)**2 + (y-1120)**2) ** 0.5) / 800.0)
+            px[x, y] = (int(3+5*g1), int(9+18*g1+4*g2), int(27+48*g1+10*g2))
+    d = ImageDraw.Draw(img)
+
+    def rr(box, fill=(7, 25, 48), outline=cyan, width=3, radius=24):
+        d.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+
+    def txt(x, y, s, size, fill=white, bold=False, anchor=None):
+        d.text((x, y), str(s), font=_font(size, bold), fill=fill, anchor=anchor)
+
+    def fit(s, maxw, size, bold=True):
+        return _fit_text(d, str(s), maxw, size, bold)
+
+    # Outer frame + header.
+    rr((10, 10, W-10, H-10), fill=(3, 12, 34), outline=(20, 85, 190), width=4, radius=34)
+    d.ellipse((35, 38, 135, 138), fill=(10, 70, 170), outline=(20, 220, 255), width=3)
+    d.arc((42, 45, 128, 131), 205, 500, fill=(0, 235, 255), width=16)
+    d.arc((42, 45, 128, 131), 20, 150, fill=(170, 20, 255), width=16)
+    txt(158, 43, 'CANDICE', 58, white, True)
+    txt(485, 45, 'AI', 58, (30, 170, 255), True)
+    txt(160, 112, 'T R A D I N G   S I G N A L', 23, muted)
+    txt(160, 157, 'A N A L Y Z E   •   F I L T E R   •   C O N F I R M   •   A L E R T', 16, (120, 190, 225))
+    d.rectangle((820, 45, 826, 143), fill=(235, 0, 245))
+    txt(850, 47, 'DISCIPLINE', 19, muted, True)
+    txt(850, 76, 'BRINGS', 19, muted, True)
+    txt(850, 105, 'CONSISTENT', 19, muted, True)
+    txt(850, 134, 'RESULTS', 19, muted, True)
+
+    # Asset panel.
+    rr((28, 185, W-28, 355), fill=(5, 39, 52), outline=(0, 210, 235), width=3, radius=24)
+    txt(105, 207, 'ASSET', 23, muted, True)
+    asset_name = 'Asia Composite Index' if asset == 'ASIA_X' else str(asset)
+    d.text((105, 248), asset_name, font=fit(asset_name, 850, 50, True), fill=white)
+    rr((105, 312, 250, 347), fill=(3, 25, 45), outline=(0, 150, 230), width=2, radius=12)
+    txt(122, 317, asset, 18, (60, 195, 255), True)
+    # Compact bar-chart icon.
+    for i, h in enumerate((28, 52, 78, 105)):
+        x=40+i*20; d.rounded_rectangle((x, 326-h, x+14, 326), radius=3, fill=white)
+    # Faint upward market graph.
+    pts=[]
+    for i in range(15):
+        x=510+i*31
+        yy=325-int(105*(i/14.0)**1.4)-int(18*sin(i*1.8))
+        pts.append((x,yy))
+    d.line(pts, fill=(0, 235, 135), width=5)
+    d.line([(p[0],355,p[0],p[1]) for p in pts], fill=(0,110,90), width=1)
+
+    # Hero direction + circular timer.
+    hero_y1, hero_y2 = 378, 670
+    hero_fill=(6, 38, 28) if not down else (48, 9, 25)
+    rr((28, hero_y1, 485, hero_y2), fill=hero_fill, outline=accent, width=4, radius=28)
+    arrow='↓' if down else '↑'; label='DOWN' if down else 'UP'
+    txt(72, 404, arrow, 155, accent, True)
+    txt(205, 470, label, 76, white, True)
+    txt(205, 555, 'TRADE DIRECTION', 21, accent, True)
+    # Circular timer ring.
+    cx, cy, r = 760, 515, 126
+    for w, col, off in ((24, (0,85,65), 0), (13, accent, 0)):
+        d.arc((cx-r-off,cy-r-off,cx+r+off,cy+r+off), 205, 338, fill=col, width=w)
+        d.arc((cx-r-off,cy-r-off,cx+r+off,cy+r+off), 18, 150, fill=col, width=w)
+    d.ellipse((cx-r+18,cy-r+18,cx+r-18,cy+r-18), fill=(2,16,25), outline=(0, 235, 180), width=3)
+    txt(cx, 422, 'LIVE TIMER', 22, white, True, 'mm')
+    timer_value = str(timer_text) if timer_text else f'{PRE_ENTRY_SECONDS:02d} SEC'
+    timer_size = 64 if ':' in timer_value else 58
+    txt(cx, 493, timer_value, timer_size, accent, True, 'mm')
+    txt(cx, 574, 'TO ENTRY' if timer_label in {'ENTRY IN','ALERT'} else 'RUNNING', 22, white, True, 'mm')
+    # decorative mini candles.
+    base_x=875
+    for i in range(8):
+        x=base_x+i*22; top=520-(i*16); bottom=top+55+(i%3)*8
+        col=(20,225,130) if i%3 else (235,55,75)
+        d.line((x+7, top-18, x+7, bottom+10), fill=col, width=2)
+        d.rectangle((x, top, x+14, bottom), fill=col)
+    txt(850, 625, 'Trade Smart', 21, (25, 240, 160), True)
+    txt(850, 650, 'Trade Better', 21, (25, 240, 160), True)
+
+    # Four key metric panels.
+    cards=[(28,'ENTRY TIME',datetime.fromtimestamp(entry_ts,UAE).strftime('%H:%M:%S'),cyan),
+           (286,'CANDLE','1 MIN',(30,190,120)),
+           (544,'EXPIRY',f'{expiry} MIN',(250,190,20)),
+           (802,'LIVE TIMER',str(timer_text) if timer_text else f'{PRE_ENTRY_SECONDS:02d} SEC', (240,45,65))]
+    for x,label,value,col in cards:
+        rr((x,690,x+242,820), fill=(5,24,47), outline=col, width=3, radius=22)
+        txt(x+18, 710, label, 18, muted, True)
+        d.text((x+18, 750), value, font=fit(value, 205, 32, True), fill=white)
+        if label=='LIVE TIMER': txt(x+18, 789, 'RUNNING' if timer_label=='LIVE TIMER' else 'ALERT', 16, accent, True)
+
+    # Brain / AI / confidence panels.
+    rr((28,835,390,950), fill=(5,25,46), outline=(10,155,230), width=3)
+    rr((408,835,770,950), fill=(5,25,46), outline=(10,155,230), width=3)
+    rr((788,835,1052,950), fill=(5,25,46), outline=(10,155,230), width=3)
+    txt(55,855,'HUMAN BRAIN',20,(205,145,240),True); txt(55,898,'CONFIRMED',29,accent,True); d.ellipse((330,870,375,915),fill=accent); txt(352,892,'✓',25,(2,35,25),True,'mm')
+    txt(435,855,'AI ANALYSIS',20,(150,195,235),True); txt(435,898,'APPROVED',29,accent,True); d.ellipse((710,870,755,915),fill=accent); txt(732,892,'✓',25,(2,35,25),True,'mm')
+    txt(815,855,'CONFIDENCE',20,(150,195,235),True); txt(815,891,f'{int(confidence)}%',43,accent,True)
+
+    # Signal reasons panel with faint chart.
+    rr((28,968,W-28,1148), fill=(4,21,43), outline=(10,120,205), width=3, radius=24)
+    txt(58,987,'☰  SIGNAL REASONS',27,white,True)
+    # background candlestick trace
+    for i in range(18):
+        x=620+i*22; top=1030-int(55*sin(i*.75)+i*1.2); bot=top+35+(i%4)*7
+        col=(20,130,110) if i%4 else (130,45,75)
+        d.line((x+6,top-12,x+6,bot+12),fill=col,width=2); d.rectangle((x,top,x+12,bot),fill=col)
+    items=list(evidence or ())[:3] or ['Multi-indicator alignment verified']
+    ry=1030
+    cols=[(30,235,160),(30,180,240),(250,195,25)]
+    for i,item in enumerate(items):
+        d.ellipse((58,ry+5,78,ry+25),fill=cols[i%3])
+        lines=_wrap_lines(d,item,490,_font(20))
+        for line in lines[:2]:
+            txt(95,ry,line,20,white); ry += 26
+        ry += 7
+    txt(850,1110,'Small Steps',18,(0,225,255),True); txt(850,1130,'Big Results',18,(0,225,255),True)
+
+    # Safety banner.
+    rr((28,1170,W-28,1260), fill=(4,48,34), outline=(25,235,130), width=3, radius=22)
+    txt(55,1185,'✓',45,accent,True)
+    txt(115,1185,'MANUAL TRADE ONLY',27,accent,True)
+    txt(115,1220,'AUTO-TRADE OFF  •  DEMO MODE',18,muted,True)
+    d.line((665,1184,665,1247),fill=(20,235,190),width=2)
+    txt(695,1188,'1m + 3m + 5m + 10m + 15m',18,white,True)
+    txt(855,1220,'TRADE RESPONSIBLY',16,(20,230,150),True)
+
+    # Footer waves / identity.
+    txt(55,1280,'CANDICE AI',24,white,True); txt(55,1310,'YOUR TRADING PARTNER',16,muted)
+    txt(360,1285,'DISCIPLINE',17,muted,True); txt(535,1285,'PLAN',17,muted,True); txt(670,1285,'PROFIT',17,muted,True)
+    d.arc((-150,1280,650,1450), 190, 355, fill=(30,80,255), width=4)
+    d.arc((360,1270,1220,1430), 190, 350, fill=(180,20,255), width=4)
+    d.arc((580,1290,1350,1450), 185, 345, fill=(20,220,255), width=3)
+
+    bio=BytesIO()
+    img.save(bio, format='JPEG', quality=88, optimize=True)
+    bio.seek(0)
+    return bio
+
+'''
+          text=text[:start]+new+text[end:]
+          text=text.replace("VERSION = '8.9-CANDICE-LIVE-TIMER-FIX'", "VERSION = '9.0-CANDICE-REFERENCE-CARD'")
+          p.write_text(text)
+          compile(p.read_text(), 'app.py', 'exec')
+          print('REFERENCE CARD PATCH: PASS')
+          PY
+      - name: Render smoke test
+        run: |
+          python - <<'PY'
+          import app
+          from pathlib import Path
+          b=app.build_live_timer_card('ASIA_X','UP',1770000000,1769999940,3,84,'1 MIN',('Parabolic SAR Reversal','Moving Average Crossover','Rate of Change Crossover'),178,'pre')
+          data=b.getvalue()
+          assert data[:2] == b'\xff\xd8' and len(data) > 20000
+          Path('/tmp/candice-reference-card.jpg').write_bytes(data)
+          print('REFERENCE CARD RENDER: PASS', len(data))
+          PY
+      - name: Commit and remove one-shot workflow
+        run: |
+          git config user.name 'Candice AI'
+          git config user.email 'candice-ai@users.noreply.github.com'
+          git add app.py
+          git rm .github/workflows/candice-card-upgrade.yml
+          git commit -m 'Implement large Candice reference signal card'
+          git push
