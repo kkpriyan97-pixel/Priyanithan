@@ -88,12 +88,14 @@ def human_brain(frames:dict,memory:dict|None=None):
     if adx>=25:reasons.append("trend strength")
     if regime=="range" and agreement<4:score-=.10;reasons.append("range market")
     score=max(0.0,min(1.0,score))
-    if score>=.86 and adx>=35 and body>=.55:expiry=1
+    high_tf_aligned=bool(direction and ten.get("direction")==direction and fifteen.get("direction")==direction)
+    min_high_tf_adx=min(float(ten.get("adx14",0) or 0),float(fifteen.get("adx14",0) or 0)) if high_tf_aligned else 0.0
+    if high_tf_aligned and score>=.72 and min_high_tf_adx>=25 and adx<35:expiry=15
+    elif high_tf_aligned and score>=.62 and min_high_tf_adx>=18 and adx<30:expiry=10
+    elif score>=.86 and adx>=35 and body>=.55:expiry=1
     elif score>=.82 and adx>=30:expiry=2
     elif score>=.76 and adx>=22:expiry=3
     elif score>=.68 and adx>=18:expiry=5
-    elif direction and ten.get("direction")==direction and fifteen.get("direction")==direction and score>=.72:expiry=15
-    elif direction and ten.get("direction")==direction and fifteen.get("direction")==direction and score>=.62:expiry=10
     else:expiry=0
     approve=bool(expiry and score>=.68 and conflicts<3 and not (rsi>=82 or rsi<=18))
     reason="; ".join(reasons) or "insufficient independent confirmation"
@@ -103,16 +105,16 @@ def human_brain(frames:dict,memory:dict|None=None):
 
 def choose_expiry(s:dict,frames:dict|None=None)->int:
     frames=frames or {};agreement=int(s.get("indicator_agreement",0));strength=float(s.get("strength",0));adx=float(s.get("adx14",0));body=float(s.get("body_ratio",0));direction=s.get("direction","")
+    f10=frames.get("10m",{});f15=frames.get("15m",{})
+    high_tf_aligned=bool(direction and f10.get("direction")==direction and f15.get("direction")==direction)
+    if high_tf_aligned:
+        adx10=float(f10.get("adx14",0) or 0);adx15=float(f15.get("adx14",0) or 0);min_high_tf_adx=min(adx10,adx15)
+        if strength>=.8 and min_high_tf_adx>=25 and adx<35:return 15
+        if strength>=.6 and min_high_tf_adx>=18 and adx<30:return 10
     if agreement>=4 and strength>=.8 and adx>=35 and body>=.55:return 1
     if agreement>=4 and strength>=.8 and adx>=30:return 2
     if agreement>=4 and strength>=.8 and adx>=22:return 3
     if agreement>=3 and strength>=.8 and adx>=18:return 5
-    f10=frames.get("10m",{});f15=frames.get("15m",{})
-    if direction and f10.get("direction")==direction and f15.get("direction")==direction:
-        adx10=float(f10.get("adx14",0) or 0);adx15=float(f15.get("adx14",0) or 0)
-        if strength>=.8 and min(adx10,adx15)>=25:return 15
-        if strength>=.6 and min(adx10,adx15)>=18:return 10
-    if agreement>=3 and strength>=.6:return 10
     return 0
 
 def _ai_prompt(s,memory):
