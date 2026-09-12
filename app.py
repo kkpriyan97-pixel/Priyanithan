@@ -260,7 +260,8 @@ async def scan_once():
         log.info('AI ANALYSIS pair=%s decision=%s direction=%s confidence=%s expiry=%s reason=%s evidence=%s', asset, a.decision, a.direction, a.confidence, a.expiry, a.reason, a.evidence)
         if a.decision != 'APPROVE':
             continue
-        df, e = await broker.candles(asset, 60, 20, 120)
+        # Keep the entry path consistent with the broker's minimum validated candle buffer.
+        df, e = await broker.candles(asset, 60, 60, 120)
         if e or df is None or df.empty:
             continue
         row = broker.closed_candle(df, time.time(), 60)
@@ -328,6 +329,6 @@ def start_bot_thread():
     asyncio.run(bot_main())
 
 if __name__ == '__main__':
-    threading.Thread(target=start_bot_thread, daemon=True, name='candice-telegram').start()
     port = int(os.getenv('PORT', '10000'))
-    flask_app.run(host='0.0.0.0', port=port, use_reloader=False)
+    threading.Thread(target=start_bot_thread, daemon=True).start()
+    flask_app.run(host='0.0.0.0', port=port)
