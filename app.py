@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 from candice_broker import Broker, FLEX_ASSETS
 from candice_engine import analyze, session_state, technical_snapshot
 from candice_memory import record, summary, today_risk
-from candice_ui import gif_bytes
+from candice_ui import gif_bytes, update_gif_bytes
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(levelname)s %(name)s: %(message)s'); log=logging.getLogger('candice')
 VERSION='8.0-FRESH-CANDICE'; UAE=ZoneInfo('Asia/Dubai'); TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); ACCESS=os.getenv('ACCESS_CODE','').strip(); OT_TOKEN=os.getenv('OLYMPTRADE_ACCESS_TOKEN','').strip(); CHAT=os.getenv('TELEGRAM_CHAT_ID','').strip()
 INTERVAL=max(60,int(os.getenv('SCAN_INTERVAL_SECONDS','300'))); MAX_DAILY_LOSSES=max(1,int(os.getenv('DAILY_MAX_LOSSES','5'))); MAX_STREAK=max(1,int(os.getenv('MAX_CONSECUTIVE_LOSSES','3'))); AUTO_TRADE=False; MARTINGALE=False; FOREX_MODE=False
@@ -24,26 +24,34 @@ async def send_card(cid,kind='selected',asset='ASIA_X',direction='',confidence=0
         log.warning('TELEGRAM GIF SKIPPED: bot not initialized kind=%s asset=%s',kind,asset); return
     try:
         payload=gif_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason)
-        if not isinstance(payload,io.BytesIO):
-            payload=io.BytesIO(payload)
-        payload.seek(0)
-        payload.name='candice.gif'
-        header=payload.read(6); payload.seek(0)
+        if not isinstance(payload,io.BytesIO): payload=io.BytesIO(payload)
+        payload.seek(0); payload.name='candice.gif'; header=payload.read(6); payload.seek(0)
         log.info('TELEGRAM GIF SEND START kind=%s asset=%s bytes=%s header=%s',kind,asset,payload.getbuffer().nbytes,header)
-        await tg_app.bot.send_animation(chat_id=cid,animation=payload,caption='Candice AI • Live Market • Manual Trade Only',read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
+        await tg_app.bot.send_animation(chat_id=cid,animation=InputFile(payload,filename='candice.gif'),caption='Candice AI • Live Market • Manual Trade Only',read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
         log.info('TELEGRAM GIF SENT kind=%s asset=%s',kind,asset)
-    except Exception as e:
-        log.exception('TELEGRAM GIF FAILED kind=%s asset=%s: %s',kind,asset,e)
+    except Exception as e: log.exception('TELEGRAM GIF FAILED kind=%s asset=%s: %s',kind,asset,e)
+async def send_update(cid):
+    if tg_app is None: return
+    try:
+        payload=update_gif_bytes(); payload.seek(0); payload.name='candice-update.gif'; header=payload.read(6); payload.seek(0)
+        log.info('TELEGRAM UPDATE SEND START version=%s bytes=%s header=%s',VERSION,payload.getbuffer().nbytes,header)
+        await tg_app.bot.send_animation(chat_id=cid,animation=InputFile(payload,filename='candice-update.gif'),caption='🎉 CANDICE AI • Major Update • v8.0 FRESH',read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
+        await tg_app.bot.send_message(chat_id=cid,text='''🚀 CANDICE AI — MAJOR UPDATE\n\n🧠 AI decision gate upgraded\n📡 Live FLEX research + fresh-candle verification\n🎯 Conservative signal approval\n⏱ Smart 2 / 3 / 5 / 10 / 15 minute expiry\n🧠 WIN / LOSS / DRAW evidence memory\n🛡️ Daily-loss + 3-loss streak protection\n🔄 24/7 research • signal sessions only\n\nObserve → Analyze → Compare → Learn → Decide → Monitor → Evaluate → Improve\n\nFLEX / FIXED-TIME • MANUAL ONLY\n🚫 Auto-trade OFF • 🚫 Martingale OFF''')
+        log.info('TELEGRAM UPDATE SENT version=%s',VERSION)
+    except Exception as e: log.exception('TELEGRAM UPDATE FAILED version=%s: %s',VERSION,e)
 def keyboard(assets):
     rows=[]
     for i in range(0,len(assets),2): rows.append([InlineKeyboardButton(a,callback_data=f'asset:{a}') for a in assets[i:i+2]])
     return InlineKeyboardMarkup(rows or [[InlineKeyboardButton('No live FLEX assets',callback_data='noop')]])
 async def cmd_access(update,ctx):
     if not ACCESS or not ctx.args or ctx.args[0].strip()!=ACCESS: await update.message.reply_text('🔒 Access denied.'); return
-    users.add(update.effective_user.id); await cmd_assets(update,ctx)
+    users.add(update.effective_user.id); await send_update(update.effective_user.id); await cmd_assets(update,ctx)
 async def cmd_start(update,ctx):
     if update.effective_user.id not in users: await update.message.reply_text('🔒 Use /access <code> first.'); return
     await cmd_assets(update,ctx)
+async def cmd_update(update,ctx):
+    if update.effective_user.id not in users: await update.message.reply_text('🔒 Use /access <code> first.'); return
+    await send_update(update.effective_user.id)
 async def cmd_assets(update,ctx):
     assets=await broker.live_assets(); text='🟢 CANDICE FLEX ASSET SELECTOR\n\nSelect ONE live FLEX asset.\nForex mode is OFF.\nAuto-trade is OFF.\n\n'+('\n'.join('• '+a for a in assets) if assets else 'No live assets currently confirmed.')
     if update.message: await update.message.reply_text(text,reply_markup=keyboard(assets))
@@ -99,7 +107,7 @@ async def scheduler():
         except Exception: log.exception('scan cycle failed')
 async def bot_main():
     global tg_app
-    tg_app=Application.builder().token(TOKEN).build(); tg_app.add_handler(CommandHandler('start',cmd_start)); tg_app.add_handler(CommandHandler('access',cmd_access)); tg_app.add_handler(CommandHandler('assets',cmd_assets)); tg_app.add_handler(CommandHandler('status',cmd_status)); tg_app.add_handler(CommandHandler('session',cmd_session)); tg_app.add_handler(CallbackQueryHandler(asset_callback,r'^asset:'))
+    tg_app=Application.builder().token(TOKEN).build(); tg_app.add_handler(CommandHandler('start',cmd_start)); tg_app.add_handler(CommandHandler('access',cmd_access)); tg_app.add_handler(CommandHandler('update',cmd_update)); tg_app.add_handler(CommandHandler('assets',cmd_assets)); tg_app.add_handler(CommandHandler('status',cmd_status)); tg_app.add_handler(CommandHandler('session',cmd_session)); tg_app.add_handler(CallbackQueryHandler(asset_callback,r'^asset:'))
     await tg_app.initialize(); await tg_app.bot.delete_webhook(drop_pending_updates=True); await tg_app.start(); await tg_app.updater.start_polling(drop_pending_updates=True); log.warning('CANDICE TELEGRAM: ONLINE')
     asyncio.create_task(broker.connect_forever()); asyncio.create_task(scheduler())
     while True: await asyncio.sleep(3600)
