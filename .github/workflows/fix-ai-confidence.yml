@@ -1,0 +1,32 @@
+name: Fix AI confidence normalization
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Normalize AI confidence 0..1 to 0..100
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('candice_engine.py')
+          s = p.read_text()
+          old = 'conf=max(0,min(100,int(ai.get("confidence",0) or 0)));ai_exp=int(ai.get("expiry",0) or 0)'
+          new = 'raw_conf=float(ai.get("confidence",0) or 0);conf=int(round(raw_conf*100)) if 0 <= raw_conf <= 1 else int(round(raw_conf));conf=max(0,min(100,conf));ai_exp=int(ai.get("expiry",0) or 0)'
+          if old not in s:
+              raise SystemExit('Target confidence expression not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Verify syntax
+        run: python -m py_compile candice_engine.py
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add candice_engine.py
+          git diff --cached --quiet || git commit -m 'Fix AI confidence normalization'
+          git push
