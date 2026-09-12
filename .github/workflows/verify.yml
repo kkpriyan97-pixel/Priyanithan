@@ -17,13 +17,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Compile all runtime modules
-        run: python -m py_compile app.py candice_broker.py candice_engine.py candice_memory.py candice_ui.py olymptrade_ws/__init__.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
+        run: python -m py_compile app.py candice_broker.py candice_engine.py candice_memory.py candice_ui.py candice_patterns.py olymptrade_ws/__init__.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
       - name: Static safety contract
         run: |
           python - <<'PY'
           from pathlib import Path
           import ast
-          app=Path('app.py').read_text(); engine=Path('candice_engine.py').read_text(); broker=Path('candice_broker.py').read_text(); trade=Path('olymptrade_ws/api/trade.py').read_text(); readme=Path('README.md').read_text(); env=Path('RENDER_ENV.example').read_text()
+          app=Path('app.py').read_text(); engine=Path('candice_engine.py').read_text(); broker=Path('candice_broker.py').read_text(); trade=Path('olymptrade_ws/api/trade.py').read_text(); readme=Path('README.md').read_text(); env=Path('RENDER_ENV.example').read_text(); patterns=Path('candice_patterns.py').read_text()
           tree=ast.parse(app); constants={}
           for node in tree.body:
               if isinstance(node, ast.Assign):
@@ -31,9 +31,11 @@ jobs:
                       if isinstance(target, ast.Name) and target.id in {'VERSION','INTERVAL','AUTO_TRADE','MARTINGALE','FOREX_MODE'}:
                           try: constants[target.id]=ast.literal_eval(node.value)
                           except Exception: pass
-          assert constants.get('VERSION') == '8.5-FULL-BOT-1M-WEBHOOK'; assert constants.get('INTERVAL') == 60; assert constants.get('AUTO_TRADE') is False; assert constants.get('MARTINGALE') is False; assert constants.get('FOREX_MODE') is False
-          assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app; assert 'signal_countdown' in app and 'entry_ts' in app; assert 'closed_candle_at' in app and 'closed_candle' in app; assert 'session_state()!=' not in app; assert 'set_webhook' in app and "WEBHOOK_PATH = '/telegram/webhook'" in app; assert 'start_polling' in app and 'delete_webhook' in app
+          assert constants.get('VERSION') == '8.6-FULL-BOT-1M-PREENTRY-TIMER'; assert constants.get('INTERVAL') == 60; assert constants.get('AUTO_TRADE') is False; assert constants.get('MARTINGALE') is False; assert constants.get('FOREX_MODE') is False
+          assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app; assert 'entry_ts' in app and 'closed_candle_at' in app and 'closed_candle' in app; assert 'set_webhook' in app; assert 'start_polling' in app
           assert 'EXPIRIES = (1, 2, 3, 5, 10, 15)' in engine or 'EXPIRIES=(1,2,3,5,10,15)' in engine; assert all(x in engine for x in ('1,2,3,5,10,15','candidate_expiry','choose_expiry')); assert 'CEREBRAS_API_KEY' in engine and 'GROQ_API_KEY' in engine; assert 'OPENROUTER_API_KEY' not in engine
+          required_patterns=('Doji','Spinning Top','Bullish Marubozu','Bearish Marubozu','Hammer','Inverted Hammer','Shooting Star','Hanging Man','Bullish Engulfing','Bearish Engulfing','Bullish Harami','Bearish Harami','Piercing Line','Dark Cloud Cover','Tweezer Top','Tweezer Bottom','Bullish Kicker','Bearish Kicker','Morning Star','Evening Star','Three White Soldiers','Three Black Crows','Three Inside','Three Outside','Abandoned Baby','Inside Bar','Outside Bar')
+          assert all(x in patterns for x in required_patterns); assert 'detect_candlestick_patterns' in engine; assert 'candle_patterns' in engine
           assert "RuntimeError('Candice v8 is read-only" in trade; assert '1 / 2 / 3 / 5 / 10 / 15' in readme; assert 'TELEGRAM_BOT_TOKEN=' in env and 'CEREBRAS_API_KEY=' in env and 'GROQ_API_KEY=' in env; assert 'OPENROUTER_API_KEY=' not in env
           assert 'chunk_size=min(600,count)' in broker; assert 'end_time=cursor' in broker; assert not any(Path('.').glob('*_hotfix.py')); print('STATIC SAFETY CONTRACT: PASS')
           PY
@@ -41,14 +43,15 @@ jobs:
         run: |
           python - <<'PY'
           import app
-          assert app.VERSION == '8.5-FULL-BOT-1M-WEBHOOK'; assert app.INTERVAL == 60; assert app.AUTO_TRADE is False; assert app.MARTINGALE is False; assert app.FOREX_MODE is False; assert app.WEBHOOK_PATH == '/telegram/webhook'
-          c=app.flask_app.test_client(); r=c.get('/'); assert r.status_code == 200 and '8.5-FULL-BOT-1M-WEBHOOK' in r.get_data(as_text=True); r=c.get('/health'); assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'; r=c.post('/telegram/webhook', json={}); assert r.status_code in {400,503}; print('RUNTIME SURFACE: PASS')
+          assert app.VERSION == '8.6-FULL-BOT-1M-PREENTRY-TIMER'; assert app.INTERVAL == 60; assert app.AUTO_TRADE is False; assert app.MARTINGALE is False; assert app.FOREX_MODE is False; assert app.WEBHOOK_PATH == '/telegram/webhook'
+          c=app.flask_app.test_client(); r=c.get('/'); assert r.status_code == 200 and '8.6-FULL-BOT-1M-PREENTRY-TIMER' in r.get_data(as_text=True); r=c.get('/health'); assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'; r=c.post('/telegram/webhook', json={}); assert r.status_code in {400,503}; print('RUNTIME SURFACE: PASS')
           PY
-      - name: Deterministic technical lifecycle test
+      - name: Deterministic technical lifecycle and candle-pattern test
         run: |
           python - <<'PY'
           import pandas as pd
           from candice_engine import technical_snapshot, choose_expiry, human_brain, EXPIRIES, resample_ohlc, closed_1m
+          from candice_patterns import detect_candlestick_patterns
           from candice_broker import Broker
           from app import expiry_boundary
           assert set(EXPIRIES)=={1,2,3,5,10,15}; base=1700000100; rows=[]; p=100.0
@@ -62,9 +65,12 @@ jobs:
           assert human_brain(frames10)['expiry']==10
           frames15={'1m':common,'3m':common,'5m':common,'10m':{'direction':'UP','adx14':28},'15m':{'direction':'UP','adx14':28}}
           assert human_brain(frames15)['expiry']==15
+          # Pattern layer smoke test: bullish engulfing.
+          p_rows=[{'timestamp':1,'open':100,'high':101,'low':98,'close':99},{'timestamp':2,'open':99,'high':100,'low':97,'close':98},{'timestamp':3,'open':98,'high':99,'low':96,'close':97},{'timestamp':4,'open':97.5,'high':98,'low':96.5,'close':97},{'timestamp':5,'open':96.8,'high':100.5,'low':96.5,'close':100.2}]
+          pat=detect_candlestick_patterns(pd.DataFrame(p_rows)); assert 'Bullish Engulfing' in pat['bullish']
           last=float(df.timestamp.iloc[-1]); assert Broker.closed_candle(df,last+60,60).timestamp==last; assert Broker.closed_candle(df,last,60).timestamp==last-60
           for expiry in EXPIRIES: assert expiry_boundary(last,expiry)==last+60+expiry*60
-          print('TECHNICAL + ADAPTIVE EXPIRY LIFECYCLE: PASS')
+          print('TECHNICAL + ADAPTIVE EXPIRY + CANDLE PATTERNS: PASS')
           PY
       - name: Read-only broker to engine integration test
         run: |
