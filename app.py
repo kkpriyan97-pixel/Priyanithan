@@ -3,19 +3,18 @@ import asyncio, logging, os, threading, time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from flask import Flask
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from flask import Flask, request
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 from candice_broker import Broker
 from candice_engine import analyze, session_state, technical_snapshot
 from candice_memory import record, summary, today_risk, authorized_users, authorize_user
 
-VERSION = '8.4-FULL-BOT-1M-PERSISTENT-USERS'
+VERSION = '8.5-FULL-BOT-1M-WEBHOOK'
 UAE = ZoneInfo('Asia/Dubai')
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 ACCESS = os.getenv('ACCESS_CODE', '').strip()
 OT_TOKEN = os.getenv('OLYMPIATRADE_ACCESS_TOKEN', os.getenv('OLYMPTRADE_ACCESS_TOKEN', '')).strip()
-# Locked to one-minute analysis so an old Render SCAN_INTERVAL_SECONDS=300 cannot override it.
 INTERVAL = 60
 MAX_DAILY_LOSSES = max(1, int(os.getenv('DAILY_MAX_LOSSES', '5')))
 MAX_STREAK = max(1, int(os.getenv('MAX_CONSECUTIVE_LOSSES', '3')))
@@ -28,6 +27,9 @@ log = logging.getLogger('candice')
 flask_app = Flask(__name__)
 broker = Broker(OT_TOKEN)
 tg_app = None
+BOT_LOOP = None
+WEBHOOK_PATH = '/telegram/webhook'
+WEBHOOK_SECRET = os.getenv('TELEGRAM_WEBHOOK_SECRET', '').strip()
 users = set(authorized_users())
 selected = {}
 active = {}
@@ -194,7 +196,6 @@ async def scan_once():
                 f'🕒 Entry • {datetime.fromtimestamp(time.time(), UAE).strftime("%H:%M:%S UAE")}\n🕯️ Candle • {datetime.fromtimestamp(candle_ts, UAE).strftime("%H:%M:%S UAE")}\n\n'
                 f'🔥 STRONG CONFIRMATION\n\n{evidence}\n\n⏱️ EXPIRY • {a.expiry} MIN\n🧠 AI CONFIDENCE • {a.confidence}%\n📊 TIMEFRAMES • {a.timeframe}\n\n'
                 f'⏳ TIMER • STARTING\n🛡️ FRESH CLOSED-CANDLE ENTRY\n⚠️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
-        # Reserve only after Telegram confirms that the signal was actually delivered.
         msg = await send_text(uid, text)
         if msg is None:
             log.warning('SIGNAL NOT RESERVED pair=%s reason=telegram delivery failed', asset); continue
@@ -208,15 +209,45 @@ async def scheduler():
         except Exception: log.exception('scan cycle failed')
 
 async def bot_main():
-    global tg_app
+    global tg_app, BOT_LOOP
     if not TOKEN: raise RuntimeError('TELEGRAM_BOT_TOKEN is missing')
+    BOT_LOOP = asyncio.get_running_loop()
     tg_app = Application.builder().token(TOKEN).build()
     for command, fn in [('start', cmd_start), ('access', cmd_access), ('assets', cmd_assets), ('status', cmd_status), ('session', cmd_session), ('update', cmd_update)]: tg_app.add_handler(CommandHandler(command, fn))
     tg_app.add_handler(CallbackQueryHandler(asset_callback, r'^asset:'))
-    await tg_app.initialize(); await tg_app.bot.delete_webhook(drop_pending_updates=True); await tg_app.start(); await tg_app.updater.start_polling(drop_pending_updates=True)
-    log.warning('CANDICE TELEGRAM ONLINE — 1M SCANNER — TIMER ACTIVE — AUTO-TRADE OFF')
+    await tg_app.initialize()
+    await tg_app.start()
+    webhook_base = os.getenv('TELEGRAM_WEBHOOK_URL', '').strip().rstrip('/')
+    if not webhook_base:
+        render_url = os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
+        if render_url: webhook_base = render_url
+    if webhook_base:
+        webhook_url = webhook_base + WEBHOOK_PATH
+        kwargs = {'url': webhook_url, 'drop_pending_updates': True}
+        if WEBHOOK_SECRET: kwargs['secret_token'] = WEBHOOK_SECRET
+        await tg_app.bot.set_webhook(**kwargs)
+        log.warning('CANDICE TELEGRAM ONLINE — WEBHOOK MODE — %s — 1M SCANNER — TIMER ACTIVE — AUTO-TRADE OFF', webhook_url)
+    else:
+        await tg_app.bot.delete_webhook(drop_pending_updates=True)
+        await tg_app.updater.start_polling(drop_pending_updates=True)
+        log.warning('CANDICE TELEGRAM ONLINE — LOCAL POLLING MODE — 1M SCANNER — TIMER ACTIVE — AUTO-TRADE OFF')
     asyncio.create_task(broker.connect_forever()); asyncio.create_task(scheduler())
     while True: await asyncio.sleep(3600)
+
+@flask_app.post(WEBHOOK_PATH)
+def telegram_webhook():
+    if WEBHOOK_SECRET and request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != WEBHOOK_SECRET:
+        return 'forbidden', 403
+    if tg_app is None or BOT_LOOP is None:
+        return 'bot not ready', 503
+    try:
+        data = request.get_json(force=True, silent=False)
+        update = Update.de_json(data, tg_app.bot)
+        asyncio.run_coroutine_threadsafe(tg_app.process_update(update), BOT_LOOP)
+        return 'OK', 200
+    except Exception as e:
+        log.exception('TELEGRAM WEBHOOK FAILED: %s', e)
+        return 'bad request', 400
 
 @flask_app.get('/')
 def home(): return f'{VERSION} ONLINE — FLEX market-data / 1-minute manual signals / timers active'
