@@ -52,9 +52,12 @@ jobs:
           assert 'start_polling' in app and 'delete_webhook' in app
           assert 'EXPIRIES = (2, 3, 5, 15)' in engine
           assert '2|3|5|15' in engine
+          assert 'CEREBRAS_API_KEY' in engine and 'GROQ_API_KEY' in engine
+          assert 'OPENROUTER_API_KEY' not in engine
           assert "RuntimeError('Candice v8 is read-only" in trade
           assert '2 / 3 / 5 / 15' in readme
-          assert 'TELEGRAM_BOT_TOKEN=' in env and 'OPENROUTER_API_KEY=' in env
+          assert 'TELEGRAM_BOT_TOKEN=' in env and 'CEREBRAS_API_KEY=' in env and 'GROQ_API_KEY=' in env
+          assert 'OPENROUTER_API_KEY=' not in env
           assert 'chunk_size=min(600,count)' in broker
           assert 'end_time=cursor' in broker
           assert not any(Path('.').glob('*_hotfix.py'))
