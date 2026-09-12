@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio, logging, os, threading, time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -20,12 +20,6 @@ AUTO_TRADE=False; MARTINGALE=False; FOREX_MODE=False
 flask_app=Flask(__name__); broker=Broker(OT_TOKEN); tg_app=None; users=set(); selected={}; active={}; sent_keys=set(); daily={'date':'','losses':0,'streak':0}
 
 def now(): return datetime.now(UAE)
-def recipients():
-    x=set(users)
-    if CHAT:
-        try:x.add(int(CHAT))
-        except:pass
-    return x
 def reset_daily():
     d=now().date().isoformat()
     if daily['date']!=d: daily.update(date=d,losses=0,streak=0)
@@ -104,7 +98,7 @@ async def scheduler():
 async def bot_main():
     global tg_app
     tg_app=Application.builder().token(TOKEN).build(); tg_app.add_handler(CommandHandler('start',cmd_start)); tg_app.add_handler(CommandHandler('access',cmd_access)); tg_app.add_handler(CommandHandler('assets',cmd_assets)); tg_app.add_handler(CommandHandler('status',cmd_status)); tg_app.add_handler(CommandHandler('session',cmd_session)); tg_app.add_handler(CallbackQueryHandler(asset_callback,r'^asset:'))
-    await tg_app.initialize(); await tg_app.start(); await tg_app.updater.start_polling(drop_pending_updates=True); log.warning('CANDICE TELEGRAM: ONLINE')
+    await tg_app.initialize(); await tg_app.bot.delete_webhook(drop_pending_updates=True); await tg_app.start(); await tg_app.updater.start_polling(drop_pending_updates=True); log.warning('CANDICE TELEGRAM: ONLINE')
     asyncio.create_task(broker.connect_forever()); asyncio.create_task(scheduler())
     while True: await asyncio.sleep(3600)
 @flask_app.get('/')
