@@ -1,37 +1,28 @@
-# OlympTradeAPI
+# Candice AI v8 — FLEX Manual Signal Bot
 
-Python WebSocket API client for OlympTrade — build, backtest and run automated trading bots.
+Clean rebuild of the Priyanithan Telegram signal bot.
 
-📚 **[Read the documentation](https://chipadevteam.github.io/OlympTradeAPI/)** · 👉 **[Join us on Discord](https://discord.gg/p7YyFqSmAz)**
+## Design
+- Live OlympTrade market data through the existing WebSocket market adapter.
+- **FLEX / Fixed-Time only. Forex mode is OFF.**
+- Telegram alerts only; **no broker order placement**.
+- Martingale OFF.
+- Fresh candles + deterministic technical analysis + optional OpenRouter AI gate.
+- AI must agree with technical direction and meet the confidence gate before an alert is sent.
+- 2/3/5/10/15 minute expiries.
+- 5-minute scan cadence.
+- 24/7 read-only research; signal generation only in signal sessions.
+- Duplicate prevention, daily-loss stop and 3-consecutive-loss stop.
+- Market-outcome WIN/LOSS/DRAW tracking with bounded evidence memory.
+- Compact mobile Telegram animation cards.
 
----
+## Session model
+UTC runs in repeating 3-hour blocks: first 2 hours are SIGNAL, final hour is RESEARCH ONLY. Research continues throughout the day; during signal hours only the user's selected FLEX asset can produce an alert.
 
-## ⚡ Build bots faster with Chipa Editor
+## Safety boundary
+This project deliberately contains no call to a broker trade/order API from the application workflow. A recorded WIN/LOSS is the result of comparing the signal entry reference with the observed expiry market price; it is not a claim about an actual broker account trade or profit.
 
-[**Chipa Editor**](https://chipaeditor.com/?utm_source=olymptradeapi&utm_medium=readme&utm_campaign=olymptrade_api_docs&utm_term=support&utm_content=header) autocompletes this entire API — every method, parameter and payload — with inline docs as you type. Free to start.
+## Required Render secrets
+Set `TELEGRAM_BOT_TOKEN`, `ACCESS_CODE`, `OLYMPTRADE_ACCESS_TOKEN`, and (for AI-approved signals) `OPENROUTER_API_KEY` in Render environment variables. Never paste secret values into chat or logs.
 
-👉 **[Get Chipa Editor free](https://chipaeditor.com/?utm_source=olymptradeapi&utm_medium=readme&utm_campaign=olymptrade_api_docs&utm_term=support&utm_content=header)**
-
-## 🤖 Don't want to build it yourself?
-
-| What you want | Where to go |
-|---|---|
-| **Trade bots that already work** — no code, no setup | [Chipa Exchange →](https://exchange.chipatrade.com/trade/BTC) |
-| **A bot built to your strategy** by our team | [Custom Bot Development →](https://chipatrade.com/services/bot-development) |
-| **Write it yourself** | Start with the [docs](https://chipadevteam.github.io/OlympTradeAPI/getting-started.html) |
-
-## 📈 You'll need an OlympTrade account
-
-This library connects to OlympTrade's WebSocket API, so a live account is required to run anything here. Payouts go up to 93%.
-
-👉 **[Create your OlympTrade account](https://trkmad.com/2590624)**
-
-> ⚠️ Trading carries inherent risk and you can lose your capital. Never trade money you cannot afford to lose. The link above is an affiliate link — it costs you nothing extra and helps keep this library maintained.
-
-## 💬 Community
-
-👉 [Join us on Discord](https://discord.gg/p7YyFqSmAz)
-
-## 📄 License
-
-MIT — see [LICENSE](LICENSE).
+Start command: `PYTHONPATH=. python app.py`
