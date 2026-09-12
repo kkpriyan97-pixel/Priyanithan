@@ -1,4 +1,4 @@
-name: Verify Priyanithan Final
+name: Verify Candice v8
 
 on:
   push:
@@ -13,114 +13,44 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
       - run: pip install -r requirements.txt
-      - name: Compile runtime Python
-        run: |
-          python -m py_compile app.py sitecustomize.py candice_memory_brain.py candice_memory_integration_hotfix.py candice_research_brain_hotfix.py candice_ai_memory_context_hotfix.py candice_timeframe_strategy_brain_hotfix.py duration_selection_hotfix.py build_application_hotfix.py live_asset_probe_hotfix.py live_asset_probe_v2_hotfix.py live_asset_refresh_hotfix.py live_ai_monitor_hotfix.py final_result_precision_hotfix.py digital_countdown_hotfix.py loss_recovery_ai_hotfix.py selected_scan_cycle_hotfix.py signal_window_countdown_hotfix.py signal_live_update_hotfix.py native_live_signal_monitor_hotfix.py trade_result_monitor.py signal_engine.py runtime_fixes.py analysis_hotfix.py provider_cleanup_hotfix.py candice_signal_session_hotfix.py candice_session_status_hotfix.py candice_compare_learn_improve_hotfix.py
-          python -m py_compile olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py olymptrade_ws/__init__.py
-      - name: Verify core safety and Telegram flow
+      - name: Compile clean runtime
+        run: python -m py_compile app.py candice_broker.py candice_engine.py candice_memory.py candice_ui.py olymptrade_ws/__init__.py olymptrade_ws/core/*.py olymptrade_ws/api/*.py olymptrade_ws/olympconfig/*.py
+      - name: Static safety checks
         run: |
           python - <<'PY'
           from pathlib import Path
-          app = Path("app.py").read_text(encoding="utf-8")
-          site = Path("sitecustomize.py").read_text(encoding="utf-8")
-          builder = Path("build_application_hotfix.py").read_text(encoding="utf-8")
-          session = Path("candice_signal_session_hotfix.py").read_text(encoding="utf-8")
-          status = Path("candice_session_status_hotfix.py").read_text(encoding="utf-8")
-          recovery = Path("loss_recovery_ai_hotfix.py").read_text(encoding="utf-8")
-          memory = Path("candice_memory_integration_hotfix.py").read_text(encoding="utf-8")
-          window = Path("signal_window_countdown_hotfix.py").read_text(encoding="utf-8")
-          assert "AUTO_TRADE = False" in app
-          assert "MARTINGALE = False" in app
-          assert "LIVE ASSET SELECTION" in app
-          assert "REFRESH LIVE ASSETS" in app
-          assert "one_minute_candle_mode_hotfix" not in site
-          assert "disable_legacy_telegram_flow" not in site
-          assert "final_access_asset_lock_v2" not in site
-          for name in ("build_application_hotfix","selected_scan_cycle_hotfix","candice_memory_integration_hotfix","candice_research_brain_hotfix","candice_ai_memory_context_hotfix","candice_timeframe_strategy_brain_hotfix","candice_compare_learn_improve_hotfix","candice_signal_session_hotfix","candice_session_status_hotfix"):
-              assert f"import {name}" in site
-          assert 'CommandHandler("start", app.start_cmd)' in builder
-          assert 'CommandHandler("access", app.access_cmd)' in builder
-          assert 'CommandHandler("session", _session_cmd)' in builder
-          assert 'module.analyze_asset = gated_analyze' in session
-          assert 'module.scan_cycle = gated_scan' in session
-          assert 'RESEARCH_ONLY' in session
-          assert 'SIGNAL_SESSION' in session
-          assert 'Asia/Dubai' in session
-          assert '_session_cmd' in status
-          assert 'CANDICE_MEMORY_INTEGRATION_V3' in memory
-          assert 'LOSS_RECOVERY_AI_V2' in recovery
-          assert 'record_candice_result' in memory and '_record_result' in recovery
-          assert 'def _session_active' in window
-          assert 'UPDATE_SECONDS = 2' in window
-          assert 'SIGNAL WINDOW BLOCKED BY SESSION' in window
-          print("CORE STATIC VERIFY OK")
+          app=Path('app.py').read_text()
+          trade=Path('olymptrade_ws/api/trade.py').read_text()
+          assert "AUTO_TRADE=False" in app
+          assert "MARTINGALE=False" in app
+          assert "FOREX_MODE=False" in app
+          assert "MANUAL TRADE ONLY" in app
+          assert "delete_webhook" in app
+          assert "start_polling" in app
+          assert "RuntimeError('Candice v8 is read-only" in trade
+          assert not any(Path('.').glob('*_hotfix.py'))
+          print('CANDICE V8 SAFETY VERIFY OK')
           PY
-      - name: Smoke test Candice session timing
-        run: |
-          python - <<'PY'
-          from datetime import datetime, timezone
-          import candice_signal_session_hotfix as s
-          def ts(h, m=0):
-              return datetime(2026, 9, 11, h, m, tzinfo=timezone.utc).timestamp()
-          assert s.signal_session_active(ts(0,30)) is True
-          assert s.signal_session_active(ts(1,59)) is True
-          assert s.signal_session_active(ts(2,0)) is False
-          assert s.signal_session_active(ts(2,59)) is False
-          assert s.signal_session_active(ts(3,0)) is True
-          assert s.signal_session_active(ts(4,59)) is True
-          state = s.session_state(ts(2,30))
-          assert state["mode"] == "RESEARCH_ONLY"
-          assert state["next_signal_utc"].endswith("03:00:00 UTC")
-          assert state["end_uae"].endswith("07:00:00 UAE")
-          active = s.session_state(ts(3,30))
-          assert active["mode"] == "SIGNAL_SESSION"
-          assert active["end_uae"].endswith("09:00:00 UAE")
-          print("CANDICE SESSION SMOKE TEST OK")
-          PY
-      - name: Smoke test Candice memory brain
-        run: |
-          python - <<'PY'
-          import tempfile
-          from pathlib import Path
-          from candice_memory_brain import CandiceMemoryBrain
-          with tempfile.TemporaryDirectory() as td:
-              brain = CandiceMemoryBrain(Path(td) / "memory.json")
-              brain.record_signal({"asset":"TEST","timeframe":"1M","strategy":"MOMENTUM","regime":"TREND","direction":"UP"})
-              brain.record_result({"asset":"TEST","timeframe":"1M","strategy":"MOMENTUM","regime":"TREND","direction":"UP","outcome":"WIN"})
-              score = brain.strategy_score({"asset":"TEST","timeframe":"1M","strategy":"MOMENTUM","regime":"TREND"})
-              assert score["samples"] == 1 and score["wins"] == 1
-          print("CANDICE MEMORY SMOKE TEST OK")
-          PY
-      - name: Smoke test duration selector
+      - name: Technical analysis smoke test
         run: |
           python - <<'PY'
           import pandas as pd
-          from duration_selection_hotfix import _choose
+          from candice_engine import technical_snapshot, choose_expiry, EXPIRIES
           rows=[]; p=100.0
-          for i in range(40):
-              o=p; c=p+0.02
-              rows.append({"timestamp":1700000000+i*60,"open":o,"high":c+0.005,"low":o-0.001,"close":c})
-              p=c
-          df=pd.DataFrame(rows)
-          d,_=_choose({"direction":"UP","trend_5m":"UP","ai_confidence":90},df,df)
-          assert d in (2,3,5,10,15)
-          print("CANDICE DURATION SMOKE TEST OK",d)
+          for i in range(120):
+              o=p; c=p+0.05; rows.append({'timestamp':1700000000+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c}); p=c
+          s=technical_snapshot(pd.DataFrame(rows))
+          assert s['direction']=='UP'
+          assert choose_expiry(s) in EXPIRIES
+          print('CANDICE TECHNICAL SMOKE OK')
           PY
-      - name: Smoke test AI memory request injection
+      - name: UI smoke test
         run: |
           python - <<'PY'
-          import candice_ai_memory_context_hotfix as hook
-          assert hook._extract_fields({"messages":[{"role":"user","content":"Asset: TEST\nDirection candidate: UP\n5m trend: UP\nReason: structure"}]}) == ("TEST","UP","UP")
-          print("CANDICE AI MEMORY CONTEXT SMOKE TEST OK")
-          PY
-      - name: Smoke test timeframe strategy brain
-        run: |
-          python - <<'PY'
-          import candice_timeframe_strategy_brain_hotfix as tf
-          ctx=tf.build_strategy_context("TEST","UP")
-          assert ctx["candidate_direction"] == "UP"
-          assert len(ctx["profiles"]) == 5
-          print("CANDICE TIMEFRAME STRATEGY SMOKE TEST OK")
+          from candice_ui import gif_bytes
+          b=gif_bytes(kind='selected',asset='ASIA_X')
+          assert b.read(6)==b'GIF89a'
+          print('CANDICE MOBILE GIF SMOKE OK')
           PY
