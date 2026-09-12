@@ -51,7 +51,7 @@ jobs:
 
           assert set(EXPIRIES) == {2,3,5,15} and 10 not in EXPIRIES
 
-          base_ts=1700000040
+          base_ts=1700000100
           rows=[]; p=100.0
           for i in range(1200):
               o=p; c=p+0.05
