@@ -11,19 +11,27 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 
-log=logging.getLogger("candice.engine")
-EXPIRIES=(2,3,5,15)
-MIN_CONF=int(os.getenv("AI_MIN_CONFIDENCE","72"))
-AI_TIMEOUT=float(os.getenv("AI_TIMEOUT_SECONDS","18"))
-ANALYSIS_CANDLE_COUNT=max(900,int(os.getenv("ANALYSIS_CANDLE_COUNT","1200")))
-MIN_CONTEXT_CANDLES=60
+log = logging.getLogger("candice.engine")
+EXPIRIES = (2, 3, 5, 15)
+MIN_CONF = int(os.getenv("AI_MIN_CONFIDENCE", "72"))
+AI_TIMEOUT = float(os.getenv("AI_TIMEOUT_SECONDS", "18"))
+ANALYSIS_CANDLE_COUNT = max(240, int(os.getenv("ANALYSIS_CANDLE_COUNT", "240")))
+MIN_CONTEXT_CANDLES = 60
 
 @dataclass
 class Analysis:
-    asset:str; decision:str; direction:str=""; confidence:int=0; expiry:int=0; score:float=0.0; reason:str=""; timeframe:str="5m"; evidence:tuple[str,...]=()
+    asset: str
+    decision: str
+    direction: str = ""
+    confidence: int = 0
+    expiry: int = 0
+    score: float = 0.0
+    reason: str = ""
+    timeframe: str = "5m"
+    evidence: tuple[str, ...] = ()
 
-def _ema(s,n): return s.ewm(span=n,adjust=False).mean()
-def _rsi(s,n=14):
+def _ema(s, n): return s.ewm(span=n, adjust=False).mean()
+def _rsi(s, n=14):
     d=s.diff(); up=d.clip(lower=0).ewm(alpha=1/n,adjust=False).mean(); dn=(-d.clip(upper=0)).ewm(alpha=1/n,adjust=False).mean(); rs=up/dn.replace(0,1e-12); return 100-(100/(1+rs))
 def _atr(df,n=14):
     pc=df.close.shift(1); tr=pd.concat([(df.high-df.low),(df.high-pc).abs(),(df.low-pc).abs()],axis=1).max(axis=1); return tr.rolling(n).mean()
@@ -50,7 +58,7 @@ def closed_1m(df:pd.DataFrame,now_ts:float|None=None)->pd.DataFrame:
     d=df.copy().sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True); return d[d.timestamp<=cutoff].reset_index(drop=True)
 
 def technical_snapshot(df:pd.DataFrame)->dict:
-    if len(df)<MIN_CONTEXT_CANDLES: raise ValueError("insufficient candles")
+    if len(df)<MIN_CONTEXT_CANDLES:raise ValueError("insufficient candles")
     d=df.copy().sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True); c=d.close; e9,e21,e50=_ema(c,9),_ema(c,21),_ema(c,50); r=_rsi(c); m=_macd(c); sig=_ema(m,9); adx=_adx(d); atr=_atr(d); hh=c.rolling(20).max(); ll=c.rolling(20).min(); mid=(hh+ll)/2; last,prev=d.iloc[-1],d.iloc[-2]
     votes=["UP" if e9.iloc[-1]>e21.iloc[-1] else "DOWN","UP" if c.iloc[-1]>e50.iloc[-1] else "DOWN","UP" if m.iloc[-1]>sig.iloc[-1] else "DOWN","UP" if r.iloc[-1]>52 else "DOWN","UP" if c.iloc[-1]>mid.iloc[-1] else "DOWN"]; up,down=votes.count("UP"),votes.count("DOWN"); direction="UP" if up>down else "DOWN" if down>up else ""; strength=max(up,down)/len(votes)
     psar=_psar_direction(d); donchian=_donchian(d); roc=_roc_direction(c); macd_cross="UP" if m.iloc[-1]>sig.iloc[-1] and m.iloc[-2]<=sig.iloc[-2] else "DOWN" if m.iloc[-1]<sig.iloc[-1] and m.iloc[-2]>=sig.iloc[-2] else ""; ma_cross="UP" if e9.iloc[-1]>e21.iloc[-1] and e9.iloc[-2]<=e21.iloc[-2] else "DOWN" if e9.iloc[-1]<e21.iloc[-1] and e9.iloc[-2]>=e21.iloc[-2] else ""
@@ -81,49 +89,45 @@ def _parse_ai_content(content):
 
 def _request_ai(url,key,model,ai_input):
     payload={"model":model,"messages":[{"role":"user","content":_ai_prompt(ai_input.get("technical",ai_input),ai_input.get("memory",{}))}],"temperature":0.1,"max_completion_tokens":400,"response_format":{"type":"json_object"}}
-    # GPT-OSS uses include_reasoning/reasoning_effort; reasoning_format is unsupported.
     if "gpt-oss" in model.lower():
         payload["include_reasoning"]=False
         payload["reasoning_effort"]="low"
     r=requests.post(url,headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
-    if not r.ok:
-        detail=r.text.replace("\n"," ")[:600]
-        raise RuntimeError(f"HTTP {r.status_code}: {detail}")
+    if not r.ok:raise RuntimeError(f"HTTP {r.status_code}: {r.text.replace(chr(10),' ')[:600]}")
     data=r.json(); choices=data.get("choices") or []
     if not choices:raise ValueError("AI response has no choices")
-    content=(choices[0].get("message") or {}).get("content",""); parsed=_parse_ai_content(content)
+    parsed=_parse_ai_content((choices[0].get("message") or {}).get("content",""))
     if not parsed:raise ValueError("AI returned invalid JSON")
     return parsed
 
 def ai_review(snapshot,memory):
-    ai_input={"technical":snapshot,"memory":memory}; providers=(("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"),("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions")); attempted=False
+    providers=(("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions")); attempted=False
     for name,key,model,url in providers:
         if not key:continue
         attempted=True
         try:
-            result=_request_ai(url,key,model,ai_input); log.info("AI PROVIDER=%s MODEL=%s DECISION=%s CONFIDENCE=%s EXPIRY=%s",name,model,result.get("decision",""),result.get("confidence",0),result.get("expiry",0)); return result
+            result=_request_ai(url,key,model,{"technical":snapshot,"memory":memory}); log.info("AI PROVIDER=%s MODEL=%s DECISION=%s CONFIDENCE=%s EXPIRY=%s",name,model,result.get("decision",""),result.get("confidence",0),result.get("expiry",0)); return result
         except Exception as exc:log.warning("AI provider %s unavailable: %s",name,exc)
-    if not attempted:return {"decision":"REJECT","confidence":0,"reason":"Cerebras/Groq AI provider not configured"}
-    return {"decision":"REJECT","confidence":0,"reason":"Cerebras and Groq AI review unavailable"}
+    if not attempted:return {"decision":"REJECT","confidence":0,"reason":"Groq/Cerebras AI provider not configured"}
+    return {"decision":"REJECT","confidence":0,"reason":"Groq and Cerebras AI review unavailable"}
 
 async def analyze(asset,broker,memory):
     df,err=await broker.candles(asset,60,ANALYSIS_CANDLE_COUNT,360)
-    if err or df is None:return Analysis(asset,"REJECT",reason=err or "no live candles")
+    if err or df is None or len(df)<120:return Analysis(asset,"REJECT",reason=err or "insufficient fresh candles")
     base=closed_1m(df)
-    if len(base)<ANALYSIS_CANDLE_COUNT//2:return Analysis(asset,"REJECT",reason=f"insufficient closed candles ({len(base)})")
+    if len(base)<120:return Analysis(asset,"REJECT",reason=f"insufficient closed candles ({len(base)})")
     try:
         snap1=technical_snapshot(base); frames={"1m":snap1}
         for mins in (3,5,10,15):
             agg=resample_ohlc(base,mins)
-            if len(agg)<MIN_CONTEXT_CANDLES:return Analysis(asset,"REJECT",reason=f"insufficient complete {mins}m context ({len(agg)})")
-            frames[f"{mins}m"]=technical_snapshot(agg)
+            if len(agg)>=60:frames[f"{mins}m"]=technical_snapshot(agg)
     except Exception as exc:return Analysis(asset,"REJECT",reason=f"technical calculation failed: {exc}")
-    primary=frames["5m"]; direction=primary["direction"]
+    primary=frames.get("5m",snap1); direction=primary["direction"]
     if not direction or snap1["direction"]!=direction:return Analysis(asset,"REJECT",direction=direction,score=primary["strength"],reason="1m/5m direction conflict",timeframe="1m+5m")
-    context_agreement=sum(1 for k in ("10m","15m") if frames[k]["direction"]==direction); context_conflict=sum(1 for k in ("10m","15m") if frames[k]["direction"] and frames[k]["direction"]!=direction); expiry=choose_expiry(primary)
+    context_agreement=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"]==direction); context_conflict=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"] and frames[k]["direction"]!=direction); expiry=choose_expiry(primary)
     if not expiry:return Analysis(asset,"REJECT",direction=direction,score=primary["strength"],reason="Named-indicator alignment too weak",timeframe="1m+5m")
     if context_conflict>=2 and primary["strength"]<1.0:return Analysis(asset,"REJECT",direction=direction,expiry=expiry,score=primary["strength"],reason="Higher-timeframe context conflicts",timeframe="1m+5m+10m+15m")
-    ai_input={"1m":snap1,"3m":frames["3m"],"5m":primary,"10m":frames["10m"],"15m":frames["15m"],"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":expiry}; ai=await asyncio.to_thread(ai_review,ai_input,memory); decision=str(ai.get("decision","")).upper(); ai_direction=str(ai.get("direction","")).upper(); conf=max(0,min(100,int(ai.get("confidence",0) or 0))); ai_exp=int(ai.get("expiry",0) or 0)
+    ai_input={"1m":snap1,"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":expiry}; ai=await asyncio.to_thread(ai_review,ai_input,memory); decision=str(ai.get("decision","")).upper(); ai_direction=str(ai.get("direction","")).upper(); conf=max(0,min(100,int(ai.get("confidence",0) or 0))); ai_exp=int(ai.get("expiry",0) or 0)
     if decision!="APPROVE" or ai_direction!=direction or conf<MIN_CONF or ai_exp not in EXPIRIES:return Analysis(asset,"REJECT",direction=ai_direction,confidence=conf,expiry=ai_exp,score=primary["strength"],reason=str(ai.get("reason","AI gate rejected")),timeframe="1m+3m+5m+10m+15m")
     evidence=tuple(name for name,value in (("Parabolic SAR Reversal",primary["psar_direction"]),("Moving Average Crossover",primary["ma_crossover"]),("Donchian Channel Breakout",primary["donchian_breakout"]),("MACD Crossover",primary["macd_crossover"]),("Rate of Change Crossover",primary["roc_direction"])) if value==direction); reason=str(ai.get("reason","Multi-timeframe technical + AI alignment")); return Analysis(asset,"APPROVE",direction=direction,confidence=conf,expiry=ai_exp,score=primary["strength"],reason=reason,timeframe="1m+3m+5m+10m+15m",evidence=evidence)
 
