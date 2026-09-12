@@ -36,18 +36,26 @@ jobs:
         run: |
           python - <<'PY'
           import pandas as pd
-          from candice_engine import technical_snapshot, choose_expiry, EXPIRIES, resample_ohlc
+          from candice_engine import technical_snapshot, choose_expiry, EXPIRIES, resample_ohlc, closed_1m
           from candice_broker import Broker
           rows=[]; p=100.0
-          for i in range(1000):
-              o=p; c=p+0.05; rows.append({'timestamp':1700000000+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c}); p=c
+          for i in range(1200):
+              o=p; c=p+0.05
+              rows.append({'timestamp':1700000000+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
+              p=c
           df=pd.DataFrame(rows)
-          s=technical_snapshot(df); assert s['direction']=='UP'; assert choose_expiry(s) in EXPIRIES
+          closed=closed_1m(df,1700000000+1200*60)
+          assert len(closed)==1199 and closed.timestamp.is_monotonic_increasing and closed.timestamp.is_unique
+          s=technical_snapshot(closed); assert s['direction']=='UP'; assert choose_expiry(s) in EXPIRIES
           for mins in (3,5,10,15):
-              agg=resample_ohlc(df,mins)
-              assert len(agg)>=60 and agg['timestamp'].is_monotonic_increasing and agg['timestamp'].is_unique
-          boundary=float(df.timestamp.iloc[-1]+60)
-          row=Broker.closed_candle(df,boundary,60); assert row is not None
-          row2=Broker.closed_candle(df,float(df.timestamp.iloc[-1]),60); assert row2 is not None
+              agg=resample_ohlc(closed,mins)
+              assert len(agg)>=60, f'{mins}m produced {len(agg)} bars'
+              assert agg['timestamp'].is_monotonic_increasing and agg['timestamp'].is_unique
+              assert technical_snapshot(agg)['direction']=='UP'
+          boundary=float(df.timestamp.iloc[-1])+60
+          row=Broker.closed_candle(df,boundary,60)
+          assert row is not None and float(row.close)==float(df.close.iloc[-1])
+          row2=Broker.closed_candle(df,float(df.timestamp.iloc[-1]),60)
+          assert row2 is not None and float(row2.close)==float(df.close.iloc[-2])
           print('CANDICE MULTI-TF + CLOSED-CANDLE SMOKE OK')
           PY
