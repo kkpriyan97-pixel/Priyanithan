@@ -1,0 +1,44 @@
+name: AI Provider Fallback Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'candice_engine.py'
+      - '.github/workflows/ai-provider-fallback-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: "!contains(github.event.head_commit.message, '[skip ai-fix]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make AI providers resilient
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('candice_engine.py')
+          s = p.read_text()
+          old = '''    providers=(("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"),("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions")); attempted=False'''
+          new = '''    providers=(("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions")); attempted=False'''
+          if old not in s:
+              raise SystemExit('provider block not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+      - name: Commit fix
+        shell: bash
+        run: |
+          if git diff --quiet -- candice_engine.py; then
+            echo 'No change needed'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add candice_engine.py
+          git commit -m 'Prefer Groq with Cerebras fallback [skip ai-fix]'
+          git push
