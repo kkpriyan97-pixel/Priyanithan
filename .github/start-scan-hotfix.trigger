@@ -1,1 +1,0 @@
-trigger start-scan hotfix v2
