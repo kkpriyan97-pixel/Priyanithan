@@ -31,8 +31,8 @@ jobs:
                       if isinstance(target, ast.Name) and target.id in {'VERSION','INTERVAL','AUTO_TRADE','MARTINGALE','FOREX_MODE'}:
                           try: constants[target.id]=ast.literal_eval(node.value)
                           except Exception: pass
-          assert constants.get('VERSION') == '8.8-CANDICE-LIVE-TIMER-CARD'; assert constants.get('INTERVAL') == 60; assert constants.get('AUTO_TRADE') is False; assert constants.get('MARTINGALE') is False; assert constants.get('FOREX_MODE') is False
-          assert 'send_photo' in app and 'InputMediaPhoto' in app and 'edit_message_media' in app; assert 'entry_ts' in app and 'closed_candle_at' in app and 'closed_candle' in app; assert 'set_webhook' in app; assert 'start_polling' in app; assert "'LIVE TIMER'" in app and 'build_live_timer_card' in app
+          assert constants.get('VERSION') == '8.9-CANDICE-LIVE-TIMER-FIX'; assert constants.get('INTERVAL') == 60; assert constants.get('AUTO_TRADE') is False; assert constants.get('MARTINGALE') is False; assert constants.get('FOREX_MODE') is False
+          assert 'send_photo' in app and 'InputMediaPhoto' in app and 'edit_message_media' in app; assert 'entry_ts' in app and 'closed_candle_at' in app and 'closed_candle' in app; assert 'set_webhook' in app; assert 'start_polling' in app; assert "'LIVE TIMER'" in app and 'build_live_timer_card' in app; assert 'timeframe: str' in app and 'Signal(asset,a.direction,a.confidence,a.expiry,entry,entry_ts,candle_ts,a.timeframe' in app
           assert 'EXPIRIES = (1, 2, 3, 5, 10, 15)' in engine or 'EXPIRIES=(1,2,3,5,10,15)' in engine; assert all(x in engine for x in ('1,2,3,5,10,15','candidate_expiry','choose_expiry')); assert 'CEREBRAS_API_KEY' in engine and 'GROQ_API_KEY' in engine; assert 'OPENROUTER_API_KEY' not in engine
           required_patterns=('Doji','Spinning Top','Bullish Marubozu','Bearish Marubozu','Hammer','Inverted Hammer','Shooting Star','Hanging Man','Bullish Engulfing','Bearish Engulfing','Bullish Harami','Bearish Harami','Piercing Line','Dark Cloud Cover','Tweezer Top','Tweezer Bottom','Bullish Kicker','Bearish Kicker','Morning Star','Evening Star','Three White Soldiers','Three Black Crows','Three Inside','Three Outside','Abandoned Baby','Inside Bar','Outside Bar')
           assert all(x in patterns for x in required_patterns); assert 'detect_candlestick_patterns' in engine; assert 'candle_patterns' in engine
@@ -43,8 +43,8 @@ jobs:
         run: |
           python - <<'PY'
           import app
-          assert app.VERSION == '8.8-CANDICE-LIVE-TIMER-CARD'; assert app.INTERVAL == 60; assert app.AUTO_TRADE is False; assert app.MARTINGALE is False; assert app.FOREX_MODE is False; assert app.WEBHOOK_PATH == '/telegram/webhook'
-          c=app.flask_app.test_client(); r=c.get('/'); assert r.status_code == 200 and '8.8-CANDICE-LIVE-TIMER-CARD' in r.get_data(as_text=True); r=c.get('/health'); assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'; r=c.post('/telegram/webhook', json={}); assert r.status_code in {400,503}; print('RUNTIME SURFACE: PASS')
+          assert app.VERSION == '8.9-CANDICE-LIVE-TIMER-FIX'; assert app.INTERVAL == 60; assert app.AUTO_TRADE is False; assert app.MARTINGALE is False; assert app.FOREX_MODE is False; assert app.WEBHOOK_PATH == '/telegram/webhook'
+          c=app.flask_app.test_client(); r=c.get('/'); assert r.status_code == 200 and '8.9-CANDICE-LIVE-TIMER-FIX' in r.get_data(as_text=True); r=c.get('/health'); assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'; r=c.post('/telegram/webhook', json={}); assert r.status_code in {400,503}; assert app.Signal('ASIA_X','UP',80,3,100.0,120.0,60.0,'1M','test',()).timeframe == '1M'; print('RUNTIME SURFACE: PASS')
           PY
       - name: Deterministic technical lifecycle and candle-pattern test
         run: |
