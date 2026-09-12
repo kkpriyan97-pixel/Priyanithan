@@ -1,12 +1,12 @@
-"""FLEX-only safety and asset-selection guard for Priyanithan.
+"""FLEX-only safety guard for Priyanithan.
 
-This layer does not place broker orders. It keeps the application in manual
-Fixed Time/FLEX mode and prevents the asset selector from accidentally being
-presented as a Forex trading workflow.
+This guard is mode/UI state only. It never places broker orders and never
+filters assets by symbol suffix: OTC assets can be valid FLEX assets.
 """
 import functools
-import os
-
+import sys
+import threading
+import time
 
 FLEX_ONLY = True
 AUTO_TRADE = False
@@ -14,15 +14,22 @@ MARTINGALE = False
 ALLOWED_DURATIONS = (2, 3, 5, 10, 15)
 
 
+def _app():
+    m = sys.modules.get("__main__")
+    if m is not None and getattr(m, "__file__", "").endswith("app.py"):
+        return m
+    return sys.modules.get("app")
+
+
 def _install(a):
+    if getattr(a, "_CANDICE_FLEX_ONLY", False):
+        return True
     a.AUTO_TRADE = False
     a.MARTINGALE = False
     a.ALLOWED_DURATIONS = ALLOWED_DURATIONS
     a.TRADING_MODE = "FLEX"
     a.FLEX_ONLY = True
 
-    # Never let a Forex-mode label/configuration leak into the user-facing
-    # selector. FLEX/Fixed-Time assets may include OTC symbols on weekends.
     original_menu = a.send_asset_menu
 
     @functools.wraps(original_menu)
@@ -33,8 +40,6 @@ def _install(a):
 
     a.send_asset_menu = flex_asset_menu
 
-    # Mark the mode explicitly for diagnostics/health checks without exposing
-    # secrets or changing broker authentication.
     original_status = a.status
 
     @functools.wraps(original_status)
@@ -48,17 +53,23 @@ def _install(a):
         return payload
 
     a.status = flex_status
+    a._CANDICE_FLEX_ONLY = True
     a.log.warning("CANDICE FLEX-ONLY GUARD ACTIVE: FLEX/FIXED-TIME only; Forex mode OFF; auto-trade OFF; martingale OFF")
+    return True
 
 
-try:
-    import sys
-    _a = sys.modules.get("__main__")
-    if _a is not None and getattr(_a, "__file__", "").endswith("app.py"):
-        _install(_a)
-except Exception as exc:
-    try:
-        import logging
-        logging.getLogger("priyanithan").exception("FLEX guard install failed: %s", exc)
-    except Exception:
-        pass
+def _boot():
+    # sitecustomize runs before app.py is fully initialized, so wait for the
+    # canonical app module instead of silently failing at import time.
+    for _ in range(300):
+        try:
+            a = _app()
+            if a is not None and callable(getattr(a, "send_asset_menu", None)) and callable(getattr(a, "status", None)):
+                _install(a)
+                return
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+
+threading.Thread(target=_boot, name="candice-flex-only", daemon=True).start()
