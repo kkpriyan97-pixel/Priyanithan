@@ -10,7 +10,7 @@ from candice_broker import Broker
 from candice_engine import analyze, session_state, technical_snapshot
 from candice_memory import record, summary, today_risk
 
-VERSION = '8.2-FULL-BOT-1M'
+VERSION = '8.3-FULL-BOT-1M-LIFECYCLE'
 UAE = ZoneInfo('Asia/Dubai')
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 ACCESS = os.getenv('ACCESS_CODE', '').strip()
@@ -54,6 +54,12 @@ def reset_daily():
     r = today_risk(UAE)
     daily['losses'] = int(r.get('losses', 0))
     daily['streak'] = int(r.get('streak', 0))
+
+def expiry_boundary(candle_ts: float, expiry: int) -> float:
+    """Return the exact wall-clock close boundary for a fixed-time signal.
+    Candle timestamps are interval starts, so expiry begins after that candle closes.
+    """
+    return float(candle_ts) + 60.0 + int(expiry) * 60.0
 
 def header(title):
     return f'━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n✨ {title}\n━━━━━━━━━━━━━━━━━━━━'
@@ -160,7 +166,7 @@ async def asset_callback(update, ctx):
 async def signal_countdown(cid, msg, s):
     if msg is None:
         return
-    end = s.entry_ts + s.expiry * 60
+    end = expiry_boundary(s.candle_ts, s.expiry)
     last_bucket = None
     while time.time() < end and active.get(cid) is s:
         rem = max(0, int(end - time.time()))
@@ -180,7 +186,7 @@ async def signal_countdown(cid, msg, s):
         await asyncio.sleep(1)
 
 async def result_monitor(uid, s, msg):
-    end = s.entry_ts + s.expiry * 60
+    end = expiry_boundary(s.candle_ts, s.expiry)
     await signal_countdown(uid, msg, s)
     await send_text(uid, f'{header("EXPIRY VERIFICATION")}\n\n'
         f'📈 {s.asset}\n➡️ Direction • {s.direction}\n💰 Entry • {s.entry:.6f}\n'
@@ -263,7 +269,6 @@ async def scan_once():
             continue
         entry = float(row.close)
         candle_ts = float(row.timestamp)
-        # Use the closed candle timestamp as the duplicate identity. This prevents repeated signals for the same asset/candle.
         key = f'{uid}:{asset}:{int(candle_ts)}'
         if key in sent_keys:
             continue
@@ -284,7 +289,6 @@ async def scan_once():
         asyncio.create_task(result_monitor(uid, s, msg))
 
 async def scheduler():
-    # Align every scan to the next minute boundary so the bot analyses each completed 1M candle.
     while True:
         now_ts = time.time()
         delay = 60 - (now_ts % 60)
