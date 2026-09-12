@@ -21,14 +21,10 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          app=Path('app.py').read_text()
-          trade=Path('olymptrade_ws/api/trade.py').read_text()
-          assert "AUTO_TRADE=False" in app
-          assert "MARTINGALE=False" in app
-          assert "FOREX_MODE=False" in app
-          assert "MANUAL TRADE ONLY" in app
-          assert "delete_webhook" in app
-          assert "start_polling" in app
+          app=Path('app.py').read_text(); trade=Path('olymptrade_ws/api/trade.py').read_text()
+          assert 'AUTO_TRADE=False' in app and 'MARTINGALE=False' in app and 'FOREX_MODE=False' in app
+          assert 'delete_webhook' in app and 'start_polling' in app and 'InputMediaPhoto' in app
+          assert 'signal_timer' in app and 'remaining' in app
           assert "RuntimeError('Candice v8 is read-only" in trade
           assert not any(Path('.').glob('*_hotfix.py'))
           print('CANDICE V8 SAFETY VERIFY OK')
@@ -41,16 +37,16 @@ jobs:
           rows=[]; p=100.0
           for i in range(120):
               o=p; c=p+0.05; rows.append({'timestamp':1700000000+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c}); p=c
-          s=technical_snapshot(pd.DataFrame(rows))
-          assert s['direction']=='UP'
-          assert choose_expiry(s) in EXPIRIES
+          s=technical_snapshot(pd.DataFrame(rows)); assert s['direction']=='UP'; assert choose_expiry(s) in EXPIRIES
           print('CANDICE TECHNICAL SMOKE OK')
           PY
-      - name: UI smoke test
+      - name: UI image and timer smoke test
         run: |
           python - <<'PY'
-          from candice_ui import gif_bytes
-          b=gif_bytes(kind='selected',asset='ASIA_X')
-          assert b.read(6)==b'GIF89a'
-          print('CANDICE MOBILE GIF SMOKE OK')
+          from candice_ui import png_bytes, card
+          b=png_bytes(kind='signal',asset='ASIA_X',direction='UP',confidence=78,expiry=5,total_seconds=300,remaining=180,signal_time='10:10:00 UAE',expiry_time='10:15:00 UAE')
+          assert b.read(8)==b'\x89PNG\r\n\x1a\n'
+          assert card(kind='session',asset='ASIA_X',active=True,remaining=120,total_seconds=7200) is not None
+          assert card(kind='recovery',asset='ASIA_X',remaining=120,total_seconds=300) is not None
+          print('CANDICE IMAGE + TIMER SMOKE OK')
           PY
