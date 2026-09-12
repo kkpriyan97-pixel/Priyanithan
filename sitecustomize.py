@@ -53,14 +53,15 @@ def build_application():
     application.add_handler(a.CommandHandler("assets", a.assets_cmd))
     application.add_handler(a.CommandHandler("session", _session_cmd))
 
-    # The previous runtime patched a.assets_callback after the handler had
-    # already captured the old bound method. Register the visual callback
-    # directly so Telegram actually executes the animated asset UI.
-    native = a.assets_callback
-    a._native_assets_callback = native
     visual = importlib.import_module("candice_visual_asset_ui")
-    application.add_handler(a.CallbackQueryHandler(visual._callback, pattern=r"^(asset:|assets:)"))
-    a.log.warning("CANDICE CANONICAL APPLICATION BUILDER ACTIVE: animated asset callback registered")
+    # Replace the app callback reference as well as the handler. This prevents
+    # any later code from registering the old text-only callback.
+    native = getattr(a, "assets_callback", None)
+    if native is not None and getattr(native, "__name__", "") != "_callback":
+        a._native_assets_callback = native
+    a.assets_callback = visual._callback
+    visual.force_register(application, a)
+    a.log.warning("CANDICE CANONICAL APPLICATION BUILDER ACTIVE: forced animated asset handler")
     return application
 
 
