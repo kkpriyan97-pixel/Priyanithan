@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio, logging, time
 from olymptrade_ws import OlympTradeClient
-from olymptrade_ws.olympconfig import parameters
 
 log=logging.getLogger('candice.broker')
 FLEX_ASSETS=('EURUSD_OTC','GBPUSD_OTC','USDJPY_OTC','USDCHF_OTC','USDCAD_OTC','AUDUSD_OTC','NZDUSD_OTC','EURJPY_OTC','GBPJPY_OTC','AUDJPY_OTC','CADJPY_OTC','XAUUSD_OTC','XAGUSD_OTC','BTCUSD_OTC','ASIA_X')
@@ -27,15 +26,15 @@ class Broker:
             except Exception as e:
                 self.client=None; log.warning('CANDICE BROKER: reconnect after %s',e); await asyncio.sleep(5)
     async def candles(self,pair,size=60,count=120,max_age=360):
-        if not self.connected(): return None,'broker disconnected'
-        try: raw=await self.client.market.get_candles(pair,size,count)
+        c=self.client
+        if c is None or not c.connection.is_connected:return None,'broker disconnected'
+        try: raw=await c.market.get_candles(pair,size,count)
         except Exception as e:return None,f'candle request failed: {e}'
         if not isinstance(raw,list) or len(raw)<40:return None,'insufficient live candles'
         rows=[]
         for x in raw:
             try:
-                ts=float(x.get('timestamp',x.get('t',x.get('time'))));
-                if ts>1e11:ts/=1000
+                ts=float(x.get('timestamp',x.get('t',x.get('time')))); ts=ts/1000 if ts>1e11 else ts
                 rows.append((ts,float(x.get('open',x.get('o'))),float(x.get('high',x.get('h'))),float(x.get('low',x.get('l'))),float(x.get('close',x.get('c')))))
             except Exception:pass
         if len(rows)<40:return None,'invalid candle data'
@@ -44,8 +43,10 @@ class Broker:
         import pandas as pd
         return pd.DataFrame(rows,columns=['timestamp','open','high','low','close']),None
     async def live_assets(self):
-        candidates=sorted(self.catalog or set(FLEX_ASSETS)); out=[]
-        for p in candidates:
-            df,e=await self.candles(p,60,60,360)
-            if e is None: out.append(p)
-        return out
+        candidates=sorted(self.catalog or set(FLEX_ASSETS))
+        sem=asyncio.Semaphore(6)
+        async def probe(p):
+            async with sem:
+                df,e=await self.candles(p,60,60,360); return p if e is None and df is not None else None
+        found=await asyncio.gather(*(probe(p) for p in candidates),return_exceptions=False)
+        return [p for p in found if p]
