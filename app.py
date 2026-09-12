@@ -10,7 +10,7 @@ from candice_broker import Broker
 from candice_engine import analyze, session_state, technical_snapshot
 from candice_memory import record, summary, today_risk
 
-VERSION='8.0-CLEAN-TEXT'; UAE=ZoneInfo('Asia/Dubai')
+VERSION='8.1-FINAL-TEXT'; UAE=ZoneInfo('Asia/Dubai')
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); ACCESS=os.getenv('ACCESS_CODE','').strip(); OT_TOKEN=os.getenv('OLYMPIATRADE_ACCESS_TOKEN', os.getenv('OLYMPTRADE_ACCESS_TOKEN','')).strip()
 INTERVAL=max(60,int(os.getenv('SCAN_INTERVAL_SECONDS','300'))); MAX_DAILY_LOSSES=max(1,int(os.getenv('DAILY_MAX_LOSSES','5'))); MAX_STREAK=max(1,int(os.getenv('MAX_CONSECUTIVE_LOSSES','3')))
 AUTO_TRADE=False; MARTINGALE=False; FOREX_MODE=False
@@ -18,7 +18,8 @@ logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(le
 flask_app=Flask(__name__); broker=Broker(OT_TOKEN); tg_app=None
 users=set(); selected={}; active={}; sent_keys=set(); recovery_until={}; daily={'date':'','losses':0,'streak':0}
 @dataclass
-class Signal: asset:str; direction:str; confidence:int; expiry:int; entry:float; entry_ts:float; reason:str
+class Signal:
+ asset:str; direction:str; confidence:int; expiry:int; entry:float; entry_ts:float; candle_ts:float; reason:str; evidence:tuple[str,...]=()
 def now(): return datetime.now(UAE)
 def reset_daily():
  daily['date']=now().date().isoformat(); r=today_risk(UAE); daily['losses']=int(r.get('losses',0)); daily['streak']=int(r.get('streak',0))
@@ -45,15 +46,11 @@ async def cmd_start(update,ctx):
  await cmd_assets(update,ctx)
 async def cmd_assets(update,ctx):
  assets=await broker.live_assets(); names=' • '.join(assets) if assets else 'No fresh FLEX assets available'
- text=(f'{header("FLEX ASSET SELECTOR")}\n\n'
-       f'📈 LIVE MARKET\n🟢 Fresh 1-minute candle VERIFIED\n\n'
-       f'🔥 Available: {len(assets)}\n{names}\n\n'
-       '⚡ FLEX / FIXED-TIME\n🧠 Candice AI research ACTIVE\n🛡️ Technical + AI confirmation required\n\n'
-       '👇 Select your asset')
+ text=(f'{header("FLEX ASSET SELECTOR")}\n\n📈 LIVE MARKET\n🟢 Fresh 1-minute candle VERIFIED\n\n🔥 Available: {len(assets)}\n{names}\n\n⚡ FLEX / FIXED-TIME\n🧠 Candice AI research ACTIVE\n🛡️ Technical + AI confirmation required\n\n👇 Select your asset')
  await send_text(update.effective_user.id,text,reply_markup=keyboard(assets))
 async def cmd_status(update,ctx):
  reset_daily(); uid=update.effective_user.id
- await send_text(uid,f'{header("SYSTEM STATUS")}\n\n🛰️ Broker: {"🟢 CONNECTED" if broker.connected() else "🔴 DISCONNECTED"}\n📈 FLEX: {selected.get(uid,"NONE")}\n🧠 Session: {session_state()}\n❌ Daily losses: {daily["losses"]}/{MAX_DAILY_LOSSES}\n🔥 Loss streak: {daily["streak"]}/{MAX_STREAK}\n\n🚫 Auto-trade OFF\n🚫 Martingale OFF\n🚫 Forex mode OFF')
+ await send_text(uid,f'{header("SYSTEM STATUS")}\n\n🛰️ Broker: {"🟢 CONNECTED" if broker.connected() else "🔴 DISCONNECTED"}\n📈 FLEX: {selected.get(uid,"NONE")}\n🧠 Session: {session_state()}\n❌ Daily losses: {daily["losses"]}/{MAX_DAILY_LOSSES}\n🔥 Loss streak: {daily["streak"]}/{MAX_STREAK}\n\n🚫 Auto-trade OFF\n🚫 Martingale OFF\n🚫 Forex mode OFF\n🖼️ Telegram media OFF')
 async def cmd_session(update,ctx):
  p=session_payload(); mode='🟢 SIGNAL SESSION' if p['active'] else '🔵 RESEARCH ONLY'
  await send_text(update.effective_user.id,f'{header("SESSION CONTROL")}\n\n{mode}\n⏳ Ends: {p["session_end"]}\n⏱️ Remaining: {p["remaining"]} sec\n\n🔬 Research: 24/7\n📡 Signal scan: every 5 minutes\n⚡ FLEX / Fixed-Time only')
@@ -69,45 +66,34 @@ async def asset_callback(update,ctx):
   return
  selected[uid]=asset; t=now().strftime('%H:%M:%S UAE')
  await edit_text(uid,q.message.message_id,
-  f'{header("ASSET READY")}\n\n'
-  f'📈 {asset}\n\n'
-  '🟢 MARKET STATUS • LIVE\n'
-  '🔵 CANDLE • 1 MIN FRESH\n'
-  f'🕒 VERIFIED • {t}\n\n'
-  '🔥🔥🔥 CANDICE RESEARCH ACTIVE\n\n'
-  '🟢 Trend structure\n'
-  '🔵 Momentum confirmation\n'
-  '🟣 Volatility / breakout check\n'
-  '🟠 MACD confirmation\n'
-  '🟡 AI decision gate\n\n'
-  '⚡ READY FOR QUALIFIED SIGNAL\n'
-  '⏱️ 2 / 3 / 5 / 10 / 15 MIN\n\n'
-  '🛡️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
+  f'{header("ASSET READY")}\n\n📈 {asset}\n\n🟢 MARKET STATUS • LIVE\n🔵 CANDLE • 1 MIN FRESH\n🕒 VERIFIED • {t}\n\n🔥🔥🔥 CANDICE RESEARCH ACTIVE\n\n🟢 Trend structure\n🔵 Momentum confirmation\n🟣 Volatility / breakout check\n🟠 MACD confirmation\n🟡 AI decision gate\n\n⚡ READY FOR QUALIFIED SIGNAL\n⏱️ 2 / 3 / 5 / 10 / 15 MIN\n\n🛡️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
 async def signal_countdown(cid,msg,s):
  if msg is None:return
  end=s.entry_ts+s.expiry*60
  while time.time()<end and active.get(cid) is s:
   rem=max(0,int(end-time.time())); mm,ss=divmod(rem,60)
   text=(f'{header("ACTIVE SIGNAL")}\n\n📈 {s.asset}\n'
-        f'🟢 {"⬆️ TRADE UP" if s.direction=="UP" else "🔴 TRADE DOWN"}\n'
+        f'{"🟢 ⬆️ TRADE UP" if s.direction=="UP" else "🔴 ⬇️ TRADE DOWN"}\n'
         f'🔥 Confidence • {s.confidence}%\n⏱️ Duration • {s.expiry} MIN\n💰 Entry • {s.entry:.6f}\n\n'
         f'⏳ COUNTDOWN • {mm:02d}:{ss:02d}\n🕒 Expiry • {datetime.fromtimestamp(end,UAE).strftime("%H:%M:%S UAE")}\n\n'
         '🟢 Technical gate PASSED\n🟣 AI gate APPROVED\n🚫 Auto-trade OFF • Manual only')
   await edit_text(cid,msg.message_id,text); await asyncio.sleep(min(30,max(1,rem)))
 async def result_monitor(uid,s,msg):
  end=s.entry_ts+s.expiry*60; await signal_countdown(uid,msg,s)
- await send_text(uid,f'{header("EXPIRY VERIFICATION")}\n\n📈 {s.asset}\n➡️ Direction • {s.direction}\n💰 Entry • {s.entry:.6f}\n🕒 Boundary • {datetime.fromtimestamp(end,UAE).strftime("%H:%M:%S UAE")}\n\n🔎 Reading closed candle...')
- price=None; err=''
- for _ in range(5):
-  df,err=await broker.candles(s.asset,60,20,120)
-  if df is not None and not df.empty: price=float(df.close.iloc[-1]); break
+ await send_text(uid,f'{header("EXPIRY VERIFICATION")}\n\n📈 {s.asset}\n➡️ Direction • {s.direction}\n💰 Entry • {s.entry:.6f}\n🕒 Boundary • {datetime.fromtimestamp(end,UAE).strftime("%H:%M:%S UAE")}\n\n🔎 Waiting for the boundary candle to close...')
+ row=None; err=''
+ for _ in range(8):
+  row,err=await broker.closed_candle_at(s.asset,end,60,180)
+  if row is not None: break
   await asyncio.sleep(3)
- if price is None:
-  active.pop(uid,None); await send_text(uid,f'{header("RESULT UNRESOLVED")}\n\n📈 {s.asset}\n💰 Entry • {s.entry:.6f}\n❔ Exit • —\n⚠️ {err or "No fresh expiry price"}'); return
+ if row is None:
+  active.pop(uid,None); await send_text(uid,f'{header("RESULT UNRESOLVED")}\n\n📈 {s.asset}\n💰 Entry • {s.entry:.6f}\n🏁 Expiry • —\n🕒 Boundary • {datetime.fromtimestamp(end,UAE).strftime("%H:%M:%S UAE")}\n\n⚠️ {err or "No verified closed expiry candle"}\n🚫 No WIN/LOSS recorded'); return
+ candle_ts=float(row.timestamp); price=float(row.close)
  result='DRAW' if price==s.entry else ('WIN' if ((s.direction=='UP' and price>s.entry) or (s.direction=='DOWN' and price<s.entry)) else 'LOSS')
- record({'ts':time.time(),'asset':s.asset,'direction':s.direction,'confidence':s.confidence,'expiry':s.expiry,'entry':s.entry,'exit':price,'result':result}); reset_daily(); active.pop(uid,None)
+ record({'ts':time.time(),'asset':s.asset,'direction':s.direction,'confidence':s.confidence,'expiry':s.expiry,'entry':s.entry,'exit':price,'result':result,'entry_candle_ts':s.candle_ts,'expiry_candle_ts':candle_ts,'verification':'closed-candle'})
+ reset_daily(); active.pop(uid,None)
  icon={'WIN':'🟢🏆','LOSS':'🔴⚠️','DRAW':'🟡➖'}[result]
- await send_text(uid,f'{header("FINAL MARKET OUTCOME")}\n\n{icon} {result}\n\n📈 {s.asset}\n➡️ {s.direction}\n💰 Entry • {s.entry:.6f}\n🏁 Expiry • {price:.6f}\n⏱️ Duration • {s.expiry} MIN\n🕒 {datetime.fromtimestamp(end,UAE).strftime("%H:%M:%S UAE")}\n\n🔎 Verification • CANDLE-CLOSED\n❌ Daily losses • {daily["losses"]}/{MAX_DAILY_LOSSES}\n🔥 Loss streak • {daily["streak"]}/{MAX_STREAK}\n\nMARKET OUTCOME • NOT BROKER ACCOUNT P/L\n🚫 AUTO-TRADE OFF • MANUAL ONLY')
+ await send_text(uid,f'{header("FINAL MARKET OUTCOME")}\n\n{icon} {result}\n\n📈 {s.asset}\n➡️ {s.direction}\n💰 Entry • {s.entry:.6f}\n🏁 Expiry • {price:.6f}\n⏱️ Duration • {s.expiry} MIN\n🕒 Boundary • {datetime.fromtimestamp(end,UAE).strftime("%H:%M:%S UAE")}\n🕯️ Closed candle • {datetime.fromtimestamp(candle_ts,UAE).strftime("%H:%M:%S UAE")}\n\n🔎 Verification • CANDLE-CLOSED\n❌ Daily losses • {daily["losses"]}/{MAX_DAILY_LOSSES}\n🔥 Loss streak • {daily["streak"]}/{MAX_STREAK}\n\nMARKET OUTCOME • NOT BROKER ACCOUNT P/L\n🚫 AUTO-TRADE OFF • MANUAL ONLY')
  if result=='LOSS':
   recovery_until[uid]=time.time()+300
   await send_text(uid,f'{header("RECOVERY WINDOW")}\n\n🛡️ Loss protection ACTIVE\n⏸️ Next signal paused • 5 MIN\n🔬 Research continues\n⏱️ 15 MIN context • 5 MIN recovery review\n🚫 Martingale OFF • Auto-trade OFF')
@@ -124,18 +110,22 @@ async def scan_once():
  for uid,asset in list(selected.items()):
   if uid in active or asset not in assets: continue
   if recovery_until.get(uid,0)>time.time(): continue
-  recovery_until.pop(uid,None); a=await analyze(asset,broker,summary(asset)); log.info('AI ANALYSIS pair=%s decision=%s direction=%s confidence=%s expiry=%s reason=%s',asset,a.decision,a.direction,a.confidence,a.expiry,a.reason)
+  recovery_until.pop(uid,None); a=await analyze(asset,broker,summary(asset)); log.info('AI ANALYSIS pair=%s decision=%s direction=%s confidence=%s expiry=%s reason=%s evidence=%s',asset,a.decision,a.direction,a.confidence,a.expiry,a.reason,a.evidence)
   if a.decision!='APPROVE': continue
   key=f'{uid}:{asset}:{int(time.time()//300)}'
   if key in sent_keys: continue
   df,e=await broker.candles(asset,60,20,120)
   if e or df is None or df.empty: continue
-  entry=float(df.close.iloc[-1]); ts=time.time(); s=Signal(asset,a.direction,a.confidence,a.expiry,entry,ts,a.reason); active[uid]=s; sent_keys.add(key); end=ts+a.expiry*60
+  row=broker.closed_candle(df,time.time(),60)
+  if row is None: log.info('ENTRY REJECT pair=%s reason=no closed 1m candle',asset); continue
+  entry=float(row.close); candle_ts=float(row.timestamp); ts=time.time(); s=Signal(asset,a.direction,a.confidence,a.expiry,entry,ts,candle_ts,a.reason,a.evidence); active[uid]=s; sent_keys.add(key); end=ts+a.expiry*60
+  evidence='\n'.join(f'🟢 {x}' for x in a.evidence) if a.evidence else '🟡 Multi-indicator alignment verified'
   text=(f'{header("NEW SIGNAL")}\n\n📈 {asset}\n\n'
         f'{"🟢 ⬆️ TRADE UP" if a.direction=="UP" else "🔴 ⬇️ TRADE DOWN"}\n'
         f'🕒 {datetime.fromtimestamp(ts,UAE).strftime("%H:%M")} (GMT+4)\n\n🔥🔥🔥 STRONG CONFIRMATION\n\n'
-        '🟢 Parabolic SAR Reversal\n🔵 Moving Average Crossover\n🟣 Donchian Channel Breakout\n🟠 MACD Crossover\n🟡 Rate of Change Crossover\n\n'
-        f'⏱️ {a.expiry}m\n🧠 AI Confidence • {a.confidence}%\n\n⚠️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
+        f'{evidence}\n\n'
+        f'⏱️ EXPIRY • {a.expiry} MIN\n🧠 AI CONFIDENCE • {a.confidence}%\n📊 TIMEFRAMES • {a.timeframe}\n\n'
+        '🛡️ FRESH CLOSED-CANDLE ENTRY\n⚠️ MANUAL TRADE ONLY • AUTO-TRADE OFF')
   msg=await send_text(uid,text); asyncio.create_task(result_monitor(uid,s,msg))
 async def scheduler():
  while True:
@@ -147,7 +137,7 @@ async def bot_main():
  if not TOKEN: raise RuntimeError('TELEGRAM_BOT_TOKEN is missing')
  tg_app=Application.builder().token(TOKEN).build()
  for command,fn in [('start',cmd_start),('access',cmd_access),('assets',cmd_assets),('status',cmd_status),('session',cmd_session),('update',cmd_update)]: tg_app.add_handler(CommandHandler(command,fn))
- tg_app.add_handler(CallbackQueryHandler(asset_callback,r'^asset:')); await tg_app.initialize(); await tg_app.bot.delete_webhook(drop_pending_updates=True); await tg_app.start(); await tg_app.updater.start_polling(drop_pending_updates=True); log.warning('CANDICE TELEGRAM ONLINE — COLOR TEXT RUNTIME'); asyncio.create_task(broker.connect_forever()); asyncio.create_task(scheduler())
+ tg_app.add_handler(CallbackQueryHandler(asset_callback,r'^asset:')); await tg_app.initialize(); await tg_app.bot.delete_webhook(drop_pending_updates=True); await tg_app.start(); await tg_app.updater.start_polling(drop_pending_updates=True); log.warning('CANDICE TELEGRAM ONLINE — COLOR TEXT RUNTIME — MEDIA DISABLED'); asyncio.create_task(broker.connect_forever()); asyncio.create_task(scheduler())
  while True: await asyncio.sleep(3600)
 @flask_app.get('/')
 def home(): return f'{VERSION} ONLINE — FLEX market-data / colorful text-only manual signals'
