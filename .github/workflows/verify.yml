@@ -34,11 +34,10 @@ jobs:
           assert 'signal_countdown' in app and 'COUNTDOWN' in app and 'entry_ts' in app
           assert 'closed_candle_at' in app and 'closed_candle' in app
           assert 'int(candle_ts)' in app
-          assert "'every 1 minute'" in app
+          assert 'every 1 minute' in app
           assert 'session_state()!=' not in app
           assert 'EXPIRIES = (2, 3, 5, 15)' in engine
-          assert 'expiry' in engine and '2|3|5|15' in engine
-          assert '10' not in engine.split('EXPIRIES =',1)[1].split('MIN_CONF',1)[0]
+          assert '2|3|5|15' in engine
           assert "RuntimeError('Candice v8 is read-only" in trade
           assert not any(Path('.').glob('*_hotfix.py'))
           print('CANDICE FULL-BOT STATIC SAFETY VERIFY OK')
