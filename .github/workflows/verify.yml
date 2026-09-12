@@ -25,7 +25,7 @@ jobs:
           engine=Path('candice_engine.py').read_text()
           trade=Path('olymptrade_ws/api/trade.py').read_text()
 
-          assert "VERSION = '8.2-FULL-BOT-1M'" in app
+          assert "VERSION = '8.3-FULL-BOT-1M-LIFECYCLE'" in app
           assert "INTERVAL = max(60, int(os.getenv('SCAN_INTERVAL_SECONDS', '60')))" in app
           assert 'AUTO_TRADE = False' in app and 'MARTINGALE = False' in app and 'FOREX_MODE = False' in app
           assert 'delete_webhook' in app and 'start_polling' in app
@@ -48,6 +48,7 @@ jobs:
           import pandas as pd
           from candice_engine import technical_snapshot, choose_expiry, EXPIRIES, resample_ohlc, closed_1m
           from candice_broker import Broker
+          from app import expiry_boundary
 
           assert set(EXPIRIES) == {2,3,5,15} and 10 not in EXPIRIES
 
@@ -75,5 +76,45 @@ jobs:
           assert row is not None and float(row.close)==float(df.close.iloc[-1])
           row2=Broker.closed_candle(df,float(df.timestamp.iloc[-1]),60)
           assert row2 is not None and float(row2.close)==float(df.close.iloc[-2])
-          print('CANDICE 1M + MULTI-TF + CLOSED-CANDLE SMOKE OK')
+
+          candle_ts=float(df.timestamp.iloc[-1])
+          for expiry in (2,3,5,15):
+              expected=candle_ts+60+expiry*60
+              assert expiry_boundary(candle_ts,expiry)==expected
+          print('CANDICE 1M + MULTI-TF + CLOSED-CANDLE + EXPIRY-BOUNDARY SMOKE OK')
+          PY
+      - name: Read-only broker integration smoke
+        run: |
+          python - <<'PY'
+          import asyncio
+          import pandas as pd
+          from candice_broker import Broker
+          from candice_engine import analyze, EXPIRIES
+
+          class FakeConnection:
+              is_connected=True
+          class FakeMarket:
+              async def get_candles(self,pair,size,count):
+                  base=1700000100
+                  rows=[]; p=100.0
+                  for i in range(max(count,1200)):
+                      o=p; c=p+0.05
+                      rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
+                      p=c
+                  return rows[-count:]
+          class FakeClient:
+              connection=FakeConnection()
+              market=FakeMarket()
+
+          async def main():
+              b=Broker('test-token'); b.client=FakeClient()
+              df,e=await b.candles('ASIA_X',60,1200,360)
+              assert e is None and len(df)==1200
+              row=await b.closed_candle_at('ASIA_X',float(df.timestamp.iloc[-1])+60,60,180)
+              assert row[0] is not None and row[1] is None
+              a=await analyze('ASIA_X',b,{'samples':0})
+              assert a.decision in {'APPROVE','REJECT'}
+              assert a.expiry in set(EXPIRIES)|{0}
+              print('CANDICE READ-ONLY BROKER -> ENGINE INTEGRATION SMOKE OK')
+          asyncio.run(main())
           PY
