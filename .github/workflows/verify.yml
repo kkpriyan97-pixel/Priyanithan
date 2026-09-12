@@ -23,7 +23,7 @@ jobs:
           from pathlib import Path
           app=Path('app.py').read_text(); trade=Path('olymptrade_ws/api/trade.py').read_text()
           assert 'AUTO_TRADE=False' in app and 'MARTINGALE=False' in app and 'FOREX_MODE=False' in app
-          assert 'delete_webhook' in app and 'start_polling' in app and 'InputMediaPhoto' in app
+          assert 'delete_webhook' in app and 'start_polling' in app and 'InputMediaAnimation' in app
           assert 'signal_timer' in app and 'remaining' in app
           assert "RuntimeError('Candice v8 is read-only" in trade
           assert not any(Path('.').glob('*_hotfix.py'))
@@ -43,9 +43,11 @@ jobs:
       - name: UI image and timer smoke test
         run: |
           python - <<'PY'
-          from candice_ui import png_bytes, card
+          from candice_ui import png_bytes, gif_bytes, card
           b=png_bytes(kind='signal',asset='ASIA_X',direction='UP',confidence=78,expiry=5,total_seconds=300,remaining=180,signal_time='10:10:00 UAE',expiry_time='10:15:00 UAE')
           assert b.read(8)==b'\x89PNG\r\n\x1a\n'
+          g=gif_bytes(kind='result',asset='ASIA_X',direction='WIN',expiry=5,entry='6139.9333',exit='6140.1696',result_time='10:15:00 UAE')
+          assert g.read(6)==b'GIF89a'
           assert card(kind='session',asset='ASIA_X',active=True,remaining=120,total_seconds=7200) is not None
           assert card(kind='recovery',asset='ASIA_X',remaining=120,total_seconds=300) is not None
           print('CANDICE IMAGE + TIMER SMOKE OK')
