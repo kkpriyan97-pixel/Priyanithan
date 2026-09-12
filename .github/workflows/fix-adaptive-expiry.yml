@@ -1,0 +1,90 @@
+name: One-time Adaptive Expiry Fix
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  fix:
+    if: github.event.head_commit.message != 'Remove one-time adaptive expiry fix workflow'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fix expiry ordering and verification
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('candice_engine.py')
+          s=p.read_text()
+          old='''    if score>=.86 and adx>=35 and body>=.55:expiry=1
+    elif score>=.82 and adx>=30:expiry=2
+    elif score>=.76 and adx>=22:expiry=3
+    elif score>=.68 and adx>=18:expiry=5
+    elif direction and ten.get("direction")==direction and fifteen.get("direction")==direction and score>=.72:expiry=15
+    elif direction and ten.get("direction")==direction and fifteen.get("direction")==direction and score>=.62:expiry=10
+    else:expiry=0'''
+          new='''    high_tf_aligned=bool(direction and ten.get("direction")==direction and fifteen.get("direction")==direction)
+    min_high_tf_adx=min(float(ten.get("adx14",0) or 0),float(fifteen.get("adx14",0) or 0)) if high_tf_aligned else 0.0
+    if high_tf_aligned and score>=.72 and min_high_tf_adx>=25 and adx<35:expiry=15
+    elif high_tf_aligned and score>=.62 and min_high_tf_adx>=18 and adx<30:expiry=10
+    elif score>=.86 and adx>=35 and body>=.55:expiry=1
+    elif score>=.82 and adx>=30:expiry=2
+    elif score>=.76 and adx>=22:expiry=3
+    elif score>=.68 and adx>=18:expiry=5
+    else:expiry=0'''
+          assert old in s, 'human_brain expiry block not found'
+          s=s.replace(old,new,1)
+          old2='''    if agreement>=4 and strength>=.8 and adx>=35 and body>=.55:return 1
+    if agreement>=4 and strength>=.8 and adx>=30:return 2
+    if agreement>=4 and strength>=.8 and adx>=22:return 3
+    if agreement>=3 and strength>=.8 and adx>=18:return 5
+    f10=frames.get("10m",{});f15=frames.get("15m",{})
+    if direction and f10.get("direction")==direction and f15.get("direction")==direction:
+        adx10=float(f10.get("adx14",0) or 0);adx15=float(f15.get("adx14",0) or 0)
+        if strength>=.8 and min(adx10,adx15)>=25:return 15
+        if strength>=.6 and min(adx10,adx15)>=18:return 10
+    if agreement>=3 and strength>=.6:return 10
+    return 0'''
+          new2='''    f10=frames.get("10m",{});f15=frames.get("15m",{})
+    high_tf_aligned=bool(direction and f10.get("direction")==direction and f15.get("direction")==direction)
+    if high_tf_aligned:
+        adx10=float(f10.get("adx14",0) or 0);adx15=float(f15.get("adx14",0) or 0);min_high_tf_adx=min(adx10,adx15)
+        if strength>=.8 and min_high_tf_adx>=25 and adx<35:return 15
+        if strength>=.6 and min_high_tf_adx>=18 and adx<30:return 10
+    if agreement>=4 and strength>=.8 and adx>=35 and body>=.55:return 1
+    if agreement>=4 and strength>=.8 and adx>=30:return 2
+    if agreement>=4 and strength>=.8 and adx>=22:return 3
+    if agreement>=3 and strength>=.8 and adx>=18:return 5
+    return 0'''
+          assert old2 in s, 'choose_expiry block not found'
+          s=s.replace(old2,new2,1)
+          p.write_text(s)
+
+          w=Path('.github/workflows/verify.yml')
+          ws=w.read_text()
+          marker="          assert set(EXPIRIES)=={1,2,3,5,10,15}; base=1700000100; rows=[]; p=100.0"
+          insert="""          assert set(EXPIRIES)=={1,2,3,5,10,15}; base=1700000100; rows=[]; p=100.0
+          from candice_engine import human_brain
+          common={\"direction\":\"UP\",\"strength\":0.8,\"adx14\":24,\"body_ratio\":0.5,\"indicator_agreement\":4,\"indicator_conflicts\":0}
+          frames10={\"1m\":common,\"3m\":common,\"5m\":common,\"10m\":{\"direction\":\"UP\",\"adx14\":20},\"15m\":{\"direction\":\"UP\",\"adx14\":20}}
+          assert human_brain(frames10)[\"expiry\"]==10
+          frames15={\"1m\":common,\"3m\":common,\"5m\":common,\"10m\":{\"direction\":\"UP\",\"adx14\":28},\"15m\":{\"direction\":\"UP\",\"adx14\":28}}
+          assert human_brain(frames15)[\"expiry\"]==15"""
+          assert marker in ws, 'verify marker not found'
+          ws=ws.replace(marker,insert,1)
+          w.write_text(ws)
+          PY
+      - name: Compile
+        run: python -m py_compile candice_engine.py
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add candice_engine.py .github/workflows/verify.yml
+          git commit -m 'Fix adaptive expiry ordering and coverage' || exit 0
+          git push
