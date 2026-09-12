@@ -23,11 +23,15 @@ jobs:
           from pathlib import Path
           p = Path('candice_engine.py')
           s = p.read_text()
-          old = '''    providers=(("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"),("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions")); attempted=False'''
-          new = '''    providers=(("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions")); attempted=False'''
-          if old not in s:
-              raise SystemExit('provider block not found')
-          s = s.replace(old, new, 1)
+          old_providers = '''    providers=(("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"),("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions")); attempted=False'''
+          new_providers = '''    providers=(("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions")); attempted=False'''
+          if old_providers in s:
+              s = s.replace(old_providers, new_providers, 1)
+          old_reasoning = '''    # GPT-OSS reasoning models require reasoning_format=hidden when JSON mode is used.\n    if "gpt-oss" in model.lower():\n        payload["reasoning_format"]="hidden"\n        payload["reasoning_effort"]="low"'''
+          new_reasoning = '''    # GPT-OSS uses include_reasoning/reasoning_effort; reasoning_format is unsupported.\n    if "gpt-oss" in model.lower():\n        payload["include_reasoning"]=False\n        payload["reasoning_effort"]="low"'''
+          if old_reasoning not in s:
+              raise SystemExit('GPT-OSS reasoning block not found')
+          s = s.replace(old_reasoning, new_reasoning, 1)
           p.write_text(s)
           PY
       - name: Commit fix
@@ -40,5 +44,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add candice_engine.py
-          git commit -m 'Prefer Groq with Cerebras fallback [skip ai-fix]'
+          git commit -m 'Fix Groq primary Cerebras fallback and GPT-OSS config [skip ai-fix]'
           git push
