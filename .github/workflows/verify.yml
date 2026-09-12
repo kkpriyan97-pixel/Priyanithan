@@ -30,7 +30,6 @@ jobs:
           readme=Path('README.md').read_text()
           env=Path('RENDER_ENV.example').read_text()
 
-          # Validate source semantics instead of brittle exact formatting.
           tree=ast.parse(app)
           constants={}
           for node in tree.body:
@@ -39,7 +38,7 @@ jobs:
                       if isinstance(target, ast.Name) and target.id in {'VERSION','INTERVAL','AUTO_TRADE','MARTINGALE','FOREX_MODE'}:
                           try: constants[target.id]=ast.literal_eval(node.value)
                           except Exception: pass
-          assert constants.get('VERSION') == '8.4-FULL-BOT-1M-PERSISTENT-USERS'
+          assert constants.get('VERSION') == '8.5-FULL-BOT-1M-WEBHOOK'
           assert constants.get('INTERVAL') == 60
           assert constants.get('AUTO_TRADE') is False
           assert constants.get('MARTINGALE') is False
@@ -48,6 +47,8 @@ jobs:
           assert 'signal_countdown' in app and 'entry_ts' in app
           assert 'closed_candle_at' in app and 'closed_candle' in app
           assert 'session_state()!=' not in app
+          assert 'set_webhook' in app and "WEBHOOK_PATH = '/telegram/webhook'" in app
+          assert 'start_polling' in app and 'delete_webhook' in app
           assert 'EXPIRIES = (2, 3, 5, 15)' in engine
           assert '2|3|5|15' in engine
           assert "RuntimeError('Candice v8 is read-only" in trade
@@ -60,16 +61,19 @@ jobs:
         run: |
           python - <<'PY'
           import app
-          assert app.VERSION == '8.4-FULL-BOT-1M-PERSISTENT-USERS'
+          assert app.VERSION == '8.5-FULL-BOT-1M-WEBHOOK'
           assert app.INTERVAL == 60
           assert app.AUTO_TRADE is False
           assert app.MARTINGALE is False
           assert app.FOREX_MODE is False
+          assert app.WEBHOOK_PATH == '/telegram/webhook'
           c=app.flask_app.test_client()
           r=c.get('/')
-          assert r.status_code == 200 and '8.4-FULL-BOT-1M-PERSISTENT-USERS' in r.get_data(as_text=True)
+          assert r.status_code == 200 and '8.5-FULL-BOT-1M-WEBHOOK' in r.get_data(as_text=True)
           r=c.get('/health')
           assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'
+          r=c.post('/telegram/webhook', json={})
+          assert r.status_code in {400,503}
           print('RUNTIME SURFACE: PASS')
           PY
       - name: Deterministic technical lifecycle test
