@@ -81,9 +81,9 @@ def _parse_ai_content(content):
 
 def _request_ai(url,key,model,ai_input):
     payload={"model":model,"messages":[{"role":"user","content":_ai_prompt(ai_input.get("technical",ai_input),ai_input.get("memory",{}))}],"temperature":0.1,"max_completion_tokens":400,"response_format":{"type":"json_object"}}
-    # GPT-OSS reasoning models require reasoning_format=hidden when JSON mode is used.
+    # GPT-OSS uses include_reasoning/reasoning_effort; reasoning_format is unsupported.
     if "gpt-oss" in model.lower():
-        payload["reasoning_format"]="hidden"
+        payload["include_reasoning"]=False
         payload["reasoning_effort"]="low"
     r=requests.post(url,headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
     if not r.ok:
