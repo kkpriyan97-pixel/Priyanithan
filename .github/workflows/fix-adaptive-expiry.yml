@@ -1,5 +1,7 @@
 name: One-time Adaptive Expiry Fix
 
+# Re-run the precise adaptive-expiry ordering repair.
+
 on:
   push:
     branches: [main]
