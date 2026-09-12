@@ -22,7 +22,7 @@ def base(kind):
 def card(kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason='',**kw):
  im,d=base(kind);accent={'selected':GREEN,'signal':CYAN,'expiry':RED,'result':PURPLE,'recovery':GREEN,'session':ORANGE,'status':CYAN}.get(kind,CYAN);title={'selected':'ASSET SELECTED','signal':'NEW AI SIGNAL','expiry':'EXPIRY REACHED','result':'TRADE RESULT','recovery':'SHORT RECOVERY','session':'SIGNAL SESSION','status':'SYSTEM STATUS'}.get(kind,'CANDICE UPDATE');rr(d,(70,235,954,1045),32,(5,17,31,238),outline=(*accent,150),width=2);tx(d,(100,285),title,40,accent,True);tx(d,(100,365),asset,62,GOLD,True);rr(d,(710,325,930,375),22,(30,25,5,220),outline=GOLD,width=2);tx(d,(820,350),'OTC • FLEX',20,GOLD,True,'mm')
  if kind=='selected':
-  vals=[('Fresh 1-minute candle','VERIFIED',GREEN),('Asset select time',kw.get('selected_time','—'),CYAN),('Candice AI analysis','ON',GREEN),('Research','24/7',CYAN),('Next signal window','NEXT 5 MIN',WHITE),('AI duration','2 / 3 / 5 / 10 / 15 MIN',WHITE)];y=470
+  vals=[('Fresh 1-minute candle','VERIFIED',GREEN),('Asset select time',kw.get('selected_time','—'),CYAN),('Candice AI analysis','ON',GREEN),('Research','24/7',CYAN),('Next signal window','NEXT 5 MIN',WHITE),('AI duration','2 / 3 / 5 / 15 MIN',WHITE)];y=470
   for a,b,c in vals:tx(d,(100,y),a,24,MUTED);tx(d,(920,y),b,23,c,True,'ra');d.line((95,y+38,925,y+38),fill=(50,100,140,80));y+=78
   tx(d,(512,930),'ASSET READY FOR CANDICE RESEARCH',27,GREEN,True,'mm')
  elif kind=='signal':
@@ -31,11 +31,10 @@ def card(kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reaso
   rem=max(0,int(kw.get('remaining',expiry*60)));progress(d,512,825,145,rem,max(1,int(kw.get('total_seconds',expiry*60))),c);tx(d,(512,1000),f'EXPIRY • {kw.get("expiry_time","VERIFYING")}',22,ORANGE,True,'mm')
  elif kind=='expiry':
   tx(d,(512,455),'EXPIRY REACHED',52,RED,True,'mm');vals=[('Direction',direction or '—',GREEN if direction=='UP' else RED),('Entry',kw.get('entry','—'),WHITE),('Duration',f'{expiry} MIN',WHITE),('Expiry boundary',kw.get('expiry_time','—'),ORANGE),('Reached at',kw.get('reached_time','—'),CYAN)];y=560
-  for a,b,c in vals:tx(d,(100,y),a,23,MUTED);tx(d,(520,y),b,23,c,True);y+=62
+  for a,b,c in vals:tx(d,(100,y),a,23,MUTED);tx(d,(520,y),b,23,c,True,'ra');y+=62
   tx(d,(512,900),'VERIFYING CLOSED EXPIRY CANDLE…',27,ORANGE,True,'mm')
  elif kind=='result':
   result=direction or 'UNRESOLVED';c=GREEN if result=='WIN' else RED if result=='LOSS' else ORANGE
-  # Professional outcome hero: status pill + price journey + verification seal.
   rr(d,(100,420,924,535),28,(7,25,39,245),outline=(*c,180),width=3);tx(d,(145,477),'FINAL MARKET OUTCOME',21,MUTED,True,'lm');tx(d,(870,477),result,58,c,True,'rm')
   tx(d,(512,620),result,104,c,True,'mm');tx(d,(512,685),'VERIFIED',22,GREEN if result!='UNRESOLVED' else ORANGE,True,'mm')
   rr(d,(100,735,924,845),25,(7,22,38,245),outline=(60,105,145,100),width=2);tx(d,(145,770),'ENTRY',18,MUTED,True);tx(d,(145,812),kw.get('entry','—'),28,WHITE,True);tx(d,(512,770),'EXPIRY',18,MUTED,True,'mm');tx(d,(512,812),kw.get('exit','—'),28,WHITE,True,'mm');tx(d,(870,770),'DURATION',18,MUTED,True,'rm');tx(d,(870,812),f'{expiry} MIN',28,CYAN,True,'rm')
