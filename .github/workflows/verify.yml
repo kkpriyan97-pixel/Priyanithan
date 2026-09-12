@@ -48,7 +48,7 @@ jobs:
         run: |
           python - <<'PY'
           import pandas as pd
-          from candice_engine import technical_snapshot, choose_expiry, EXPIRIES, resample_ohlc, closed_1m
+          from candice_engine import technical_snapshot, choose_expiry, human_brain, EXPIRIES, resample_ohlc, closed_1m
           from candice_broker import Broker
           from app import expiry_boundary
           assert set(EXPIRIES)=={1,2,3,5,10,15}; base=1700000100; rows=[]; p=100.0
@@ -57,9 +57,14 @@ jobs:
           df=pd.DataFrame(rows); closed=closed_1m(df,base+1200*60); assert len(closed)==1200; assert closed.timestamp.is_monotonic_increasing and closed.timestamp.is_unique; snap=technical_snapshot(closed); assert snap['direction']=='UP'; assert choose_expiry(snap) in EXPIRIES
           for mins in (3,5,10,15):
               agg=resample_ohlc(closed,mins); assert len(agg)>=60; assert agg.timestamp.is_monotonic_increasing and agg.timestamp.is_unique; assert technical_snapshot(agg)['direction']=='UP'
+          common={'direction':'UP','strength':0.8,'adx14':24,'body_ratio':0.5,'indicator_agreement':4,'indicator_conflicts':0}
+          frames10={'1m':common,'3m':common,'5m':common,'10m':{'direction':'UP','adx14':20},'15m':{'direction':'UP','adx14':20}}
+          assert human_brain(frames10)['expiry']==10
+          frames15={'1m':common,'3m':common,'5m':common,'10m':{'direction':'UP','adx14':28},'15m':{'direction':'UP','adx14':28}}
+          assert human_brain(frames15)['expiry']==15
           last=float(df.timestamp.iloc[-1]); assert Broker.closed_candle(df,last+60,60).timestamp==last; assert Broker.closed_candle(df,last,60).timestamp==last-60
           for expiry in EXPIRIES: assert expiry_boundary(last,expiry)==last+60+expiry*60
-          print('TECHNICAL LIFECYCLE: PASS')
+          print('TECHNICAL + ADAPTIVE EXPIRY LIFECYCLE: PASS')
           PY
       - name: Read-only broker to engine integration test
         run: |
