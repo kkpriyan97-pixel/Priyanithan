@@ -1,46 +1,82 @@
 from __future__ import annotations
-import io
+import io, math
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 W,H=1024,1280
-WHITE=(242,248,255); MUTED=(145,175,205); GREEN=(55,255,145); CYAN=(30,205,255); GOLD=(255,205,65); RED=(255,70,85); PURPLE=(190,105,255); ORANGE=(255,160,55); BG=(2,8,16)
+WHITE=(245,250,255); MUTED=(150,185,215); CYAN=(0,215,255); BLUE=(35,110,255); GREEN=(45,255,145); GOLD=(255,205,65); RED=(255,70,85); ORANGE=(255,165,55); PURPLE=(190,105,255); BG=(2,8,18)
+
 def font(n,b=False): return ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if b else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',n)
 def tx(d,xy,s,n,fill=WHITE,b=False,anchor='la'): d.text(xy,str(s),font=font(n,b),fill=fill,anchor=anchor)
-def glow(im,xy,rgb,r=180,a=80):
- lay=Image.new('RGBA',im.size,(0,0,0,0)); d=ImageDraw.Draw(lay); x,y=xy
- for q in range(r,10,-12): d.ellipse((x-q,y-q,x+q,y+q),fill=(*rgb,max(0,int(a*(1-q/r)**1.4))))
- im.alpha_composite(lay.filter(ImageFilter.GaussianBlur(22)))
-def panel(d,box,title,accent):
- d.rounded_rectangle(box,30,fill=(5,17,30,242),outline=(*accent,220),width=4); x1,y1,x2,_=box; d.rounded_rectangle((x1+2,y1+2,x2-2,y1+70),28,fill=(*accent,22)); tx(d,(x1+30,y1+35),title,30,accent,True,'lm')
-def kv(d,y,label,value,color=WHITE): tx(d,(90,y),label,27,MUTED,False,'lm'); tx(d,(850,y),value,27,color,True,'rm')
+def rr(d,box,r,fill,outline=None,width=1): d.rounded_rectangle(box,radius=r,fill=fill,outline=outline,width=width)
+def glow(im,xy,rgb,r=180,a=100):
+    lay=Image.new('RGBA',im.size,(0,0,0,0)); d=ImageDraw.Draw(lay); x,y=xy
+    for q in range(r,8,-10): d.ellipse((x-q,y-q,x+q,y+q),fill=(*rgb,max(0,int(a*(1-q/r)**1.6))))
+    im.alpha_composite(lay.filter(ImageFilter.GaussianBlur(20)))
 def fmt(sec):
- sec=max(0,int(sec)); return f'{sec//3600:02d}:{(sec%3600)//60:02d}:{sec%60:02d}' if sec>=3600 else f'{sec//60:02d}:{sec%60:02d}'
-def bar(d,x1,y,x2,ratio,color):
- d.rounded_rectangle((x1,y,x2,y+18),9,fill=(18,30,45),outline=(55,85,110),width=1); d.rounded_rectangle((x1,y,x1+int((x2-x1)*max(0,min(1,ratio))),y+18),9,fill=color)
+    sec=max(0,int(sec)); return f'{sec//3600:02d}:{(sec%3600)//60:02d}:{sec%60:02d}' if sec>=3600 else f'{sec//60:02d}:{sec%60:02d}'
+def chart(d,box,bullish=True):
+    x1,y1,x2,y2=box; prev=y2-28; step=(x2-x1)/12
+    for i in range(11):
+        x=x1+step*(i+1); y=max(y1+18,min(y2-18,prev+(-1 if bullish else 1)*(13+i*2)+math.sin(i*1.7)*18)); c=GREEN if y<prev else RED
+        d.line((x,y-34,x,y+34),fill=c,width=5); d.rectangle((x-10,y-16,x+10,y+16),fill=c); prev=y
 def progress(d,cx,cy,r,remaining,total,accent):
- d.ellipse((cx-r,cy-r,cx+r,cy+r),outline=(25,55,80),width=14); frac=max(0,min(1,remaining/max(1,total))); d.arc((cx-r,cy-r,cx+r,cy+r),-90,-90+360*frac,fill=accent,width=14); tx(d,(cx,cy-8),fmt(remaining),68,WHITE,True,'mm'); tx(d,(cx,cy+65),'TIME REMAINING',23,MUTED,True,'mm')
+    frac=max(0,min(1,remaining/max(1,total))); d.ellipse((cx-r,cy-r,cx+r,cy+r),outline=(25,55,80),width=14); d.arc((cx-r,cy-r,cx+r,cy+r),-90,-90+360*frac,fill=accent,width=14); tx(d,(cx,cy-10),fmt(remaining),64,WHITE,True,'mm'); tx(d,(cx,cy+60),'TIME REMAINING',21,MUTED,True,'mm')
+
+def base(kind,asset):
+    im=Image.new('RGBA',(W,H),BG); glow(im,(860,145),(0,110,255),210,120); glow(im,(120,1030),(0,225,180),240,80); glow(im,(790,1080),(255,175,30),230,45); d=ImageDraw.Draw(im,'RGBA')
+    rr(d,(35,35,W-35,H-35),48,(3,8,20,228),outline=(*CYAN,230),width=4); rr(d,(55,55,W-55,H-55),38,(6,14,30,225),outline=(90,135,190,70),width=2)
+    tx(d,(85,82),'PRIYANITHAN AI',25,(130,205,255),True,'la'); tx(d,(85,118),'CANDICE',58,WHITE,True,'la'); tx(d,(87,178),'AI TRADING BOT',22,GOLD,True,'la')
+    cx,cy=870,145
+    for r,a in ((94,25),(78,40),(62,65)): d.ellipse((cx-r,cy-r,cx+r,cy+r),outline=(*CYAN,a),width=5)
+    d.ellipse((cx-25,cy-25,cx+25,cy+25),fill=(*CYAN,220))
+    rr(d,(70,235,W-70,1045),32,(5,17,31,235),outline=(*CYAN,150),width=2)
+    return im,d
+
 def card(kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason='',**kw):
- im=Image.new('RGBA',(W,H),BG); glow(im,(120,160),(0,110,255),260,70); glow(im,(850,900),(0,230,140),300,70); glow(im,(500,1150),(255,180,30),260,40); d=ImageDraw.Draw(im,'RGBA')
- d.rounded_rectangle((24,24,W-24,H-24),44,fill=(3,11,22,248),outline=(*CYAN,220),width=4)
- d.rounded_rectangle((48,48,W-48,190),30,fill=(5,16,29,250),outline=(*GOLD,210),width=3); d.ellipse((70,70,160,160),fill=(4,25,42),outline=(*GOLD,220),width=4); d.arc((85,85,145,145),25,330,fill=GOLD,width=7); d.line((115,125,143,99),fill=GREEN,width=6)
- tx(d,(180,100),'CANDICE',50,WHITE,True,'lm'); tx(d,(181,145),'AI TRADING BOT',23,GOLD,True,'lm'); tx(d,(970,90),'LIVE FLEX',21,GREEN,True,'ra'); tx(d,(970,125),'FIXED-TIME',19,CYAN,True,'ra'); tx(d,(970,158),'MANUAL ONLY',18,WHITE,True,'ra')
- titles={'selected':('ASSET SELECTED',GREEN),'signal':('AI SIGNAL',CYAN),'result':('TRADE RESULT',PURPLE),'session':('SESSION TIME',ORANGE),'expiry':('EXPIRY REACHED',RED),'recovery':('RECOVERY TIME',GREEN),'status':('SYSTEM STATUS',CYAN)}; title,accent=titles.get(kind,('CANDICE UPDATE',CYAN)); panel(d,(48,215,W-48,1060),title,accent)
- tx(d,(80,300),asset,52,WHITE,True,'lm'); d.rounded_rectangle((735,270,945,320),22,fill=(35,25,4),outline=GOLD,width=2); tx(d,(840,295),'OTC • FLEX',19,GOLD,True,'mm')
- if kind=='selected':
-  kv(d,385,'Fresh 1-minute candle',kw.get('candle','VERIFIED'),GREEN); kv(d,455,'Asset select time',kw.get('selected_time','—'),CYAN); kv(d,525,'Candice AI analysis','ON',GREEN); kv(d,595,'Research','24/7',CYAN); kv(d,665,'Signal window','NEXT 5 MIN',WHITE); kv(d,735,'AI duration','2 / 3 / 5 / 10 / 15 MIN',WHITE); tx(d,(512,850),'ASSET READY',34,GREEN,True,'mm'); tx(d,(512,900),'CANDICE continues live research.',22,MUTED,False,'mm')
- elif kind=='signal':
-  col=GREEN if direction=='UP' else RED if direction=='DOWN' else WHITE; tx(d,(512,370),direction or 'WAIT',78,col,True,'mm'); total=max(1,int(kw.get('total_seconds',expiry*60))); rem=max(0,int(kw.get('remaining',total))); progress(d,512,570,150,rem,total,accent); kv(d,790,'Signal time',kw.get('signal_time','—'),CYAN); kv(d,850,'Entry',kw.get('entry','—')); kv(d,910,'Duration',f'{expiry} MIN'); kv(d,970,'AI approval',f'{confidence}%',GREEN); tx(d,(512,1010),f'EXPIRY • {kw.get("expiry_time","VERIFYING")}',20,ORANGE,True,'mm')
- elif kind=='expiry':
-  tx(d,(512,395),'EXPIRY REACHED',48,RED,True,'mm'); kv(d,515,'Direction',direction or '—',RED if direction=='DOWN' else GREEN); kv(d,575,'Entry',kw.get('entry','—')); kv(d,635,'Duration',f'{expiry} MIN'); kv(d,695,'Expiry Boundary',kw.get('expiry_time','—'),ORANGE); kv(d,755,'Reached At',kw.get('reached_time','—'),CYAN); tx(d,(512,850),'VERIFYING EXPIRY CANDLE…',28,ORANGE,True,'mm'); tx(d,(512,900),'Please wait for verified WIN / LOSS.',22,MUTED,False,'mm')
- elif kind=='result':
-  result=direction or 'UNRESOLVED'; col=GREEN if result=='WIN' else RED if result=='LOSS' else ORANGE; tx(d,(512,405),result,82,col,True,'mm'); kv(d,540,'Entry',kw.get('entry','—')); kv(d,600,'Expiry price',kw.get('exit','—')); kv(d,660,'Duration',f'{expiry} MIN'); kv(d,720,'Verification',kw.get('verification','candle-closed'),GREEN); kv(d,780,'Result Time',kw.get('result_time','—'),CYAN); tx(d,(512,875),'MARKET OUTCOME • NOT BROKER ACCOUNT P/L',20,MUTED,True,'mm')
- elif kind=='session':
-  active=kw.get('active',False); rem=max(0,int(kw.get('remaining',0))); total=max(1,int(kw.get('total_seconds',10800))); kv(d,400,'Session Start',kw.get('session_start','—'),GREEN); kv(d,470,'Session End',kw.get('session_end','—'),RED); kv(d,540,'Next Session',kw.get('next_session','—'),CYAN); progress(d,512,750,125,rem,total,GREEN if active else ORANGE); tx(d,(512,930),'SIGNAL SESSION ACTIVE' if active else 'RESEARCH ONLY',30,GREEN if active else ORANGE,True,'mm')
- elif kind=='recovery':
-  rem=max(0,int(kw.get('remaining',300))); total=max(1,int(kw.get('total_seconds',300))); kv(d,400,'Recovery Window',kw.get('recovery','15 MIN'),GREEN); kv(d,470,'Quick Recovery',kw.get('quick_recovery','5 MIN'),ORANGE); progress(d,512,650,125,rem,total,CYAN); kv(d,850,'Next Signal',kw.get('next_signal','After recovery'),CYAN); kv(d,910,'Daily Loss Limit',kw.get('daily_limit','ACTIVE'),GREEN); tx(d,(512,970),'RECOVERY PROTECTION ACTIVE',25,GREEN,True,'mm')
- else:
-  tx(d,(512,400),'CANDICE AI',55,GREEN,True,'mm'); tx(d,(512,490),'LIVE MARKET • AI ANALYSIS',28,CYAN,True,'mm'); tx(d,(512,590),kw.get('status_text','System online.'),24,WHITE,False,'mm')
- d.rounded_rectangle((48,1080,W-48,1230),30,fill=(5,20,29),outline=(*GOLD,190),width=3); tx(d,(512,1115),'CANDICE AI',38,GOLD,True,'mm'); tx(d,(512,1160),'TRADE SMARTER WITH CANDICE',20,WHITE,True,'mm'); tx(d,(512,1198),'FLEX • MANUAL ONLY • AUTO-TRADE OFF • MARTINGALE OFF',16,GREEN,True,'mm'); return im.convert('RGB')
+    im,d=base(kind,asset)
+    accents={'selected':GREEN,'signal':CYAN,'expiry':RED,'result':PURPLE,'recovery':GREEN,'session':ORANGE,'status':CYAN}; accent=accents.get(kind,CYAN)
+    titles={'selected':'ASSET SELECTED','signal':'NEW AI SIGNAL','expiry':'EXPIRY REACHED','result':'TRADE RESULT','recovery':'SHORT RECOVERY','session':'SIGNAL SESSION','status':'SYSTEM STATUS'}
+    tx(d,(100,285),titles.get(kind,'CANDICE UPDATE'),42,accent,True,'la')
+    tx(d,(100,365),asset,62,GOLD,True,'la'); rr(d,(710,325,930,375),22,(30,25,5,220),outline=GOLD,width=2); tx(d,(820,350),'OTC • FLEX',20,GOLD,True,'mm')
+    if kind=='selected':
+        vals=[('Fresh 1-minute candle','VERIFIED',GREEN),('Asset select time',kw.get('selected_time','—'),CYAN),('Candice AI analysis','ON',GREEN),('Research','24/7',CYAN),('Next signal window','NEXT 5 MIN',WHITE),('AI duration','2 / 3 / 5 / 10 / 15 MIN',WHITE)]
+        y=470
+        for a,b,c in vals: tx(d,(100,y),a,24,MUTED,False,'la'); tx(d,(920,y),b,23,c,True,'ra'); d.line((95,y+38,925,y+38),fill=(50,100,140,80),width=1); y+=78
+        tx(d,(512,930),'ASSET READY FOR CANDICE RESEARCH',27,GREEN,True,'mm')
+    elif kind=='signal':
+        c=GREEN if direction=='UP' else RED if direction=='DOWN' else WHITE; tx(d,(100,470),direction or 'WAIT',86,c,True,'la'); chart(d,(585,440,925,520),direction!='DOWN')
+        vals=[('Signal time',kw.get('signal_time','—'),CYAN),('Entry',kw.get('entry','—'),WHITE),('Duration',f'{expiry} MIN',WHITE),('Candice AI',f'APPROVED • {confidence}%',GREEN)]
+        y=575
+        for a,b,c2 in vals: tx(d,(100,y),a,23,MUTED,False,'la'); tx(d,(470,y),b,23,c2,True,'la'); y+=58
+        total=max(1,int(kw.get('total_seconds',expiry*60))); rem=max(0,int(kw.get('remaining',total))); progress(d,512,825,145,rem,total,c)
+        tx(d,(512,1000),f'EXPIRY • {kw.get("expiry_time","VERIFYING")}',22,ORANGE,True,'mm')
+    elif kind=='expiry':
+        tx(d,(512,455),'EXPIRY REACHED',52,RED,True,'mm'); vals=[('Direction',direction or '—',GREEN if direction=='UP' else RED),('Entry',kw.get('entry','—'),WHITE),('Duration',f'{expiry} MIN',WHITE),('Expiry boundary',kw.get('expiry_time','—'),ORANGE),('Reached at',kw.get('reached_time','—'),CYAN)]; y=560
+        for a,b,c in vals: tx(d,(100,y),a,23,MUTED,False,'la'); tx(d,(520,y),b,23,c,True,'la'); y+=62
+        tx(d,(512,900),'VERIFYING CLOSED EXPIRY CANDLE…',27,ORANGE,True,'mm')
+    elif kind=='result':
+        result=direction or 'UNRESOLVED'; c=GREEN if result=='WIN' else RED if result=='LOSS' else ORANGE; tx(d,(512,460),result,92,c,True,'mm'); vals=[('Entry',kw.get('entry','—'),WHITE),('Expiry price',kw.get('exit','—'),WHITE),('Duration',f'{expiry} MIN',WHITE),('Verification',kw.get('verification','candle-closed'),GREEN),('Result time',kw.get('result_time','—'),CYAN)]; y=575
+        for a,b,c2 in vals: tx(d,(100,y),a,23,MUTED,False,'la'); tx(d,(520,y),b,23,c2,True,'la'); y+=62
+        tx(d,(512,925),'MARKET OUTCOME • NOT BROKER ACCOUNT P/L',20,MUTED,True,'mm')
+    elif kind=='recovery':
+        rem=max(0,int(kw.get('remaining',300))); total=max(1,int(kw.get('total_seconds',300))); vals=[('Recovery window',kw.get('recovery','15 MIN'),GREEN),('Quick recovery',kw.get('quick_recovery','5 MIN'),ORANGE)]; y=500
+        for a,b,c in vals: tx(d,(100,y),a,24,MUTED,False,'la'); tx(d,(520,y),b,24,c,True,'la'); y+=65
+        progress(d,512,720,135,rem,total,CYAN); tx(d,(512,950),'RECOVERY PROTECTION ACTIVE',29,GREEN,True,'mm')
+    elif kind=='session':
+        act=bool(kw.get('active',False)); rem=max(0,int(kw.get('remaining',0))); total=max(1,int(kw.get('total_seconds',10800))); vals=[('Session start',kw.get('session_start','—'),GREEN),('Session end',kw.get('session_end','—'),RED),('Next session',kw.get('next_session','—'),CYAN)]; y=500
+        for a,b,c in vals: tx(d,(100,y),a,24,MUTED,False,'la'); tx(d,(520,y),b,22,c,True,'la'); y+=65
+        progress(d,512,760,135,rem,total,GREEN if act else ORANGE); tx(d,(512,965),'SIGNAL SESSION ACTIVE' if act else 'RESEARCH ONLY',30,GREEN if act else ORANGE,True,'mm')
+    else:
+        tx(d,(512,500),'CANDICE AI',55,GREEN,True,'mm'); tx(d,(512,590),kw.get('status_text','System online.'),25,WHITE,False,'mm')
+    d.line((75,1070,W-75,1070),fill=(*accent,120),width=2); tx(d,(512,1110),'CANDICE AI • LIVE MARKET • MANUAL TRADE ONLY',23,GOLD,True,'mm'); tx(d,(512,1150),'FLEX / FIXED-TIME  •  AUTO-TRADE OFF  •  MARTINGALE OFF',18,WHITE,True,'mm'); tx(d,(512,1190),'OBSERVE • ANALYZE • COMPARE • LEARN • DECIDE • MONITOR • IMPROVE',14,GREEN,True,'mm')
+    return im.convert('RGB')
+
 def png_bytes(**kwargs):
- b=io.BytesIO(); card(**kwargs).save(b,format='PNG',optimize=True); b.seek(0); b.name='candice-update.png'; return b
-def gif_bytes(**kwargs): return png_bytes(**kwargs)
-def update_gif_bytes(): return png_bytes(kind='status',asset='SYSTEM',status_text='CANDICE visual model active')
+    b=io.BytesIO(); card(**kwargs).save(b,format='PNG',optimize=True); b.seek(0); b.name='candice-update.png'; return b
+
+def gif_bytes(**kwargs):
+    image=card(**kwargs); frames=[]
+    for i in range(8):
+        f=image.copy(); dd=ImageDraw.Draw(f,'RGBA'); sy=80+int((H-180)*i/8); dd.line((75,sy,W-75,sy),fill=(0,220,255,70),width=3); rr=7+int(4*(1+math.sin(i*math.pi/4))); dd.ellipse((850-rr,145-rr,850+rr,145+rr),outline=(0,220,255,160),width=4); frames.append(f)
+    b=io.BytesIO(); frames[0].save(b,format='GIF',save_all=True,append_images=frames[1:],duration=140,loop=0,optimize=True); b.seek(0); b.name='candice.gif'; return b
+
+def update_gif_bytes(): return gif_bytes(kind='status',asset='SYSTEM',status_text='CANDICE visual model active')
