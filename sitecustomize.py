@@ -4,8 +4,8 @@ import time
 
 
 def _load_override():
-    for _ in range(100):
-        app = sys.modules.get('app')
+    for _ in range(120):
+        app = sys.modules.get('app') or sys.modules.get('__main__')
         if app is not None and hasattr(app, '_card_base'):
             try:
                 from candice_card_override import install
