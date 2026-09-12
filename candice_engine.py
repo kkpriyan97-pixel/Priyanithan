@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 
 log = logging.getLogger("candice.engine")
-EXPIRIES = (2, 3, 5, 10, 15)
+EXPIRIES = (2, 3, 5, 15)
 MIN_CONF = int(os.getenv("AI_MIN_CONFIDENCE", "72"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT_SECONDS", "18"))
 ANALYSIS_CANDLE_COUNT = max(900, int(os.getenv("ANALYSIS_CANDLE_COUNT", "1200")))
@@ -98,7 +98,7 @@ def choose_expiry(s:dict)->int:
     return 0
 
 def _ai_prompt(s,memory):
-    return f'''You are Candice, a conservative professional FLEX/fixed-time market analyst. Manual alerts only; never place trades. Do not claim certainty. Approve only fresh, multi-indicator alignment with no material conflict. Prefer NO SIGNAL when evidence is weak, stale, contradictory, overextended, or near a likely reversal. Return ONLY JSON: {{"decision":"APPROVE|REJECT","direction":"UP|DOWN|","confidence":0-100,"expiry":2|3|5|10|15,"reason":"short evidence-based reason"}}. Technical evidence: {json.dumps(s)}. Historical memory: {json.dumps(memory)[:5000]}'''
+    return f'''You are Candice, a conservative professional FLEX/fixed-time market analyst. Manual alerts only; never place trades. Do not claim certainty. Approve only fresh, multi-indicator alignment with no material conflict. Prefer NO SIGNAL when evidence is weak, stale, contradictory, overextended, or near a likely reversal. Return ONLY JSON: {{"decision":"APPROVE|REJECT","direction":"UP|DOWN|","confidence":0-100,"expiry":2|3|5|15,"reason":"short evidence-based reason"}}. Technical evidence: {json.dumps(s)}. Historical memory: {json.dumps(memory)[:5000]}'''
 
 def ai_review(snapshot,memory):
     key=os.getenv("OPENROUTER_API_KEY","").strip()
