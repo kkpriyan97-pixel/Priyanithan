@@ -1,4 +1,4 @@
-# Candice AI v8.2 — FLEX Manual Signal Bot
+# Candice AI v8.3 — FLEX Manual Signal Bot
 
 Clean read-only rebuild of the Priyanithan Telegram signal bot.
 
@@ -9,22 +9,22 @@ Clean read-only rebuild of the Priyanithan Telegram signal bot.
 - Martingale OFF.
 - Every **1-minute closed candle** is analyzed on a continuous 1-minute scan cadence.
 - Deterministic technical analysis across 1m/3m/5m/10m/15m context.
-- Optional OpenRouter AI gate must agree with the technical direction and meet the confidence gate before an alert is sent.
+- OpenRouter AI gate must be configured for qualified alerts; the AI decision must agree with the technical direction and meet the confidence gate before an alert is sent.
 - Allowed expiries are **2 / 3 / 5 / 15 minutes**. There is no 10-minute expiry.
-- Server-side signal countdown uses entry timestamp + selected expiry and is independent of message refresh timing.
+- Server-side signal countdown is tied to the closed entry-candle boundary and selected expiry, independent of message refresh timing.
 - Expiry is verified against a fully closed 1-minute boundary candle before WIN/LOSS is recorded.
 - Duplicate prevention is based on user + asset + closed entry-candle timestamp.
 - Daily-loss stop and 3-consecutive-loss stop are enforced.
 - A loss starts a short recovery pause; no martingale is used.
 - Market-outcome WIN/LOSS/DRAW tracking is stored in bounded local memory.
-- Telegram uses text-only signal/result cards; no image or animation sending.
+- Telegram uses text-only signal/result messages; no image or animation sending.
 
 ## Signal lifecycle
 1. Refresh live FLEX assets.
 2. Analyze fresh closed 1-minute data.
 3. Build higher-timeframe context.
 4. Apply deterministic technical gates.
-5. Run the optional AI decision gate.
+5. Run the AI decision gate.
 6. Verify the latest closed 1-minute entry candle.
 7. Prevent duplicate entry-candle signals.
 8. Send the manual signal with direction, confidence, expiry, entry and countdown.
@@ -45,6 +45,10 @@ Recommended operation settings:
 - `DAILY_MAX_LOSSES=5`
 - `MAX_CONSECUTIVE_LOSSES=3`
 - `AI_TIMEOUT_SECONDS=18`
+- `OPENROUTER_MODEL=openrouter/free`
 
 ## Start command
 `PYTHONPATH=. python app.py`
+
+## Important limitation
+GitHub CI verifies code compilation, safety contracts, deterministic candle/expiry behavior, and broker-to-engine read-only integration with a deterministic market stub. It does **not** prove live broker connectivity, live Telegram delivery, live AI-provider availability, or trading profitability. Those require the configured Render service and real-time external systems.
