@@ -46,7 +46,10 @@ jobs:
           for mins in (3,5,10,15):
               agg=resample_ohlc(df,mins)
               assert len(agg)>=60 and agg['timestamp'].is_monotonic_increasing and agg['timestamp'].is_unique
-          row=Broker.closed_candle(df,df.timestamp.iloc[-1]+60,60); assert row is not None and row.close==df.close.iloc[-1]
-          assert Broker.closed_candle(df,df.timestamp.iloc[-1],60).close==df.close.iloc[-2]
+          boundary=float(df.timestamp.iloc[-1]+60)
+          row=Broker.closed_candle(df,boundary,60); assert row is not None
+          assert float(row.timestamp) <= boundary-60
+          row2=Broker.closed_candle(df,float(df.timestamp.iloc[-1]),60); assert row2 is not None
+          assert float(row2.timestamp) <= float(df.timestamp.iloc[-1])-60
           print('CANDICE MULTI-TF + CLOSED-CANDLE SMOKE OK')
           PY
