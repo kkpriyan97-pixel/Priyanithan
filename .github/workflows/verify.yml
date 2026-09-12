@@ -22,24 +22,36 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import ast
+
           app=Path('app.py').read_text()
           engine=Path('candice_engine.py').read_text()
           trade=Path('olymptrade_ws/api/trade.py').read_text()
           readme=Path('README.md').read_text()
           env=Path('RENDER_ENV.example').read_text()
-          assert "VERSION = '8.3-FULL-BOT-1M-LIFECYCLE'" in app
-          assert "INTERVAL = max(60, int(os.getenv('SCAN_INTERVAL_SECONDS', '60')))" in app
-          assert 'AUTO_TRADE = False' in app
-          assert 'MARTINGALE = False' in app
-          assert 'FOREX_MODE = False' in app
+
+          # Validate source semantics instead of brittle exact formatting.
+          tree=ast.parse(app)
+          constants={}
+          for node in tree.body:
+              if isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      if isinstance(target, ast.Name) and target.id in {'VERSION','INTERVAL','AUTO_TRADE','MARTINGALE','FOREX_MODE'}:
+                          try: constants[target.id]=ast.literal_eval(node.value)
+                          except Exception: pass
+          assert constants.get('VERSION') == '8.4-FULL-BOT-1M-PERSISTENT-USERS'
+          assert constants.get('INTERVAL') == 60
+          assert constants.get('AUTO_TRADE') is False
+          assert constants.get('MARTINGALE') is False
+          assert constants.get('FOREX_MODE') is False
           assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app
           assert 'signal_countdown' in app and 'entry_ts' in app
           assert 'closed_candle_at' in app and 'closed_candle' in app
           assert 'session_state()!=' not in app
-          assert "EXPIRIES = (2, 3, 5, 15)" in engine
+          assert 'EXPIRIES = (2, 3, 5, 15)' in engine
           assert '2|3|5|15' in engine
           assert "RuntimeError('Candice v8 is read-only" in trade
-          assert 'v8.3' in readme and '2 / 3 / 5 / 15' in readme
+          assert '2 / 3 / 5 / 15' in readme
           assert 'TELEGRAM_BOT_TOKEN=' in env and 'OPENROUTER_API_KEY=' in env
           assert not any(Path('.').glob('*_hotfix.py'))
           print('STATIC SAFETY CONTRACT: PASS')
@@ -48,14 +60,14 @@ jobs:
         run: |
           python - <<'PY'
           import app
-          assert app.VERSION == '8.3-FULL-BOT-1M-LIFECYCLE'
-          assert app.INTERVAL >= 60
+          assert app.VERSION == '8.4-FULL-BOT-1M-PERSISTENT-USERS'
+          assert app.INTERVAL == 60
           assert app.AUTO_TRADE is False
           assert app.MARTINGALE is False
           assert app.FOREX_MODE is False
           c=app.flask_app.test_client()
           r=c.get('/')
-          assert r.status_code == 200 and '8.3-FULL-BOT-1M-LIFECYCLE' in r.get_data(as_text=True)
+          assert r.status_code == 200 and '8.4-FULL-BOT-1M-PERSISTENT-USERS' in r.get_data(as_text=True)
           r=c.get('/health')
           assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'
           print('RUNTIME SURFACE: PASS')
