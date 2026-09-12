@@ -66,13 +66,13 @@ def resample_ohlc(df:pd.DataFrame,minutes:int)->pd.DataFrame:
     d["dt"]=pd.to_datetime(d["timestamp"],unit="s",utc=True);d=d.set_index("dt");out=d[["open","high","low","close"]].resample(f"{minutes}min",label="left",closed="left").agg({"open":"first","high":"max","low":"min","close":"last"}).dropna().reset_index();latest_start=int(float(df.sort_values("timestamp").iloc[-1]["timestamp"]));complete_until=latest_start+60;out=out[(out.dt.astype("int64")//10**9+minutes*60)<=complete_until].copy();out["timestamp"]=(out.dt.astype("int64")//10**9).astype(int);return out[["timestamp","open","high","low","close"]].reset_index(drop=True)
 
 def human_brain(frames:dict,memory:dict|None=None):
-    s=frames.get("5m") or frames.get("1m") or {};one=frames.get("1m",{});three=frames.get("3m",{});ten=frames.get("10m",{});fifteen=frames.get("15m",{});direction=s.get("direction","")
+    s=frames.get("5m") or frames.get("1m") or {};one=frames.get("1m",{});three=frames.get("3m",{});ten=frames.get("10m",{});fifteen=frames.get("15m",{});direction=s.get("direction","");memory=memory or {}
     if not direction:return {"approve":False,"direction":"","score":0.0,"expiry":0,"regime":"unclear","reason":"No dominant direction"}
     score=0.0;reasons=[];aligned=0;conflicts=0
     for f in (one,three,s,ten,fifteen):
         if not f:continue
-        if f.get("direction")==direction:aligned+=1;score+=0.12
-        elif f.get("direction"):conflicts+=1;score-=0.10
+        if f.get("direction")==direction:aligned+=1;score+=.12
+        elif f.get("direction"):conflicts+=1;score-=.10
     strength=float(s.get("strength",0));adx=float(s.get("adx14",0));rsi=float(s.get("rsi14",50));body=float(s.get("body_ratio",0));agreement=int(s.get("indicator_agreement",0));ind_conf=int(s.get("indicator_conflicts",0))
     if strength>=.8 and adx>=25:regime="trend"
     elif agreement>=4 and body>=.55:regime="breakout"
@@ -92,8 +92,8 @@ def human_brain(frames:dict,memory:dict|None=None):
     elif score>=.82 and adx>=30:expiry=2
     elif score>=.76 and adx>=22:expiry=3
     elif score>=.68 and adx>=18:expiry=5
-    elif direction and ten.get("direction")==direction and fifteen.get("direction")==direction and score>=.62:expiry=10
     elif direction and ten.get("direction")==direction and fifteen.get("direction")==direction and score>=.72:expiry=15
+    elif direction and ten.get("direction")==direction and fifteen.get("direction")==direction and score>=.62:expiry=10
     else:expiry=0
     approve=bool(expiry and score>=.68 and conflicts<3 and not (rsi>=82 or rsi<=18))
     reason="; ".join(reasons) or "insufficient independent confirmation"
@@ -126,7 +126,7 @@ def _parse_ai_content(content):
     except Exception:return None
 
 def _request_ai(url,key,model,ai_input):
-    payload={"model":model,"messages":[{"role":"user","content":_ai_prompt(ai_input.get("technical",ai_input),ai_input.get("memory",{}))}],"temperature":0.1,"max_completion_tokens":400,"response_format":{"type":"json_object"}}
+    payload={"model":model,"messages":[{"role":"user","content":_ai_prompt(ai_input.get("technical",ai_input),ai_input.get("memory",{}))}],"temperature":.1,"max_completion_tokens":400,"response_format":{"type":"json_object"}}
     if "gpt-oss" in model.lower():payload["include_reasoning"]=False;payload["reasoning_effort"]="low"
     r=requests.post(url,headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
     if not r.ok:raise RuntimeError(f"HTTP {r.status_code}: {r.text.replace(chr(10),' ')[:600]}")
@@ -159,14 +159,13 @@ async def analyze(asset,broker,memory):
             if len(agg)>=60:frames[f"{mins}m"]=technical_snapshot(agg)
     except Exception as exc:return Analysis(asset,"REJECT",reason=f"technical calculation failed: {exc}")
     primary=frames.get("5m",snap1);direction=primary["direction"]
-    brain=human_brain(frames,{**(memory or {}),"asset":asset})
     if not direction or snap1["direction"]!=direction:return Analysis(asset,"REJECT",direction=direction,score=primary["strength"],reason="1m/5m direction conflict",timeframe="1m+5m")
+    brain=human_brain(frames,{**(memory or {}),"asset":asset})
     if not brain["approve"]:return Analysis(asset,"REJECT",direction=direction,expiry=brain["expiry"],score=brain["score"],reason=f"Human brain WAIT: {brain['reason']}",timeframe="1m+3m+5m+10m+15m")
-    context_agreement=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"]==direction);context_conflict=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"] and frames[k]["direction"]!=direction)
-    candidate=min([x for x in (brain["expiry"],choose_expiry(primary,frames)) if x in EXPIRIES],key=lambda x:abs(x-brain["expiry"])) if any(x in EXPIRIES for x in (brain["expiry"],choose_expiry(primary,frames))) else 0
+    context_agreement=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"]==direction);context_conflict=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"] and frames[k]["direction"]!=direction);technical_expiry=choose_expiry(primary,frames);candidate=brain["expiry"] if brain["expiry"] in EXPIRIES else technical_expiry
     if not candidate:return Analysis(asset,"REJECT",direction=direction,score=brain["score"],reason="No safe expiry",timeframe="1m+5m")
     if context_conflict>=2 and primary["strength"]<1.0:return Analysis(asset,"REJECT",direction=direction,expiry=candidate,score=brain["score"],reason="Higher-timeframe context conflicts",timeframe="1m+5m+10m+15m")
-    ai_input={"1m":snap1,"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"human_brain":brain,"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":candidate};ai=await asyncio.to_thread(ai_review,ai_input,memory or {});decision=str(ai.get("decision","")).upper();ai_direction=str(ai.get("direction","")).upper();conf=max(0,min(100,int(ai.get("confidence",0) or 0)));ai_exp=int(ai.get("expiry",0) or 0))
+    ai_input={"1m":snap1,"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"human_brain":brain,"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":candidate};ai=await asyncio.to_thread(ai_review,ai_input,memory or {});decision=str(ai.get("decision","")).upper();ai_direction=str(ai.get("direction","")).upper();conf=max(0,min(100,int(ai.get("confidence",0) or 0)));ai_exp=int(ai.get("expiry",0) or 0)
     if decision!="APPROVE" or ai_direction!=direction or conf<MIN_CONF or ai_exp not in EXPIRIES:return Analysis(asset,"REJECT",direction=ai_direction,confidence=conf,expiry=ai_exp,score=brain["score"],reason=str(ai.get("reason","AI gate rejected")),timeframe="1m+3m+5m+10m+15m")
     evidence=tuple(name for name,value in (("Parabolic SAR Reversal",primary["psar_direction"]),("Moving Average Crossover",primary["ma_crossover"]),("Donchian Channel Breakout",primary["donchian_breakout"]),("MACD Crossover",primary["macd_crossover"]),("Rate of Change Crossover",primary["roc_direction"])) if value==direction)
     return Analysis(asset,"APPROVE",direction=direction,confidence=conf,expiry=ai_exp,score=brain["score"],reason=str(ai.get("reason","Human brain + multi-timeframe technical + AI alignment")),timeframe="1m+3m+5m+10m+15m",evidence=evidence)
