@@ -87,7 +87,7 @@ jobs:
         run: |
           python - <<'PY'
           import asyncio
-          import pandas as pd
+          import time
           from candice_broker import Broker
           from candice_engine import analyze, EXPIRIES
 
@@ -95,7 +95,8 @@ jobs:
               is_connected=True
           class FakeMarket:
               async def get_candles(self,pair,size,count):
-                  base=1700000100
+                  latest=int(time.time())
+                  base=latest-(max(count,1200)-1)*60
                   rows=[]; p=100.0
                   for i in range(max(count,1200)):
                       o=p; c=p+0.05
