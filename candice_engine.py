@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 
 log = logging.getLogger("candice.engine")
-EXPIRIES = (2, 3, 5, 15)
+EXPIRIES = (1, 2, 3, 5, 10, 15)
 MIN_CONF = int(os.getenv("AI_MIN_CONFIDENCE", "72"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT_SECONDS", "18"))
 ANALYSIS_CANDLE_COUNT = max(240, int(os.getenv("ANALYSIS_CANDLE_COUNT", "240")))
@@ -70,15 +70,26 @@ def resample_ohlc(df:pd.DataFrame,minutes:int)->pd.DataFrame:
     if d.empty:return d[["timestamp","open","high","low","close"]]
     d["dt"]=pd.to_datetime(d["timestamp"],unit="s",utc=True); d=d.set_index("dt"); out=d[["open","high","low","close"]].resample(f"{minutes}min",label="left",closed="left").agg({"open":"first","high":"max","low":"min","close":"last"}).dropna().reset_index(); latest_start=int(float(df.sort_values("timestamp").iloc[-1]["timestamp"])); complete_until=latest_start+60; out=out[(out.dt.astype("int64")//10**9+minutes*60)<=complete_until].copy(); out["timestamp"]=(out.dt.astype("int64")//10**9).astype(int); return out[["timestamp","open","high","low","close"]].reset_index(drop=True)
 
-def choose_expiry(s:dict)->int:
-    if s["indicator_agreement"]>=4 and s["strength"]>=.8 and s["adx14"]>=30:return 5
-    if s["indicator_agreement"]>=4 and s["strength"]>=.8 and s["adx14"]>=22:return 3
-    if s["indicator_agreement"]>=4 and s["strength"]>=.8 and s["body_ratio"]>=.65:return 2
-    if s["indicator_agreement"]>=3 and s["strength"]>=.8:return 5
+def choose_expiry(s:dict, frames:dict|None=None)->int:
+    """Choose the initial duration from current market strength; AI may refine it later."""
+    frames = frames or {}
+    agreement=int(s.get("indicator_agreement",0)); strength=float(s.get("strength",0)); adx=float(s.get("adx14",0)); body=float(s.get("body_ratio",0)); direction=s.get("direction","")
+    # Very strong short-term impulse: shortest expiry.
+    if agreement>=4 and strength>=.8 and adx>=35 and body>=.55:return 1
+    if agreement>=4 and strength>=.8 and adx>=30:return 2
+    if agreement>=4 and strength>=.8 and adx>=22:return 3
+    if agreement>=3 and strength>=.8 and adx>=18:return 5
+    # Longer durations are reserved for aligned higher-timeframe structure.
+    f10=frames.get("10m",{}); f15=frames.get("15m",{})
+    if direction and f10.get("direction")==direction and f15.get("direction")==direction:
+        adx10=float(f10.get("adx14",0) or 0); adx15=float(f15.get("adx14",0) or 0)
+        if strength>=.8 and min(adx10,adx15)>=25:return 15
+        if strength>=.6 and min(adx10,adx15)>=18:return 10
+    if agreement>=3 and strength>=.6:return 10
     return 0
 
 def _ai_prompt(s,memory):
-    return f'''You are Candice, a conservative professional FLEX/fixed-time market analyst. Manual alerts only; never place trades. Do not claim certainty. Approve only fresh, multi-indicator alignment with no material conflict. Prefer NO SIGNAL when evidence is weak, stale, contradictory, overextended, or near a likely reversal. Return ONLY one valid JSON object with exactly these fields: decision (APPROVE or REJECT), direction (UP, DOWN, or empty), confidence (0-100 integer), expiry (2,3,5,15), reason (short evidence-based string). Technical evidence: {json.dumps(s)}. Historical memory: {json.dumps(memory)[:5000]}'''
+    return f'''You are Candice, a conservative professional FLEX/fixed-time market analyst. Manual alerts only; never place trades. Do not claim certainty. Approve only fresh, multi-indicator alignment with no material conflict. Choose the expiry from 1, 2, 3, 5, 10, or 15 minutes based on the market state and evidence: shorter duration for strong immediate momentum; 10/15 minutes only when the higher-timeframe trend supports the direction. Prefer NO SIGNAL when evidence is weak, stale, contradictory, overextended, or near a likely reversal. Return ONLY one valid JSON object with exactly these fields: decision (APPROVE or REJECT), direction (UP, DOWN, or empty), confidence (0-100 integer), expiry (1,2,3,5,10,15), reason (short evidence-based string). Technical evidence: {json.dumps(s)}. Historical memory: {json.dumps(memory)[:5000]}'''
 
 def _parse_ai_content(content):
     try:
@@ -124,7 +135,7 @@ async def analyze(asset,broker,memory):
     except Exception as exc:return Analysis(asset,"REJECT",reason=f"technical calculation failed: {exc}")
     primary=frames.get("5m",snap1); direction=primary["direction"]
     if not direction or snap1["direction"]!=direction:return Analysis(asset,"REJECT",direction=direction,score=primary["strength"],reason="1m/5m direction conflict",timeframe="1m+5m")
-    context_agreement=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"]==direction); context_conflict=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"] and frames[k]["direction"]!=direction); expiry=choose_expiry(primary)
+    context_agreement=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"]==direction); context_conflict=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"] and frames[k]["direction"]!=direction); expiry=choose_expiry(primary,frames)
     if not expiry:return Analysis(asset,"REJECT",direction=direction,score=primary["strength"],reason="Named-indicator alignment too weak",timeframe="1m+5m")
     if context_conflict>=2 and primary["strength"]<1.0:return Analysis(asset,"REJECT",direction=direction,expiry=expiry,score=primary["strength"],reason="Higher-timeframe context conflicts",timeframe="1m+5m+10m+15m")
     ai_input={"1m":snap1,"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":expiry}; ai=await asyncio.to_thread(ai_review,ai_input,memory); decision=str(ai.get("decision","")).upper(); ai_direction=str(ai.get("direction","")).upper(); conf=max(0,min(100,int(ai.get("confidence",0) or 0))); ai_exp=int(ai.get("expiry",0) or 0)
