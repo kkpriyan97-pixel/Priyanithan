@@ -23,64 +23,26 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import ast
-
-          app=Path('app.py').read_text()
-          engine=Path('candice_engine.py').read_text()
-          broker=Path('candice_broker.py').read_text()
-          trade=Path('olymptrade_ws/api/trade.py').read_text()
-          readme=Path('README.md').read_text()
-          env=Path('RENDER_ENV.example').read_text()
-
-          tree=ast.parse(app)
-          constants={}
+          app=Path('app.py').read_text(); engine=Path('candice_engine.py').read_text(); broker=Path('candice_broker.py').read_text(); trade=Path('olymptrade_ws/api/trade.py').read_text(); readme=Path('README.md').read_text(); env=Path('RENDER_ENV.example').read_text()
+          tree=ast.parse(app); constants={}
           for node in tree.body:
               if isinstance(node, ast.Assign):
                   for target in node.targets:
                       if isinstance(target, ast.Name) and target.id in {'VERSION','INTERVAL','AUTO_TRADE','MARTINGALE','FOREX_MODE'}:
                           try: constants[target.id]=ast.literal_eval(node.value)
                           except Exception: pass
-          assert constants.get('VERSION') == '8.5-FULL-BOT-1M-WEBHOOK'
-          assert constants.get('INTERVAL') == 60
-          assert constants.get('AUTO_TRADE') is False
-          assert constants.get('MARTINGALE') is False
-          assert constants.get('FOREX_MODE') is False
-          assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app
-          assert 'signal_countdown' in app and 'entry_ts' in app
-          assert 'closed_candle_at' in app and 'closed_candle' in app
-          assert 'session_state()!=' not in app
-          assert 'set_webhook' in app and "WEBHOOK_PATH = '/telegram/webhook'" in app
-          assert 'start_polling' in app and 'delete_webhook' in app
-          assert 'EXPIRIES = (2, 3, 5, 15)' in engine
-          assert '2|3|5|15' in engine
-          assert 'CEREBRAS_API_KEY' in engine and 'GROQ_API_KEY' in engine
-          assert 'OPENROUTER_API_KEY' not in engine
-          assert "RuntimeError('Candice v8 is read-only" in trade
-          assert '2 / 3 / 5 / 15' in readme
-          assert 'TELEGRAM_BOT_TOKEN=' in env and 'CEREBRAS_API_KEY=' in env and 'GROQ_API_KEY=' in env
-          assert 'OPENROUTER_API_KEY=' not in env
-          assert 'chunk_size=min(600,count)' in broker
-          assert 'end_time=cursor' in broker
-          assert not any(Path('.').glob('*_hotfix.py'))
-          print('STATIC SAFETY CONTRACT: PASS')
+          assert constants.get('VERSION') == '8.5-FULL-BOT-1M-WEBHOOK'; assert constants.get('INTERVAL') == 60; assert constants.get('AUTO_TRADE') is False; assert constants.get('MARTINGALE') is False; assert constants.get('FOREX_MODE') is False
+          assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app; assert 'signal_countdown' in app and 'entry_ts' in app; assert 'closed_candle_at' in app and 'closed_candle' in app; assert 'session_state()!=' not in app; assert 'set_webhook' in app and "WEBHOOK_PATH = '/telegram/webhook'" in app; assert 'start_polling' in app and 'delete_webhook' in app
+          assert ('EXPIRIES = (2, 3, 5, 15)' in engine) or ('EXPIRIES=(2,3,5,15)' in engine); assert '2|3|5|15' in engine; assert 'CEREBRAS_API_KEY' in engine and 'GROQ_API_KEY' in engine; assert 'OPENROUTER_API_KEY' not in engine
+          assert "RuntimeError('Candice v8 is read-only" in trade; assert '2 / 3 / 5 / 15' in readme; assert 'TELEGRAM_BOT_TOKEN=' in env and 'CEREBRAS_API_KEY=' in env and 'GROQ_API_KEY=' in env; assert 'OPENROUTER_API_KEY=' not in env
+          assert 'chunk_size=min(600,count)' in broker; assert 'end_time=cursor' in broker; assert not any(Path('.').glob('*_hotfix.py')); print('STATIC SAFETY CONTRACT: PASS')
           PY
       - name: Runtime surface test
         run: |
           python - <<'PY'
           import app
-          assert app.VERSION == '8.5-FULL-BOT-1M-WEBHOOK'
-          assert app.INTERVAL == 60
-          assert app.AUTO_TRADE is False
-          assert app.MARTINGALE is False
-          assert app.FOREX_MODE is False
-          assert app.WEBHOOK_PATH == '/telegram/webhook'
-          c=app.flask_app.test_client()
-          r=c.get('/')
-          assert r.status_code == 200 and '8.5-FULL-BOT-1M-WEBHOOK' in r.get_data(as_text=True)
-          r=c.get('/health')
-          assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'
-          r=c.post('/telegram/webhook', json={})
-          assert r.status_code in {400,503}
-          print('RUNTIME SURFACE: PASS')
+          assert app.VERSION == '8.5-FULL-BOT-1M-WEBHOOK'; assert app.INTERVAL == 60; assert app.AUTO_TRADE is False; assert app.MARTINGALE is False; assert app.FOREX_MODE is False; assert app.WEBHOOK_PATH == '/telegram/webhook'
+          c=app.flask_app.test_client(); r=c.get('/'); assert r.status_code == 200 and '8.5-FULL-BOT-1M-WEBHOOK' in r.get_data(as_text=True); r=c.get('/health'); assert r.status_code == 200 and r.get_data(as_text=True) == 'OK'; r=c.post('/telegram/webhook', json={}); assert r.status_code in {400,503}; print('RUNTIME SURFACE: PASS')
           PY
       - name: Deterministic technical lifecycle test
         run: |
@@ -89,69 +51,31 @@ jobs:
           from candice_engine import technical_snapshot, choose_expiry, EXPIRIES, resample_ohlc, closed_1m
           from candice_broker import Broker
           from app import expiry_boundary
-          assert set(EXPIRIES)=={2,3,5,15}
-          base=1700000100
-          rows=[]; p=100.0
+          assert set(EXPIRIES)=={2,3,5,15}; base=1700000100; rows=[]; p=100.0
           for i in range(1200):
-              o=p; c=p+0.05
-              rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
-              p=c
-          df=pd.DataFrame(rows)
-          closed=closed_1m(df,base+1200*60)
-          assert len(closed)==1200
-          assert closed.timestamp.is_monotonic_increasing and closed.timestamp.is_unique
-          snap=technical_snapshot(closed)
-          assert snap['direction']=='UP'
-          assert choose_expiry(snap) in EXPIRIES
+              o=p; c=p+0.05; rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c}); p=c
+          df=pd.DataFrame(rows); closed=closed_1m(df,base+1200*60); assert len(closed)==1200; assert closed.timestamp.is_monotonic_increasing and closed.timestamp.is_unique; snap=technical_snapshot(closed); assert snap['direction']=='UP'; assert choose_expiry(snap) in EXPIRIES
           for mins in (3,5,10,15):
-              agg=resample_ohlc(closed,mins)
-              assert len(agg)>=60
-              assert agg.timestamp.is_monotonic_increasing and agg.timestamp.is_unique
-              assert technical_snapshot(agg)['direction']=='UP'
-          last=float(df.timestamp.iloc[-1])
-          assert Broker.closed_candle(df,last+60,60).timestamp==last
-          assert Broker.closed_candle(df,last,60).timestamp==last-60
-          for expiry in EXPIRIES:
-              assert expiry_boundary(last,expiry)==last+60+expiry*60
+              agg=resample_ohlc(closed,mins); assert len(agg)>=60; assert agg.timestamp.is_monotonic_increasing and agg.timestamp.is_unique; assert technical_snapshot(agg)['direction']=='UP'
+          last=float(df.timestamp.iloc[-1]); assert Broker.closed_candle(df,last+60,60).timestamp==last; assert Broker.closed_candle(df,last,60).timestamp==last-60
+          for expiry in EXPIRIES: assert expiry_boundary(last,expiry)==last+60+expiry*60
           print('TECHNICAL LIFECYCLE: PASS')
           PY
       - name: Read-only broker to engine integration test
         run: |
           python - <<'PY'
-          import asyncio
-          import time
+          import asyncio, time
           from candice_broker import Broker
           from candice_engine import analyze, EXPIRIES
-          class Conn:
-              is_connected=True
+          class Conn: is_connected=True
           class Market:
               async def get_candles(self,pair,size,count,end_time=None):
-                  # Simulate a broker history cap of 600 candles per request.
-                  anchor=int(end_time if end_time is not None else time.time())
-                  latest=(anchor//60)*60-60
-                  cap=min(count,600)
-                  base=latest-(cap-1)*60
-                  rows=[]; p=100.0
+                  anchor=int(end_time if end_time is not None else time.time()); latest=(anchor//60)*60-60; cap=min(count,600); base=latest-(cap-1)*60; rows=[]; p=100.0
                   for i in range(cap):
-                      o=p; c=p+0.05
-                      rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
-                      p=c
+                      o=p; c=p+0.05; rows.append({'timestamp':base+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c}); p=c
                   return rows
-          class Client:
-              connection=Conn()
-              market=Market()
+          class Client: connection=Conn(); market=Market()
           async def main():
-              broker=Broker('test-token')
-              broker.client=Client()
-              df,err=await broker.candles('ASIA_X',60,1200,360)
-              assert err is None and len(df)==1200
-              assert df.timestamp.is_monotonic_increasing and df.timestamp.is_unique
-              boundary=float(df.timestamp.iloc[-1])+60
-              row,err=await broker.closed_candle_at('ASIA_X',boundary,60,180)
-              assert err is None and row is not None
-              decision=await analyze('ASIA_X',broker,{'samples':0})
-              assert decision.decision in {'APPROVE','REJECT'}
-              assert decision.expiry in set(EXPIRIES)|{0}
-              print('BROKER -> ENGINE READ-ONLY INTEGRATION: PASS')
+              broker=Broker('test-token'); broker.client=Client(); df,err=await broker.candles('ASIA_X',60,1200,360); assert err is None and len(df)==1200; assert df.timestamp.is_monotonic_increasing and df.timestamp.is_unique; boundary=float(df.timestamp.iloc[-1])+60; row,err=await broker.closed_candle_at('ASIA_X',boundary,60,180); assert err is None and row is not None; decision=await analyze('ASIA_X',broker,{'samples':0}); assert decision.decision in {'APPROVE','REJECT'}; assert decision.expiry in set(EXPIRIES)|{0}; print('BROKER -> ENGINE READ-ONLY INTEGRATION: PASS')
           asyncio.run(main())
           PY
