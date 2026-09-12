@@ -57,13 +57,15 @@ class Broker:
         return eligible.iloc[-1]
 
     async def closed_candle_at(self,pair,boundary_ts,interval=60,max_age=180):
+        """Return the exact candle ending at boundary_ts; never fall back to an older candle."""
         # candles() requires >=40 rows, so keep a 60-candle buffer here.
-        # This is also safer around minute-boundary rollover than requesting only 30 rows.
         df,err=await self.candles(pair,interval,60,max_age)
         if err or df is None:return None,err or 'no candle data'
-        row=self.closed_candle(df,boundary_ts,interval)
-        if row is None:return None,'expiry candle not closed yet'
-        return row,None
+        target=float(boundary_ts)-float(interval)
+        d=df.copy().sort_values('timestamp').drop_duplicates('timestamp')
+        matches=d[(d['timestamp'] >= target-0.5) & (d['timestamp'] <= target+0.5)]
+        if matches.empty:return None,'exact expiry candle not available yet'
+        return matches.iloc[-1],None
 
     async def live_assets(self):
         candidates=sorted(self.catalog or set(FLEX_ASSETS))
