@@ -1,9 +1,11 @@
-# Candice v8.3 — secrets must be entered only in Render, never in chat
+# Candice v8.5 — secrets must be entered only in Render, never in chat
 TELEGRAM_BOT_TOKEN=
 ACCESS_CODE=
 OLYMPTRADE_ACCESS_TOKEN=
-OPENROUTER_API_KEY=
-OPENROUTER_MODEL=openrouter/free
+CEREBRAS_API_KEY=
+CEREBRAS_MODEL=gpt-oss-120b
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-120b
 
 # Recommended safety/operation settings
 AI_MIN_CONFIDENCE=72
