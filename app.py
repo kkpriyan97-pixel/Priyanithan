@@ -1,10 +1,10 @@
 from __future__ import annotations
-import asyncio, logging, os, threading, time
+import asyncio, logging, os, threading, time, io
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 from candice_broker import Broker, FLEX_ASSETS
 from candice_engine import analyze, session_state, technical_snapshot
@@ -20,13 +20,20 @@ def reset_daily():
 def session_text():
     s=session_state(); return f'''🤖 CANDICE AI v8\n\n{'🟢 SIGNAL SESSION' if s=='SIGNAL' else '🧠 RESEARCH ONLY'}\n\n📡 Market research: 24/7\n⏱ Scan: every 5 minutes\n🎯 Signal: selected FLEX asset only\n💠 Mode: FLEX / FIXED-TIME\n🚫 Forex mode: OFF\n🚫 Auto-trade: OFF\n🚫 Martingale: OFF\n\nUAE: {now().strftime('%H:%M:%S')}'''
 async def send_card(cid,kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason=''):
-    if tg_app is None:return
+    if tg_app is None:
+        log.warning('TELEGRAM GIF SKIPPED: bot not initialized kind=%s asset=%s',kind,asset); return
     try:
         payload=gif_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason)
+        if not isinstance(payload,io.BytesIO):
+            payload=io.BytesIO(payload)
+        payload.seek(0)
         payload.name='candice.gif'
-        await tg_app.bot.send_animation(chat_id=cid,animation=InputFile(payload,filename='candice.gif'),caption='Candice AI • Live Market • Manual Trade Only')
+        header=payload.read(6); payload.seek(0)
+        log.info('TELEGRAM GIF SEND START kind=%s asset=%s bytes=%s header=%s',kind,asset,payload.getbuffer().nbytes,header)
+        await tg_app.bot.send_animation(chat_id=cid,animation=payload,caption='Candice AI • Live Market • Manual Trade Only',read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
         log.info('TELEGRAM GIF SENT kind=%s asset=%s',kind,asset)
-    except Exception as e: log.warning('visual card failed: %s',e)
+    except Exception as e:
+        log.exception('TELEGRAM GIF FAILED kind=%s asset=%s: %s',kind,asset,e)
 def keyboard(assets):
     rows=[]
     for i in range(0,len(assets),2): rows.append([InlineKeyboardButton(a,callback_data=f'asset:{a}') for a in assets[i:i+2]])
@@ -66,7 +73,7 @@ async def result_monitor(uid,signal):
     await send_card(uid,'result',signal.asset,direction=result,reason=f'Entry {signal.entry:.6f} → Exit {price:.6f}')
     await tg_app.bot.send_message(chat_id=uid,text=f'📊 RESULT {result}\n{signal.asset} • {signal.direction} • {signal.expiry}m\nEntry: {signal.entry:.6f}\nExpiry: {price:.6f}\n\nManual signal outcome — not broker account P/L.')
 async def scan_once():
-    reset_daily(); assets=await broker.live_assets()
+    reset_daily(); assets=await broker.live_assets(); log.info('CANDICE SCAN START assets=%d session=%s users=%d',len(assets),session_state(),len(users))
     sem=asyncio.Semaphore(6)
     async def research(asset):
         async with sem:
@@ -77,7 +84,7 @@ async def scan_once():
     if session_state()!='SIGNAL' or not users or daily['losses']>=MAX_DAILY_LOSSES or daily['streak']>=MAX_STREAK:return
     for uid,asset in list(selected.items()):
         if uid in active or asset not in assets:continue
-        a=await analyze(asset,broker,summary(asset))
+        a=await analyze(asset,broker,summary(asset)); log.info('AI ANALYSIS pair=%s decision=%s direction=%s confidence=%s expiry=%s reason=%s',asset,a.decision,a.direction,a.confidence,a.expiry,a.reason)
         if a.decision!='APPROVE':continue
         key=f'{uid}:{asset}:{int(time.time()//300)}'
         if key in sent_keys:continue
