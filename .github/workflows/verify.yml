@@ -22,11 +22,12 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           app=Path('app.py').read_text(); trade=Path('olymptrade_ws/api/trade.py').read_text()
-          assert "VERSION='8.0-CLEAN-TEXT'" in app
+          assert "VERSION='8.1-FINAL-TEXT'" in app
           assert 'AUTO_TRADE=False' in app and 'MARTINGALE=False' in app and 'FOREX_MODE=False' in app
           assert 'delete_webhook' in app and 'start_polling' in app
           assert 'send_message' in app and 'edit_message_text' in app
           assert 'send_photo' not in app and 'send_animation' not in app and 'InputMedia' not in app
+          assert 'closed_candle_at' in app and 'closed_candle' in app
           assert "RuntimeError('Candice v8 is read-only" in trade
           assert not any(Path('.').glob('*_hotfix.py'))
           print('CANDICE V8 TEXT-ONLY SAFETY VERIFY OK')
