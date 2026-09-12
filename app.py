@@ -1,542 +1,157 @@
-import asyncio
-import logging
-import os
-import sys
-import threading
-import time
-from datetime import datetime, timedelta, timezone
+from __future__ import annotations
+import asyncio, logging, os, threading, time
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-
-import pandas as pd
-import requests
 from flask import Flask, request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
-from olymptrade_ws import OlympTradeClient
-from olymptrade_ws.olympconfig import parameters
+from candice_broker import Broker, FLEX_ASSETS
+from candice_engine import analyze, session_state, technical_snapshot
+from candice_memory import record, summary
+from candice_ui import gif_bytes
 
-# Render runs this file as __main__. Keep the import name pointed at the same
-# module so startup hotfixes never create a second isolated broker state.
-if __name__ == "__main__":
-    sys.modules.setdefault("app", sys.modules[__name__])
+logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+log=logging.getLogger('candice')
+VERSION='8.0-FRESH-CANDICE'; UAE=ZoneInfo('Asia/Dubai')
+TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); ACCESS=os.getenv('ACCESS_CODE','').strip(); OT_TOKEN=os.getenv('OLYMPTRADE_ACCESS_TOKEN','').strip()
+CHAT=os.getenv('TELEGRAM_CHAT_ID','').strip(); INTERVAL=max(60,int(os.getenv('SCAN_INTERVAL_SECONDS','300'))); MAX_DAILY_LOSSES=max(1,int(os.getenv('DAILY_MAX_LOSSES','5'))); MAX_STREAK=max(1,int(os.getenv('MAX_CONSECUTIVE_LOSSES','3')))
+AUTO_TRADE=False; MARTINGALE=False; FOREX_MODE=False
+flask_app=Flask(__name__); broker=Broker(OT_TOKEN); tg_app=None; loop=None
+users=set(); selected={}; active={}; sent_keys=set(); daily={'date':'','losses':0,'streak':0}
+state_lock=threading.Lock()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-ACCESS_CODE = os.getenv("ACCESS_CODE", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-OLYMPTRADE_ACCESS_TOKEN = os.getenv("OLYMPTRADE_ACCESS_TOKEN", "").strip()
-AI_MIN_CONFIDENCE = int(os.getenv("AI_MIN_CONFIDENCE", "72"))
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
-CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
-CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
-PAIR_ENV = os.getenv("OLYMP_PAIRS", "AUTO").strip()
-ENV_PAIRS = [x.strip().upper() for x in PAIR_ENV.split(",") if x.strip() and x.strip().upper() != "AUTO"]
-SEED_PAIRS = [
-    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
-    "EURJPY", "GBPJPY", "EURGBP", "AUDJPY", "CADJPY", "CHFJPY",
-    "EURUSD_OTC", "GBPUSD_OTC", "USDJPY_OTC", "USDCHF_OTC", "USDCAD_OTC",
-    "AUDUSD_OTC", "NZDUSD_OTC", "EURJPY_OTC", "GBPJPY_OTC", "AUDJPY_OTC",
-    "CADJPY_OTC", "XAUUSD_OTC", "XAGUSD_OTC", "BTCUSD_OTC", "ASIA_X",
-]
-ALLOWED_DURATIONS = (2, 3, 5, 10, 15)
-UAE_TZ = ZoneInfo("Asia/Dubai")
-LIVE_1M_MAX_AGE = 90.0
-LIVE_5M_MAX_AGE = 360.0
-ASSET_PAGE_SIZE = 10
-AUTO_TRADE = False
-MARTINGALE = False
-
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("priyanithan")
-APP_VERSION = "7.0-FRESH-LIVE-ASSET"
-app = Flask(__name__)
-ot_client = None
-runtime_loop = None
-telegram_application = None
-authorized_users = set()
-selected_asset = {}
-active_signal = {}
-asset_cache = {}
-broker_catalog = set()
-state_lock = threading.Lock()
-
-
-def now_uae():
-    return datetime.now(UAE_TZ)
-
-
-def fmt_price(value):
-    try:
-        return f"{float(value):.6f}".rstrip("0").rstrip(".")
-    except Exception:
-        return str(value)
-
-
-def fmt_ts(ts):
-    try:
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone(UAE_TZ).strftime("%H:%M:%S UAE")
-    except Exception:
-        return now_uae().strftime("%H:%M:%S UAE")
-
-
-def wait_seconds_to_next_5m():
-    now = now_uae()
-    target_minute = ((now.minute // 5) + 1) * 5
-    target = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0) if target_minute >= 60 else now.replace(minute=target_minute, second=0, microsecond=0)
-    return max(1.0, (target - now).total_seconds())
-
-
+def now(): return datetime.now(UAE)
 def recipients():
-    ids = set(int(x) for x in authorized_users)
-    if TELEGRAM_CHAT_ID:
-        try:
-            ids.add(int(TELEGRAM_CHAT_ID))
-        except ValueError:
-            pass
-    return ids
+    x=set(users)
+    if CHAT:
+        try:x.add(int(CHAT))
+        except:pass
+    return x
 
+def reset_daily():
+    d=now().date().isoformat()
+    if daily['date']!=d: daily.update(date=d,losses=0,streak=0)
 
-async def send_text(bot, text, chat_id=None):
-    ids = [chat_id] if chat_id is not None else list(recipients())
-    sent = False
-    for cid in ids:
-        try:
-            await bot.send_message(chat_id=int(cid), text=text)
-            sent = True
-        except Exception as exc:
-            log.warning("Telegram send failed chat=%s: %s", cid, exc)
-    return sent
+def session_text():
+    s=session_state(); return f'''🤖 CANDICE AI v8\n\n{'🟢 SIGNAL SESSION' if s=='SIGNAL' else '🧠 RESEARCH ONLY'}\n\n📡 Market research: 24/7\n⏱ Scan boundary: every 5 minutes\n🎯 Signal generation: selected FLEX asset only\n💠 Mode: FLEX / FIXED-TIME\n🚫 Forex mode: OFF\n🚫 Auto-trade: OFF\n🚫 Martingale: OFF\n\nUAE: {now().strftime('%H:%M:%S')}'''
 
+async def send_card(cid,kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason=''):
+    if tg_app is None:return
+    try: await tg_app.bot.send_animation(chat_id=cid,animation=gif_bytes(kind=kind,asset=asset,direction=direction,confidence=confidence,expiry=expiry,reason=reason),caption='Candice AI • Live Market • Manual Trade Only')
+    except Exception as e: log.warning('visual card failed: %s',e)
 
-@app.get("/")
-def home():
-    return f"Priyanithan {APP_VERSION} ONLINE — Telegram controls the live asset selection."
+def keyboard(assets):
+    rows=[]
+    for i in range(0,len(assets),2): rows.append([InlineKeyboardButton(a,callback_data=f'asset:{a}') for a in assets[i:i+2]])
+    return InlineKeyboardMarkup(rows or [[InlineKeyboardButton('No live FLEX assets',callback_data='noop')]])
 
+async def cmd_access(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    if not ACCESS or not ctx.args or ctx.args[0].strip()!=ACCESS: await update.message.reply_text('🔒 Access denied.'); return
+    uid=update.effective_user.id; users.add(uid); await cmd_assets(update,ctx)
 
-@app.get("/health")
-def health():
-    return "OK"
+async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in users: await update.message.reply_text('🔒 Use /access <code> first.'); return
+    await cmd_assets(update,ctx)
 
+async def cmd_assets(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    assets=await broker.live_assets()
+    if not assets: assets=sorted(set(broker.catalog) & set(FLEX_ASSETS))
+    text='🟢 CANDICE FLEX ASSET SELECTOR\n\nSelect ONE live FLEX asset.\nForex mode is OFF.\nAuto-trade is OFF.\n\n'+('\n'.join('• '+a for a in assets) if assets else 'No live assets currently confirmed.')
+    if update.message: await update.message.reply_text(text,reply_markup=keyboard(assets))
+    else: await update.callback_query.message.reply_text(text,reply_markup=keyboard(assets))
 
-@app.get("/status")
-def status():
-    connected = bool(ot_client and getattr(getattr(ot_client, "connection", None), "is_connected", False))
-    return {"version": APP_VERSION, "olymptrade_connected": connected, "live_assets_cached": len(asset_cache), "selected_users": len(selected_asset), "auto_trade": False, "martingale": False}
+async def cmd_status(update,ctx):
+    reset_daily(); a=selected.get(update.effective_user.id,'None'); connected=broker.connected(); await update.message.reply_text(f'''🧠 CANDICE STATUS\nVersion: {VERSION}\nBroker: {'CONNECTED' if connected else 'DISCONNECTED'}\nSelected: {a}\nSession: {session_state()}\nFLEX: ON\nForex: OFF\nAuto-trade: OFF\nMartingale: OFF\nDaily losses: {daily['losses']}/{MAX_DAILY_LOSSES}\nConsecutive losses: {daily['streak']}/{MAX_STREAK}\nScan: every 5 minutes''')
 
+async def cmd_session(update,ctx): await update.message.reply_text(session_text())
 
-@app.post("/telegram/webhook")
-def telegram_webhook():
-    if telegram_application is None or runtime_loop is None:
-        return "Bot is starting", 503
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return "Bad Request", 400
-    try:
-        update = Update.de_json(payload, telegram_application.bot)
-        future = asyncio.run_coroutine_threadsafe(telegram_application.update_queue.put(update), runtime_loop)
-        future.result(timeout=5)
-        return "OK", 200
-    except Exception as exc:
-        log.exception("Telegram webhook failed: %s", exc)
-        return "Webhook processing failed", 500
+async def asset_callback(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    q=update.callback_query; await q.answer(); uid=q.from_user.id
+    if uid not in users:return
+    if not q.data.startswith('asset:'):return
+    asset=q.data.split(':',1)[1].upper()
+    live=await broker.live_assets()
+    if asset not in live: await q.edit_message_text('⚠️ Asset is no longer confirmed live. Use /assets again.'); return
+    selected[uid]=asset
+    await q.edit_message_text(f'✅ {asset} selected.\n\nCandice will research continuously and generate signals only during SIGNAL SESSION.\n\nFLEX / FIXED-TIME • MANUAL ONLY')
+    await send_card(uid,'selected',asset)
 
+def expiry_timestamp(minutes): return time.time()+minutes*60
 
-def run_http_server():
-    try:
-        port = int(os.getenv("PORT", "10000"))
-    except ValueError:
-        port = 10000
-    log.warning("RENDER HTTP SERVER: binding 0.0.0.0:%s", port)
-    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+async def result_monitor(uid,signal):
+    key=f"{signal.asset}:{signal.expiry}:{int(signal.entry_ts//300)}"; expiry=signal.entry_ts+signal.expiry*60
+    while time.time()<expiry: await asyncio.sleep(min(10,max(1,expiry-time.time())))
+    price=None; err=''
+    for _ in range(5):
+        df,e=await broker.candles(signal.asset,60,20,120); err=e or ''
+        if df is not None and not df.empty: price=float(df.close.iloc[-1]); break
+        await asyncio.sleep(3)
+    if price is None: await send_card(uid,'result',signal.asset,direction='RESULT UNRESOLVED',reason=err or 'No fresh expiry price'); return
+    if abs(price-signal.entry)<1e-12: result='DRAW'
+    elif (signal.direction=='UP' and price>signal.entry) or (signal.direction=='DOWN' and price<signal.entry): result='WIN'
+    else: result='LOSS'
+    reset_daily()
+    if result=='LOSS': daily['losses']+=1; daily['streak']+=1
+    elif result=='WIN': daily['streak']=0
+    record({'ts':time.time(),'asset':signal.asset,'direction':signal.direction,'confidence':signal.confidence,'expiry':signal.expiry,'entry':signal.entry,'exit':price,'result':result})
+    active.pop(uid,None)
+    await send_card(uid,'result',signal.asset,direction=result,reason=f'Entry {signal.entry:.6f} → Exit {price:.6f}')
+    await tg_app.bot.send_message(chat_id=uid,text=f'📊 RESULT {result}\n{signal.asset} • {signal.direction} • {signal.expiry}m\nEntry: {signal.entry:.6f}\nExpiry: {price:.6f}\n\nManual trade only — this is a market-signal outcome, not broker account P/L.')
 
+@dataclass
+class Signal:
+    asset:str; direction:str; confidence:int; expiry:int; entry:float; entry_ts:float; reason:str
 
-def normalize_candles(raw):
-    if isinstance(raw, dict):
-        data = raw.get("d", raw)
-        if isinstance(data, list) and data and isinstance(data[0], dict):
-            data = data[0].get("candles", data)
-        raw = data
-    if not isinstance(raw, list):
-        return None
-    rows = []
-    for candle in raw:
-        if not isinstance(candle, dict):
-            continue
-        try:
-            ts = candle.get("timestamp", candle.get("t", candle.get("time")))
-            rows.append({"timestamp": float(ts) if ts is not None else time.time(), "open": float(candle.get("open", candle.get("o"))), "high": float(candle.get("high", candle.get("h"))), "low": float(candle.get("low", candle.get("l"))), "close": float(candle.get("close", candle.get("c")))})
-        except (TypeError, ValueError):
-            continue
-    if not rows:
-        return None
-    df = pd.DataFrame(rows).sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
-    if float(df["timestamp"].iloc[-1]) > 100_000_000_000:
-        df["timestamp"] /= 1000.0
-    return df
+async def scan_once():
+    reset_daily(); assets=await broker.live_assets()
+    # 24/7 read-only research: every eligible asset is inspected while the selected asset is the only signal candidate.
+    for asset in assets[:30]:
+        df,e=await broker.candles(asset,60,60,360)
+        if e is None and df is not None:
+            snap=technical_snapshot(df); record({'ts':time.time(),'asset':asset,'research':True,'direction':snap['direction'],'strength':snap['strength'],'rsi':snap['rsi14'],'adx':snap['adx14']})
+    if session_state()!='SIGNAL' or not users:return
+    if daily['losses']>=MAX_DAILY_LOSSES or daily['streak']>=MAX_STREAK:return
+    for uid,asset in list(selected.items()):
+        if uid in active:continue
+        if asset not in assets:continue
+        mem=summary(asset)
+        a=await analyze(asset,broker,mem)
+        if a.decision!='APPROVE': continue
+        boundary=int(time.time()//300); key=f'{uid}:{asset}:{boundary}'
+        if key in sent_keys:continue
+        sent_keys.add(key); df,e=await broker.candles(asset,60,20,120)
+        if e or df is None:continue
+        entry=float(df.close.iloc[-1]); signal=Signal(asset,a.direction,a.confidence,a.expiry,entry,time.time(),a.reason); active[uid]=signal
+        await send_card(uid,'signal',asset,a.direction,a.confidence,a.expiry,a.reason)
+        await tg_app.bot.send_message(chat_id=uid,text=f'🚨 CANDICE AI SIGNAL\n\nAsset: {asset}\nDirection: {a.direction}\nConfidence: {a.confidence}%\nExpiry: {a.expiry} minutes\nEntry: {entry:.6f}\n\n🧠 {a.reason}\n\nMANUAL TRADE ONLY • AUTO-TRADE OFF')
+        asyncio.create_task(result_monitor(uid,signal))
 
-
-async def on_tick(message):
-    return None
-
-
-def extract_pairs(message):
-    data = message.get("d") if isinstance(message, dict) else None
-    if isinstance(data, dict):
-        data = data.get("instruments", data.get("pairs", data.get("items", data.get("assets", []))))
-    found = set()
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                pair = str(item.get("pair") or item.get("symbol") or item.get("name") or "").strip().upper()
-                if pair:
-                    found.add(pair)
-    return found
-
-
-async def on_instruments(message):
-    found = extract_pairs(message)
-    if found:
-        broker_catalog.update(found)
-        log.info("LIVE BROKER CATALOG: received %s instruments; total=%s", len(found), len(broker_catalog))
-
-
-async def connect_olymptrade():
-    global ot_client
-    if not OLYMPTRADE_ACCESS_TOKEN:
-        log.error("OLYMPTRADE_ACCESS_TOKEN is missing")
-        return
+async def scheduler():
     while True:
-        try:
-            client = OlympTradeClient(access_token=OLYMPTRADE_ACCESS_TOKEN, log_raw_messages=False)
-            client.register_callback(parameters.E_TICK_UPDATE, on_tick)
-            client.register_callback(1054, on_instruments)
-            await client.start()
-            ot_client = client
-            log.warning("OLYMPTRADE LIVE CONNECTION: CONNECTED")
-            while client.connection.is_connected:
-                await asyncio.sleep(5)
-            raise ConnectionError("OlympTrade websocket disconnected")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            ot_client = None
-            log.exception("OLYMPTRADE CONNECTION ERROR: %s", exc)
-            await asyncio.sleep(5)
+        try: await scan_once()
+        except Exception: log.exception('scan cycle failed')
+        await asyncio.sleep(max(30,INTERVAL))
 
-
-async def get_candles(pair, timeframe, count, max_age):
-    client = ot_client
-    if client is None or not client.connection.is_connected:
-        return None, "OlympTrade not connected"
-    try:
-        raw = await client.market.get_candles(pair, timeframe, count)
-    except Exception as exc:
-        return None, f"request failed: {exc}"
-    df = normalize_candles(raw)
-    if df is None or len(df) < 40:
-        return None, f"insufficient candles ({0 if df is None else len(df)})"
-    latest = float(df["timestamp"].iloc[-1])
-    age = time.time() - latest
-    if latest > time.time() + 120:
-        return None, f"future candle rejected age={age:.1f}s"
-    if age > max_age:
-        return None, f"STALE candle rejected age={age:.1f}s"
-    return df, None
-
-
-async def get_expiry_price(pair, expiry_ts):
-    client = ot_client
-    if client is None or not client.connection.is_connected:
-        return None, None, "OlympTrade not connected"
-    last_error = "no expiry candle"
-    for _ in range(8):
-        try:
-            raw = await client.market.get_candles(pair, 60, 20)
-            df = normalize_candles(raw)
-            if df is not None and not df.empty:
-                rows = sorted((float(r["timestamp"]), float(r["close"])) for _, r in df.iterrows() if float(r["close"]) > 0)
-                exact = [x for x in rows if abs(x[0] - expiry_ts) <= 2.0]
-                if exact:
-                    return exact[-1][1], exact[-1][0], "candle-exact"
-                containing = [x for x in rows if x[0] <= expiry_ts < x[0] + 60.0]
-                if containing:
-                    return containing[-1][1], containing[-1][0], "candle-boundary"
-                closed = [x for x in rows if x[0] <= expiry_ts - 0.5]
-                if closed:
-                    return closed[-1][1], closed[-1][0], "candle-closed"
-                last_error = "no candle at or before expiry boundary"
-            else:
-                last_error = "no valid expiry candles"
-        except Exception as exc:
-            last_error = str(exc)
-        await asyncio.sleep(2)
-    return None, None, last_error
-
-
-def verify_result(entry, expiry, direction):
-    if expiry == entry:
-        return "DRAW"
-    return "WIN" if (expiry > entry if direction == "UP" else expiry < entry) else "LOSS"
-
-
-def asset_keyboard(live, page=0):
-    start = page * ASSET_PAGE_SIZE
-    chunk = live[start:start + ASSET_PAGE_SIZE]
-    rows = [[InlineKeyboardButton(f"🟢 {pair}", callback_data=f"asset:{pair}")] for pair in chunk]
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("◀️ PREV", callback_data=f"assets:{page - 1}"))
-    if start + ASSET_PAGE_SIZE < len(live):
-        nav.append(InlineKeyboardButton("NEXT ▶️", callback_data=f"assets:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton("🔄 REFRESH LIVE ASSETS", callback_data="assets:refresh")])
-    return InlineKeyboardMarkup(rows)
-
-
-async def verify_live_pair(pair):
-    df, err = await get_candles(pair, 60, 80, LIVE_1M_MAX_AGE)
-    if df is None:
-        return False, err
-    latest = float(df["timestamp"].iloc[-1])
-    asset_cache[pair] = {"ts": latest, "checked": time.time()}
-    return True, None
-
-
-async def discover_live_assets():
-    candidates = set(broker_catalog)
-    candidates.update(ENV_PAIRS)
-    if not candidates:
-        candidates.update(SEED_PAIRS)
-    candidates = sorted(candidates)
-    sem = asyncio.Semaphore(10)
-    async def check(pair):
-        async with sem:
-            ok, _ = await verify_live_pair(pair)
-            return pair if ok else None
-    results = await asyncio.gather(*(check(pair) for pair in candidates), return_exceptions=True)
-    live = sorted({r for r in results if isinstance(r, str)})
-    log.warning("LIVE ASSET DISCOVERY: candidates=%s live=%s rejected=%s", len(candidates), len(live), len(candidates) - len(live))
-    return live
-
-
-async def send_asset_menu(bot, user_id, note=None):
-    live = await discover_live_assets()
-    if not live:
-        text = "⚠️ NO LIVE ASSETS AVAILABLE\n\nOlympTrade returned no fresh 1-minute candle.\nClosed/stale assets are never shown.\n\nTap REFRESH after the broker connection is live."
-        if note:
-            text = note + "\n\n" + text
-        await send_text(bot, text, user_id)
-        return False
-    text = "📊 LIVE ASSET SELECTION\n\nChoose one asset below.\n🟢 = fresh OlympTrade candle verified\n⏱️ Next signal window = next 5 minutes\n⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n⚠️ Manual trade only — AUTO TRADE OFF"
-    if note:
-        text = note + "\n\n" + text
-    await bot.send_message(chat_id=user_id, text=text, reply_markup=asset_keyboard(live, 0))
-    return True
-
-
-async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        return
-    if not ACCESS_CODE:
-        await update.message.reply_text("❌ ACCESS_CODE is not configured on Render.")
-        return
-    args = context.args or []
-    if not args or args[0].strip() != ACCESS_CODE:
-        await update.message.reply_text("❌ Invalid access code.")
-        return
-    authorized_users.add(int(user.id))
-    await update.message.reply_text("✅ ACCESS VERIFIED\n\n📊 LIVE ASSET SELECTION")
-    await send_asset_menu(context.bot, int(user.id))
-
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        return
-    if int(user.id) not in authorized_users:
-        await update.message.reply_text("Use /access YOUR_ACCESS_CODE first.")
-        return
-    await send_asset_menu(context.bot, int(user.id))
-
-
-async def assets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user or int(user.id) not in authorized_users:
-        await update.message.reply_text("❌ Access required. Use /access YOUR_ACCESS_CODE first.")
-        return
-    await send_asset_menu(context.bot, int(user.id))
-
-
-async def assets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-    uid = int(query.from_user.id)
-    if uid not in authorized_users:
-        await query.message.reply_text("❌ Access required.")
-        return
-    data = query.data or ""
-    if data == "assets:refresh":
-        await query.edit_message_text("🔄 Checking fresh OlympTrade candles...")
-        live = await discover_live_assets()
-        if not live:
-            await query.edit_message_text("⚠️ NO LIVE ASSETS AVAILABLE\n\nOlympTrade returned no fresh 1-minute candle.\nTap /assets again when the broker connection is live.", reply_markup=asset_keyboard([], 0))
-            return
-        await query.edit_message_text("📊 LIVE ASSET SELECTION\n\n🟢 Fresh OlympTrade candle verified. Choose an asset:\n⏱️ Next signal window = next 5 minutes\n⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n⚠️ Manual trade only — AUTO TRADE OFF", reply_markup=asset_keyboard(live, 0))
-        return
-    if data.startswith("assets:"):
-        try:
-            page = int(data.split(":", 1)[1])
-        except ValueError:
-            page = 0
-        live = await discover_live_assets()
-        await query.edit_message_reply_markup(reply_markup=asset_keyboard(live, page))
-        return
-    if data.startswith("asset:"):
-        pair = data.split(":", 1)[1].strip().upper()
-        ok, err = await verify_live_pair(pair)
-        if not ok:
-            await query.message.reply_text(f"⚠️ {pair} is not currently live: {err}\n\nChoose another live asset.")
-            return
-        selected_asset[uid] = pair
-        active_signal.pop(uid, None)
-        await query.message.reply_text(f"✅ ASSET SELECTED — {pair}\n\n🟢 Fresh 1-minute candle verified\n🤖 Candice AI analysis ON\n⏱️ Next signal window = next 5 minutes\n⏱️ AI duration = 2 / 3 / 5 / 10 / 15 MIN\n⚠️ MANUAL TRADE ONLY — AUTO TRADE OFF")
-
-
-def technical_analysis(pair, df1, df5):
-    close = df1["close"]
-    last = float(close.iloc[-1]); prev = float(close.iloc[-2])
-    body = abs(float(df1["close"].iloc[-1]) - float(df1["open"].iloc[-1]))
-    rng = max(1e-12, float(df1["high"].iloc[-1]) - float(df1["low"].iloc[-1]))
-    body_ratio = body / rng
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean().iloc[-1]
-    loss = (-delta.clip(upper=0)).rolling(14).mean().iloc[-1]
-    rs = gain / loss if loss and loss > 0 else 99
-    rv = 100 - (100 / (1 + rs))
-    h5dir = "UP" if float(df5["close"].iloc[-1]) > float(df5["close"].iloc[-2]) else "DOWN"
-    up = down = 0; reasons = []
-    if last > prev: up += 1
-    elif last < prev: down += 1
-    if rv < 35: up += 1; reasons.append("RSI oversold")
-    elif rv > 65: down += 1; reasons.append("RSI overbought")
-    if body_ratio >= 0.55:
-        if last > float(df1["open"].iloc[-1]): up += 1; reasons.append("strong bullish candle")
-        elif last < float(df1["open"].iloc[-1]): down += 1; reasons.append("strong bearish candle")
-    if h5dir == "UP": up += 1
-    else: down += 1
-    signal = "UP" if up > down else "DOWN" if down > up else "NO SIGNAL"
-    confidence = int(min(95, 50 + abs(up - down) * 10))
-    return {"pair": pair, "signal": signal, "confidence": confidence, "trend_5m": h5dir, "reason": "; ".join(reasons) or "mixed structure"}
-
-
-def verify_signal_inputs(pair, df1, df5):
-    if df1 is None or df5 is None:
-        return False, "missing timeframe data"
-    if len(df1) < 40 or len(df5) < 40:
-        return False, "insufficient analysis candles"
-    age = time.time() - float(df1["timestamp"].iloc[-1])
-    if age < -120 or age > LIVE_1M_MAX_AGE:
-        return False, f"1m candle age={age:.1f}s"
-    return True, None
-
-
-async def analyze_asset(pair):
-    df1, err1 = await get_candles(pair, 60, 80, LIVE_1M_MAX_AGE)
-    if df1 is None: return None, err1
-    df5, err5 = await get_candles(pair, 300, 80, LIVE_5M_MAX_AGE)
-    if df5 is None: return None, err5
-    ok, reason = verify_signal_inputs(pair, df1, df5)
-    if not ok: return None, reason
-    tech = technical_analysis(pair, df1, df5)
-    if tech["signal"] == "NO SIGNAL": return None, "technical structure is mixed"
-    ai_reason = tech["reason"]
-    ai_confidence = max(0, min(95, tech["confidence"] + 8))
-    if OPENROUTER_API_KEY:
-        try:
-            prompt = ("You are Candice, a conservative trading-signal analyst. Return only APPROVE or REJECT plus confidence 0-100. Never invent market data. Reject weak or conflicting structure.\n\n" f"Asset: {pair}\nDirection candidate: {tech['signal']}\nTechnical confidence: {tech['confidence']}\n5m trend: {tech['trend_5m']}\nReason: {tech['reason']}")
-            response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, json={"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0}, timeout=20)
-            content = response.json()["choices"][0]["message"]["content"]
-            upper = str(content).upper()
-            if "REJECT" in upper: return None, "Candice AI rejected the setup"
-            import re
-            match = re.search(r"(\d{2,3})", str(content))
-            if match: ai_confidence = int(match.group(1))
-            ai_reason = str(content).replace("\n", " ")[:220]
-        except Exception as exc:
-            log.warning("AI analysis unavailable: %s", exc)
-    if ai_confidence < AI_MIN_CONFIDENCE:
-        return None, f"AI confidence {ai_confidence}% below minimum {AI_MIN_CONFIDENCE}%"
-    return {"pair": pair, "direction": tech["signal"], "price": float(df1["close"].iloc[-1]), "duration": 5, "created_at": time.time(), "ai_confidence": ai_confidence, "confidence": tech["confidence"], "trend_5m": tech["trend_5m"], "candle_time": fmt_ts(float(df1["timestamp"].iloc[-1])), "ai_reason": ai_reason}, None
-
-
-async def monitor_result(bot, uid, signal):
-    expiry_ts = float(signal.get("created_at", time.time())) + signal["duration"] * 60
-    await asyncio.sleep(max(1.0, expiry_ts - time.time()))
-    expiry, expiry_price_ts, source = await get_expiry_price(signal["pair"], expiry_ts)
-    if expiry is None:
-        await send_text(bot, f"⚠️ RESULT UNRESOLVED — {signal['pair']}\nExpiry boundary price unavailable: {source}\nNo result was guessed.", uid)
-        active_signal.pop(uid, None); return
-    result = verify_result(float(signal["price"]), expiry, signal["direction"])
-    await send_text(bot, "📊 TRADE RESULT\n\n" f"📈 {signal['pair']}\n" f"{'⬆️' if signal['direction']=='UP' else '⬇️'} {signal['direction']}\n" f"💰 Entry: {fmt_price(signal['price'])}\n" f"🏁 Expiry: {fmt_price(expiry)}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🕐 Expiry boundary: {fmt_ts(expiry_ts)}\n" f"🔎 Verification: {source}\n" f"📌 Price candle: {fmt_ts(expiry_price_ts)}\n\n" f"{'✅' if result=='WIN' else '❌' if result=='LOSS' else '➖'} {result}\n\n⚠️ RESULT ONLY — AUTO TRADE OFF", uid)
-    active_signal.pop(uid, None)
-    if result == "LOSS":
-        selected_asset.pop(uid, None)
-        await send_asset_menu(bot, uid, "🔁 LOSS → AI will re-check live assets. Choose the next asset.")
-
-
-async def send_signal(bot, uid, signal):
-    arrow = "⬆️ UP" if signal["direction"] == "UP" else "⬇️ DOWN"
-    text = ("🔥 PRIYANITHAN AI SIGNAL 🔥\n\n" f"📈 {signal['pair']}\n" f"{arrow}\n" f"💰 Entry: {fmt_price(signal['price'])}\n" f"⏱️ Duration: {signal['duration']} MIN\n" f"🤖 Candice AI: APPROVED ({signal['ai_confidence']}%)\n" f"📊 Technical: {signal['confidence']}%\n" f"🕯️ 5m Trend: {signal['trend_5m']}\n" f"🕐 Candle: {signal['candle_time']}\n" f"🧠 {signal['ai_reason']}\n\n⚠️ MANUAL TRADE — AUTO TRADE OFF")
-    await send_text(bot, text, uid)
-
-
-async def scan_loop():
-    while True:
-        await asyncio.sleep(wait_seconds_to_next_5m())
-        for uid, pair in list(selected_asset.items()):
-            if uid in active_signal: continue
-            signal, err = await analyze_asset(pair)
-            if signal is None:
-                log.info("AI SCAN NO SIGNAL pair=%s reason=%s", pair, err); continue
-            active_signal[uid] = signal
-            await send_signal(application.bot, uid, signal)
-            asyncio.create_task(monitor_result(application.bot, uid, signal))
-
-
-async def telegram_runtime(application):
-    global runtime_loop, telegram_application
-    telegram_application = application
-    runtime_loop = asyncio.get_running_loop()
-    await application.initialize(); await application.start()
-    webhook_url = os.getenv("RENDER_EXTERNAL_URL", "https://priyanithan.onrender.com").rstrip("/") + "/telegram/webhook"
-    await application.bot.set_webhook(webhook_url)
-    log.warning("TELEGRAM WEBHOOK ACTIVE: %s", webhook_url)
-    try:
-        while True: await asyncio.sleep(3600)
-    finally:
-        await application.stop(); await application.shutdown()
-
-
-async def main_async():
-    global application
-    application = build_application()
-    loop = asyncio.get_running_loop()
-    loop.create_task(connect_olymptrade())
-    loop.create_task(telegram_runtime(application))
-    loop.create_task(scan_loop())
+async def bot_main():
+    global tg_app,loop
+    tg_app=Application.builder().token(TOKEN).build(); loop=asyncio.get_running_loop()
+    tg_app.add_handler(CommandHandler('start',cmd_start)); tg_app.add_handler(CommandHandler('access',cmd_access)); tg_app.add_handler(CommandHandler('assets',cmd_assets)); tg_app.add_handler(CommandHandler('status',cmd_status)); tg_app.add_handler(CommandHandler('session',cmd_session)); tg_app.add_handler(CallbackQueryHandler(asset_callback,r'^asset:'))
+    await tg_app.initialize(); await tg_app.start(); await tg_app.updater.start_polling(drop_pending_updates=True)
+    log.warning('CANDICE TELEGRAM: ONLINE')
+    asyncio.create_task(broker.connect_forever()); asyncio.create_task(scheduler())
     while True: await asyncio.sleep(3600)
 
+@flask_app.get('/')
+def home(): return f'{VERSION} ONLINE — FLEX market-data / manual signals only'
+@flask_app.get('/health')
+def health(): return 'OK'
+@flask_app.get('/status')
+def web_status(): return {'version':VERSION,'broker_connected':broker.connected(),'selected_users':len(selected),'auto_trade':False,'martingale':False,'forex_mode':False,'flex_mode':True}
+@flask_app.post('/telegram/webhook')
+def webhook(): return 'Polling mode active',200
 
-def run():
-    threading.Thread(target=run_http_server, name="render-http", daemon=True).start()
-    asyncio.run(main_async())
+def http(): flask_app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')),threaded=True,use_reloader=False)
 
-
-if __name__ == "__main__":
-    run()
+if __name__=='__main__':
+    if not TOKEN: raise RuntimeError('TELEGRAM_BOT_TOKEN is missing')
+    threading.Thread(target=http,daemon=True).start(); asyncio.run(bot_main())
