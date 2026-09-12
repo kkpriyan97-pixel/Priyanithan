@@ -33,3 +33,19 @@ def today_risk(tz=None):
         if e.get('result')=='LOSS': streak+=1
         else: break
     return {'losses':losses,'streak':streak,'results':len(x)}
+
+def authorized_users():
+    """Load authorized Telegram user IDs from the persistent memory file."""
+    users=set()
+    for e in _load():
+        if e.get('type') == 'authorized_user':
+            try: users.add(int(e.get('user_id')))
+            except Exception: pass
+    return users
+
+def authorize_user(user_id):
+    """Persist a Telegram user authorization without storing access codes."""
+    uid=int(user_id)
+    if uid not in authorized_users():
+        record({'ts': datetime.now(timezone.utc).timestamp(), 'type':'authorized_user', 'user_id':uid})
+    return uid
