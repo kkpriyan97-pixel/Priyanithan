@@ -29,18 +29,38 @@ class Broker:
     async def candles(self,pair,size=60,count=120,max_age=360):
         c=self.client
         if c is None or not c.connection.is_connected:return None,'broker disconnected'
-        try: raw=await c.market.get_candles(pair,size,count)
-        except Exception as e:return None,f'candle request failed: {e}'
-        if not isinstance(raw,list) or len(raw)<40:return None,'insufficient live candles'
-        rows=[]
-        for x in raw:
-            try:
-                ts=float(x.get('timestamp',x.get('t',x.get('time')))); ts=ts/1000 if ts>1e11 else ts
-                rows.append((ts,float(x.get('open',x.get('o'))),float(x.get('high',x.get('h'))),float(x.get('low',x.get('l'))),float(x.get('close',x.get('c')))))
-            except Exception: pass
-        if len(rows)<40:return None,'invalid candle data'
-        rows.sort(); age=time.time()-rows[-1][0]
+        try:
+            size=max(1,int(size)); count=max(1,int(count))
+        except (TypeError,ValueError):
+            size,count=60,120
+        rows=[]; cursor=int(time.time()); chunk_size=min(600,count); max_chunks=8
+        try:
+            for _ in range(max_chunks):
+                need=count-len(rows)
+                if need<=0: break
+                batch_count=min(chunk_size,need)
+                raw=await c.market.get_candles(pair,size,batch_count,end_time=cursor)
+                if not isinstance(raw,list) or not raw: break
+                batch_times=[]
+                for x in raw:
+                    try:
+                        ts=float(x.get('timestamp',x.get('t',x.get('time')))); ts=ts/1000 if ts>1e11 else ts
+                        o=float(x.get('open',x.get('o'))); h=float(x.get('high',x.get('h'))); l=float(x.get('low',x.get('l'))); cl=float(x.get('close',x.get('c')))
+                        rows.append((ts,o,h,l,cl)); batch_times.append(ts)
+                    except Exception: pass
+                if not batch_times: break
+                oldest=min(batch_times); next_cursor=int(oldest-size)-1
+                if next_cursor>=cursor: break
+                cursor=next_cursor
+                if len(raw)<batch_count: break
+        except Exception as e:
+            return None,f'candle request failed: {e}'
+        if len(rows)<40:return None,'insufficient live candles'
+        rows=sorted(set(rows),key=lambda x:x[0])
+        age=time.time()-rows[-1][0]
         if age>max_age:return None,f'stale candle age={age:.1f}s'
+        if len(rows)<count:
+            log.info('CANDLE HISTORY pair=%s requested=%d received=%d',pair,count,len(rows))
         return pd.DataFrame(rows,columns=['timestamp','open','high','low','close']),None
 
     @staticmethod
