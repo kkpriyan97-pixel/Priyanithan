@@ -12,7 +12,7 @@ from candice_broker import Broker
 from candice_engine import analyze, session_state, technical_snapshot
 from candice_memory import record, summary, today_risk, authorized_users, authorize_user
 
-VERSION = '8.8-CANDICE-LIVE-TIMER-CARD'
+VERSION = '8.9-CANDICE-LIVE-TIMER-FIX'
 UAE = ZoneInfo('Asia/Dubai')
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 ACCESS = os.getenv('ACCESS_CODE', '').strip()
@@ -49,6 +49,7 @@ class Signal:
     entry: float
     entry_ts: float
     candle_ts: float
+    timeframe: str
     reason: str
     evidence: tuple[str, ...] = ()
 
@@ -152,8 +153,8 @@ async def send_signal_card(cid,asset,direction,entry_ts,candle_ts,expiry,confide
 async def edit_card(cid,mid,s,remaining,phase):
     try:
         photo=build_live_timer_card(s.asset,s.direction,s.entry_ts,s.candle_ts,s.expiry,s.confidence,s.timeframe,s.evidence,remaining,phase)
-        await tg_app.bot.edit_message_media(chat_id=cid,message_id=mid,media=InputMediaPhoto(media=photo)); return True
-    except Exception as e: log.warning('TELEGRAM CARD EDIT FAILED message_id=%s: %s',mid,e); return False
+        await tg_app.bot.edit_message_media(chat_id=cid,message_id=mid,media=InputMediaPhoto(media=photo,filename='candice-timer.jpg')); return True
+    except Exception as e: log.warning('TELEGRAM CARD EDIT FAILED message_id=%s phase=%s remaining=%s: %s',mid,phase,remaining,e); return False
 
 async def edit_text(cid,mid,text,reply_markup=None):
     try: await tg_app.bot.edit_message_text(chat_id=cid,message_id=mid,text=text,reply_markup=reply_markup,disable_web_page_preview=True); return True
@@ -174,7 +175,7 @@ async def cmd_status(update,ctx):
     reset_daily(); uid=update.effective_user.id; await send_text(uid,f'{header("SYSTEM STATUS")}\n\n🛰️ Broker: {"🟢 CONNECTED" if broker.connected() else "🔴 DISCONNECTED"}\n📈 FLEX: {selected.get(uid,"NONE")}\n🔄 Scanner: every 1 minute\n⏱️ Pre-entry alert: {PRE_ENTRY_SECONDS}s\n👤 Authorized users: {len(users)}\n🧠 Session: {session_state()}\n❌ Daily losses: {daily["losses"]}/{MAX_DAILY_LOSSES}\n🔥 Loss streak: {daily["streak"]}/{MAX_STREAK}\n\n🚫 Auto-trade OFF\n🚫 Martingale OFF\n🚫 Forex mode OFF\n🖼️ Visual signal cards + live timer ON')
 
 async def cmd_session(update,ctx):
-    reset_daily(); await send_text(update.effective_user.id,f'{header("LIVE SCAN CONTROL")}\n\n🟢 CONTINUOUS SIGNAL ENGINE\n🔄 Analysis: every 1 minute\n🕯️ Candle: closed 1M\n⏱️ Expiry: 1 / 2 / 3 / 5 / 10 / 15 MIN\n⏳ Pre-entry signal: {PRE_ENTRY_SECONDS} SEC BEFORE ENTRY\n⏱️ Live timer: ON\n🏁 Expiry verification: ACTIVE\n\n🔬 Research: 24/7\n🛡️ Risk gates: ACTIVE\n🚫 Auto-trade OFF • Manual only')
+    reset_daily(); await send_text(update.effective_user.id,f'{header("LIVE SCAN CONTROL")}\n\n🟢 CONTINUOUS SIGNAL ENGINE\n🔄 Analysis: every 1 minute\n🕯️ Candle: closed 1M\n⏱️ Expiry: 1 / 2 / 3 / 5 / 10 / 15 MIN\n⏳ Pre-entry signal: {PRE_ENTRY_SECONDS} SEC BEFORE ENTRY\n⏱️ Live timer: ON\n🏁 Expiry verification: ACTIVE\n🔬 Research: 24/7\n🛡️ Risk gates: ACTIVE\n🚫 Auto-trade OFF • Manual only')
 
 async def cmd_update(update,ctx): await cmd_session(update,ctx)
 
@@ -189,13 +190,18 @@ async def asset_callback(update,ctx):
 
 async def live_timer(cid,msg,s,phase,end):
     if msg is None:return
+    log.info('LIVE TIMER START chat=%s message_id=%s phase=%s seconds=%.1f',cid,msg.message_id,phase,max(0,end-time.time()))
     last=None
     while active.get(cid) is s and time.time()<end:
         rem=max(0,int(end-time.time()))
         if rem!=last:
-            last=rem; await edit_card(cid,msg.message_id,s,rem,phase)
+            last=rem
+            ok=await edit_card(cid,msg.message_id,s,rem,phase)
+            log.info('LIVE TIMER TICK chat=%s message_id=%s phase=%s remaining=%s edit=%s',cid,msg.message_id,phase,rem,ok)
         await asyncio.sleep(0.2)
-    if active.get(cid) is s: await edit_card(cid,msg.message_id,s,0,phase)
+    if active.get(cid) is s:
+        ok=await edit_card(cid,msg.message_id,s,0,phase)
+        log.info('LIVE TIMER END chat=%s message_id=%s phase=%s edit=%s',cid,msg.message_id,phase,ok)
 
 async def result_monitor(uid,s,signal_msg):
     entry_end=s.entry_ts
@@ -245,7 +251,7 @@ async def scan_once():
         msg=await send_signal_card(uid,asset,a.direction,entry_ts,candle_ts,a.expiry,a.confidence,a.timeframe,a.evidence)
         if msg is None:log.warning('SIGNAL NOT RESERVED pair=%s reason=telegram card delivery failed',asset);continue
         log.info('SIGNAL CARD QUALIFIED pair=%s direction=%s entry=%s expiry=%s confidence=%s timeframe=%s',asset,a.direction,datetime.fromtimestamp(entry_ts,UAE).strftime('%H:%M:%S'),a.expiry,a.confidence,a.timeframe)
-        s=Signal(asset,a.direction,a.confidence,a.expiry,entry,entry_ts,candle_ts,a.reason,a.evidence); active[uid]=s; sent_keys.add(key); asyncio.create_task(result_monitor(uid,s,msg))
+        s=Signal(asset,a.direction,a.confidence,a.expiry,entry,entry_ts,candle_ts,a.timeframe,a.reason,a.evidence); active[uid]=s; sent_keys.add(key); asyncio.create_task(result_monitor(uid,s,msg))
 
 async def scheduler():
     while True:
