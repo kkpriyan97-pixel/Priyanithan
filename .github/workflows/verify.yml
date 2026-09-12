@@ -51,14 +51,15 @@ jobs:
 
           assert set(EXPIRIES) == {2,3,5,15} and 10 not in EXPIRIES
 
+          base_ts=1700000040
           rows=[]; p=100.0
           for i in range(1200):
               o=p; c=p+0.05
-              rows.append({'timestamp':1700000000+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
+              rows.append({'timestamp':base_ts+i*60,'open':o,'high':c+0.01,'low':o-0.01,'close':c})
               p=c
           df=pd.DataFrame(rows)
 
-          closed=closed_1m(df,1700000000+1200*60)
+          closed=closed_1m(df,base_ts+1200*60)
           assert len(closed)==1200 and closed.timestamp.is_monotonic_increasing and closed.timestamp.is_unique
           s=technical_snapshot(closed)
           assert s['direction']=='UP' and choose_expiry(s) in EXPIRIES
