@@ -17,8 +17,11 @@ flask_app=Flask(__name__); broker=Broker(OT_TOKEN); tg_app=None; users=set(); se
 def now(): return datetime.now(UAE)
 def reset_daily():
     d=now().date().isoformat(); daily['date']=d; r=today_risk(UAE); daily['losses']=r['losses']; daily['streak']=r['streak']
+def common(title,body,icon='🤖'):
+    return f'''{icon} CANDICE AI • LIVE FLEX\n\n{title}\n\n{body}\n\n━━━━━━━━━━━━━━━━\n📡 LIVE MARKET • AI ANALYSIS\n💠 FLEX / FIXED-TIME • MANUAL ONLY\n🚫 AUTO-TRADE OFF • 🚫 MARTINGALE OFF'''
 def session_text():
-    s=session_state(); return f'''🤖 CANDICE AI v8\n\n{'🟢 SIGNAL SESSION' if s=='SIGNAL' else '🧠 RESEARCH ONLY'}\n\n📡 Market research: 24/7\n⏱ Scan: every 5 minutes\n🎯 Signal: selected FLEX asset only\n💠 Mode: FLEX / FIXED-TIME\n🚫 Forex mode: OFF\n🚫 Auto-trade: OFF\n🚫 Martingale: OFF\n\nUAE: {now().strftime('%H:%M:%S')}'''
+    s=session_state(); state='🟢 SIGNAL SESSION ACTIVE' if s=='SIGNAL' else '🧠 RESEARCH ONLY'
+    return common(state,f'''📡 Market research: 24/7\n⏱ Scan cycle: every 5 minutes\n🎯 Signal: selected FLEX asset only\n⏱ AI duration: 2 / 3 / 5 / 10 / 15 MIN\n\n🕐 UAE: {now().strftime('%H:%M:%S')}''','🧠')
 async def send_card(cid,kind='selected',asset='ASIA_X',direction='',confidence=0,expiry=0,reason=''):
     if tg_app is None:
         log.warning('TELEGRAM GIF SKIPPED: bot not initialized kind=%s asset=%s',kind,asset); return
@@ -36,7 +39,7 @@ async def send_update(cid):
         payload=update_gif_bytes(); payload.seek(0); payload.name='candice-update.gif'; header=payload.read(6); payload.seek(0)
         log.info('TELEGRAM UPDATE SEND START version=%s bytes=%s header=%s',VERSION,payload.getbuffer().nbytes,header)
         await tg_app.bot.send_animation(chat_id=cid,animation=InputFile(payload,filename='candice-update.gif'),caption='🎉 CANDICE AI • Major Update • v8.0 FRESH',read_timeout=30,write_timeout=30,connect_timeout=15,pool_timeout=15)
-        await tg_app.bot.send_message(chat_id=cid,text='''🚀 CANDICE AI — MAJOR UPDATE\n\n🧠 AI decision gate upgraded\n📡 Live FLEX research + fresh-candle verification\n🎯 Conservative signal approval\n⏱ Smart 2 / 3 / 5 / 10 / 15 minute expiry\n🧠 WIN / LOSS / DRAW evidence memory\n🛡️ Daily-loss + 3-loss streak protection\n🔄 24/7 research • signal sessions only\n\nObserve → Analyze → Compare → Learn → Decide → Monitor → Evaluate → Improve\n\nFLEX / FIXED-TIME • MANUAL ONLY\n🚫 Auto-trade OFF • 🚫 Martingale OFF''')
+        await tg_app.bot.send_message(chat_id=cid,text=common('🚀 MAJOR UPDATE — v8.0 FRESH','''🧠 AI decision gate upgraded\n📡 Live FLEX research + fresh-candle verification\n🎯 Conservative signal approval\n⏱ Smart 2 / 3 / 5 / 10 / 15 minute expiry\n🧠 WIN / LOSS / DRAW evidence memory\n🛡️ Daily-loss + 3-loss streak protection\n🔄 24/7 research • signal sessions only\n\nObserve → Analyze → Compare → Learn → Decide → Monitor → Evaluate → Improve''','🚀'))
         log.info('TELEGRAM UPDATE SENT version=%s',VERSION)
     except Exception as e: log.exception('TELEGRAM UPDATE FAILED version=%s: %s',VERSION,e)
 def keyboard(assets):
@@ -44,42 +47,47 @@ def keyboard(assets):
     for i in range(0,len(assets),2): rows.append([InlineKeyboardButton(a,callback_data=f'asset:{a}') for a in assets[i:i+2]])
     return InlineKeyboardMarkup(rows or [[InlineKeyboardButton('No live FLEX assets',callback_data='noop')]])
 async def cmd_access(update,ctx):
-    if not ACCESS or not ctx.args or ctx.args[0].strip()!=ACCESS: await update.message.reply_text('🔒 Access denied.'); return
+    if not ACCESS or not ctx.args or ctx.args[0].strip()!=ACCESS: await update.message.reply_text('🔒 CANDICE AI\n\nAccess denied.'); return
     users.add(update.effective_user.id); await send_update(update.effective_user.id); await cmd_assets(update,ctx)
 async def cmd_start(update,ctx):
-    if update.effective_user.id not in users: await update.message.reply_text('🔒 Use /access <code> first.'); return
+    if update.effective_user.id not in users: await update.message.reply_text('🔒 CANDICE AI\n\nUse /access <code> first.'); return
     await cmd_assets(update,ctx)
 async def cmd_update(update,ctx):
-    if update.effective_user.id not in users: await update.message.reply_text('🔒 Use /access <code> first.'); return
+    if update.effective_user.id not in users: await update.message.reply_text('🔒 CANDICE AI\n\nUse /access <code> first.'); return
     await send_update(update.effective_user.id)
 async def cmd_assets(update,ctx):
-    assets=await broker.live_assets(); text='🟢 CANDICE FLEX ASSET SELECTOR\n\nSelect ONE live FLEX asset.\nForex mode is OFF.\nAuto-trade is OFF.\n\n'+('\n'.join('• '+a for a in assets) if assets else 'No live assets currently confirmed.')
+    assets=await broker.live_assets(); body='''Select ONE live FLEX asset.\n\n🟢 Fresh 1-minute candle verification is required.\n📡 Candice AI research runs continuously.\n🚫 Forex mode: OFF'''
+    if assets: body+='\n\n'+('\n'.join('• '+a for a in assets))
+    else: body+='\n\n⚠️ No live FLEX assets currently confirmed.'
+    text=common('🟢 FLEX ASSET SELECTOR',body,'🎯')
     if update.message: await update.message.reply_text(text,reply_markup=keyboard(assets))
     else: await update.callback_query.message.reply_text(text,reply_markup=keyboard(assets))
 async def cmd_status(update,ctx):
-    reset_daily(); await update.message.reply_text(f'''🧠 CANDICE STATUS\nVersion: {VERSION}\nBroker: {'CONNECTED' if broker.connected() else 'DISCONNECTED'}\nSelected: {selected.get(update.effective_user.id,'None')}\nSession: {session_state()}\nFLEX: ON\nForex: OFF\nAuto-trade: OFF\nMartingale: OFF\nDaily losses: {daily['losses']}/{MAX_DAILY_LOSSES}\nConsecutive losses: {daily['streak']}/{MAX_STREAK}\nScan: every 5 minutes''')
+    reset_daily(); body=f'''Version: {VERSION}\nBroker: {'CONNECTED' if broker.connected() else 'DISCONNECTED'}\nSelected: {selected.get(update.effective_user.id,'None')}\nSession: {session_state()}\nFLEX: ON\nForex: OFF\nDaily losses: {daily['losses']}/{MAX_DAILY_LOSSES}\nConsecutive losses: {daily['streak']}/{MAX_STREAK}\nScan: every 5 minutes'''; await update.message.reply_text(common('📊 SYSTEM STATUS',body,'📊'))
 async def cmd_session(update,ctx): await update.message.reply_text(session_text())
 async def asset_callback(update,ctx):
     q=update.callback_query; await q.answer(); uid=q.from_user.id
     if uid not in users or not q.data.startswith('asset:'): return
     asset=q.data.split(':',1)[1].upper(); live=await broker.live_assets()
-    if asset not in live: await q.edit_message_text('⚠️ Asset is no longer confirmed live. Use /assets again.'); return
-    selected[uid]=asset; await q.edit_message_text(f'✅ {asset} selected.\n\nCandice researches continuously and generates signals only during SIGNAL SESSION.\n\nFLEX / FIXED-TIME • MANUAL ONLY'); await send_card(uid,'selected',asset)
+    if asset not in live: await q.edit_message_text(common('⚠️ ASSET NO LONGER LIVE','Please use /assets again to select a currently verified FLEX asset.','⚠️')); return
+    selected[uid]=asset; await q.edit_message_text(common(f'✅ ASSET SELECTED — {asset}','''🟢 Fresh 1-minute candle verified\n🤖 Candice AI analysis: ON\n📡 Research: 24/7\n🚀 Signals: SIGNAL SESSION only\n⏱ Next scan window: next 5 minutes\n⏱ AI duration: 2 / 3 / 5 / 10 / 15 MIN''','🎯')); await send_card(uid,'selected',asset)
 @dataclass
 class Signal: asset:str; direction:str; confidence:int; expiry:int; entry:float; entry_ts:float; reason:str
 async def result_monitor(uid,signal):
     expiry=signal.entry_ts+signal.expiry*60
     while time.time()<expiry: await asyncio.sleep(min(10,max(1,expiry-time.time())))
+    await tg_app.bot.send_message(chat_id=uid,text=common(f'🏁 EXPIRY REACHED — {signal.asset}',f'''Direction: {signal.direction}\n💰 Entry: {signal.entry:.6f}\n⏱ Duration: {signal.expiry} MIN\n🕐 Expiry boundary reached: {now().strftime('%H:%M:%S')} UAE\n\n🔎 Verifying the next closed 1-minute candle…\n⏳ Please wait for the verified WIN / LOSS result.''','🏁'))
     price=None; err=''
     for _ in range(5):
         df,e=await broker.candles(signal.asset,60,20,120); err=e or ''
         if df is not None and not df.empty: price=float(df.close.iloc[-1]); break
         await asyncio.sleep(3)
-    if price is None: await send_card(uid,'result',signal.asset,direction='UNRESOLVED',reason=err or 'No fresh expiry price'); active.pop(uid,None); return
+    if price is None:
+        await send_card(uid,'result',signal.asset,direction='UNRESOLVED',reason=err or 'No fresh expiry price'); active.pop(uid,None); await tg_app.bot.send_message(chat_id=uid,text=common(f'⚠️ RESULT UNRESOLVED — {signal.asset}','No fresh closed candle was available for verification. No WIN/LOSS was recorded.','⚠️')); return
     result='DRAW' if price==signal.entry else ('WIN' if ((signal.direction=='UP' and price>signal.entry) or (signal.direction=='DOWN' and price<signal.entry)) else 'LOSS')
     record({'ts':time.time(),'asset':signal.asset,'direction':signal.direction,'confidence':signal.confidence,'expiry':signal.expiry,'entry':signal.entry,'exit':price,'result':result}); reset_daily(); active.pop(uid,None)
     await send_card(uid,'result',signal.asset,direction=result,reason=f'Entry {signal.entry:.6f} → Exit {price:.6f}')
-    await tg_app.bot.send_message(chat_id=uid,text=f'📊 RESULT {result}\n{signal.asset} • {signal.direction} • {signal.expiry}m\nEntry: {signal.entry:.6f}\nExpiry: {price:.6f}\n\nManual signal outcome — not broker account P/L.')
+    await tg_app.bot.send_message(chat_id=uid,text=common(f'📊 TRADE RESULT — {result}',f'''📈 {signal.asset}\nDirection: {signal.direction}\n💰 Entry: {signal.entry:.6f}\n🏁 Exit: {price:.6f}\n⏱ Duration: {signal.expiry} MIN\n🔎 Verification: closed 1-minute candle\n\n{'✅ WIN' if result=='WIN' else ('➖ DRAW' if result=='DRAW' else '❌ LOSS')}\n\n⚠️ Result only — not broker account P/L.''','📊'))
 async def scan_once():
     reset_daily(); assets=await broker.live_assets(); log.info('CANDICE SCAN START assets=%d session=%s users=%d',len(assets),session_state(),len(users))
     sem=asyncio.Semaphore(6)
@@ -99,7 +107,7 @@ async def scan_once():
         df,e=await broker.candles(asset,60,20,120)
         if e or df is None:continue
         entry=float(df.close.iloc[-1]); signal=Signal(asset,a.direction,a.confidence,a.expiry,entry,time.time(),a.reason); active[uid]=signal; sent_keys.add(key)
-        await send_card(uid,'signal',asset,a.direction,a.confidence,a.expiry,a.reason); await tg_app.bot.send_message(chat_id=uid,text=f'🚨 CANDICE AI SIGNAL\n\nAsset: {asset}\nDirection: {a.direction}\nConfidence: {a.confidence}%\nExpiry: {a.expiry} minutes\nEntry: {entry:.6f}\n\n🧠 {a.reason}\n\nMANUAL TRADE ONLY • AUTO-TRADE OFF'); asyncio.create_task(result_monitor(uid,signal))
+        await send_card(uid,'signal',asset,a.direction,a.confidence,a.expiry,a.reason); await tg_app.bot.send_message(chat_id=uid,text=common(f'🔥 CANDICE AI SIGNAL — {asset}',f'''Direction: {a.direction}\n💰 Entry: {entry:.6f}\n⏱ Duration: {a.expiry} MIN\n🤖 Candice AI: APPROVED ({a.confidence}%)\n🧠 Reason: {a.reason}\n\n⏳ Active signal — result will be verified after the duration.''','🚨')); asyncio.create_task(result_monitor(uid,signal))
 async def scheduler():
     while True:
         wait=300-(time.time()%300); await asyncio.sleep(max(1,wait))
