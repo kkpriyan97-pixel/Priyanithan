@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio, logging, time
+import pandas as pd
 from olymptrade_ws import OlympTradeClient
 
 log=logging.getLogger('candice.broker')
@@ -17,7 +18,7 @@ class Broker:
                     p=str(x.get('pair') or x.get('symbol') or x.get('name') or '').upper()
                     if p in FLEX_ASSETS or p.endswith('_OTC'): self.catalog.add(p)
     async def connect_forever(self):
-        if not self.token: raise RuntimeError('OLYMPTRADE_ACCESS_TOKEN is missing')
+        if not self.token: raise RuntimeError('OLYMPIATRADE_ACCESS_TOKEN is missing')
         while True:
             try:
                 c=OlympTradeClient(access_token=self.token,log_raw_messages=False); c.register_callback(1054,self._instruments); await c.start(); self.client=c; log.warning('CANDICE BROKER: LIVE CONNECTED (FLEX market data only)')
@@ -36,12 +37,32 @@ class Broker:
             try:
                 ts=float(x.get('timestamp',x.get('t',x.get('time')))); ts=ts/1000 if ts>1e11 else ts
                 rows.append((ts,float(x.get('open',x.get('o'))),float(x.get('high',x.get('h'))),float(x.get('low',x.get('l'))),float(x.get('close',x.get('c')))))
-            except Exception:pass
+            except Exception: pass
         if len(rows)<40:return None,'invalid candle data'
         rows.sort(); age=time.time()-rows[-1][0]
         if age>max_age:return None,f'stale candle age={age:.1f}s'
-        import pandas as pd
         return pd.DataFrame(rows,columns=['timestamp','open','high','low','close']),None
+
+    @staticmethod
+    def closed_candle(df, boundary_ts=None, interval=60):
+        """Return a candle whose full interval has ended before boundary_ts.
+        Broker candle timestamps are treated as interval-start timestamps.
+        """
+        if df is None or df.empty: return None
+        d=df.copy().sort_values('timestamp').drop_duplicates('timestamp').reset_index(drop=True)
+        if boundary_ts is None: boundary_ts=time.time()
+        cutoff=float(boundary_ts)-float(interval)
+        eligible=d[d['timestamp'] <= cutoff]
+        if eligible.empty: return None
+        return eligible.iloc[-1]
+
+    async def closed_candle_at(self,pair,boundary_ts,interval=60,max_age=180):
+        df,err=await self.candles(pair,interval,30,max_age)
+        if err or df is None:return None,err or 'no candle data'
+        row=self.closed_candle(df,boundary_ts,interval)
+        if row is None:return None,'expiry candle not closed yet'
+        return row,None
+
     async def live_assets(self):
         candidates=sorted(self.catalog or set(FLEX_ASSETS))
         sem=asyncio.Semaphore(6)
