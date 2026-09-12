@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -14,7 +15,7 @@ log = logging.getLogger("candice.engine")
 EXPIRIES = (2, 3, 5, 10, 15)
 MIN_CONF = int(os.getenv("AI_MIN_CONFIDENCE", "72"))
 AI_TIMEOUT = float(os.getenv("AI_TIMEOUT_SECONDS", "18"))
-ANALYSIS_CANDLE_COUNT = max(900, int(os.getenv("ANALYSIS_CANDLE_COUNT", "1000")))
+ANALYSIS_CANDLE_COUNT = max(900, int(os.getenv("ANALYSIS_CANDLE_COUNT", "1200")))
 MIN_CONTEXT_CANDLES = 60
 
 @dataclass
@@ -29,27 +30,45 @@ class Analysis:
     timeframe: str = "5m"
     evidence: tuple[str, ...] = ()
 
+
 def _ema(s, n): return s.ewm(span=n, adjust=False).mean()
+
 def _rsi(s, n=14):
     d=s.diff(); up=d.clip(lower=0).ewm(alpha=1/n,adjust=False).mean(); dn=(-d.clip(upper=0)).ewm(alpha=1/n,adjust=False).mean(); rs=up/dn.replace(0,1e-12); return 100-(100/(1+rs))
+
 def _atr(df,n=14):
     pc=df.close.shift(1); tr=pd.concat([(df.high-df.low),(df.high-pc).abs(),(df.low-pc).abs()],axis=1).max(axis=1); return tr.rolling(n).mean()
+
 def _macd(s): return _ema(s,12)-_ema(s,26)
+
 def _adx(df,n=14):
     up=df.high.diff(); dn=-df.low.diff(); plus=up.where((up>dn)&(up>0),0.0); minus=dn.where((dn>up)&(dn>0),0.0); atr=_atr(df,n).replace(0,1e-12); p=100*plus.ewm(alpha=1/n,adjust=False).mean()/atr; m=100*minus.ewm(alpha=1/n,adjust=False).mean()/atr; dx=100*(p-m).abs()/(p+m).replace(0,1e-12); return dx.ewm(alpha=1/n,adjust=False).mean()
+
 def _psar_direction(df):
     c=df.close; e=_ema(c,5); hh=df.high.rolling(5).max(); ll=df.low.rolling(5).min(); up=(c>e)&(c>ll.shift(1)); down=(c<e)&(c<hh.shift(1)); return "UP" if bool(up.iloc[-1]) else "DOWN" if bool(down.iloc[-1]) else ""
+
 def _donchian(df,n=20):
-    upper=df.high.rolling(n).max().shift(1); lower=df.low.rolling(n).min().shift(1); c=df.close.iloc[-1];
+    upper=df.high.rolling(n).max().shift(1); lower=df.low.rolling(n).min().shift(1); c=df.close.iloc[-1]
     if pd.notna(upper.iloc[-1]) and c>upper.iloc[-1]: return "UP"
     if pd.notna(lower.iloc[-1]) and c<lower.iloc[-1]: return "DOWN"
     return ""
+
 def _roc_direction(c,n=9):
     if len(c)<=n:return ""
     roc=(c.iloc[-1]/c.iloc[-1-n]-1)*100; return "UP" if roc>0 else "DOWN" if roc<0 else ""
+
 def _safe(v,default=0.0):
     try:return float(v) if pd.notna(v) else default
     except Exception:return default
+
+def closed_1m(df: pd.DataFrame, now_ts: float | None = None) -> pd.DataFrame:
+    """Keep only fully closed 1-minute candles; timestamps are interval starts."""
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    cutoff = (int(now_ts) // 60) * 60 - 60
+    d=df.copy().sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
+    return d[d["timestamp"] <= cutoff].reset_index(drop=True)
 
 def technical_snapshot(df: pd.DataFrame) -> dict:
     if len(df)<MIN_CONTEXT_CANDLES: raise ValueError("insufficient candles")
@@ -61,7 +80,15 @@ def technical_snapshot(df: pd.DataFrame) -> dict:
     return {"price":_safe(last.close),"direction":direction,"vote_up":up,"vote_down":down,"strength":strength,"ema9":_safe(e9.iloc[-1]),"ema21":_safe(e21.iloc[-1]),"ema50":_safe(e50.iloc[-1]),"rsi14":_safe(r.iloc[-1]),"macd":_safe(m.iloc[-1]),"macd_signal":_safe(sig.iloc[-1]),"adx14":_safe(adx.iloc[-1]),"atr14":_safe(atr.iloc[-1]),"body_ratio":_safe(body/rng),"range20":_safe(hh.iloc[-1]-ll.iloc[-1]),"prev_close":_safe(prev.close),"psar_direction":psar,"ma_crossover":ma_cross,"donchian_breakout":donchian,"macd_crossover":macd_cross,"roc_direction":roc,"indicator_agreement":agreement,"indicator_conflicts":conflicts,"candle_ts":int(_safe(last.timestamp))}
 
 def resample_ohlc(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    d=df.copy(); d["dt"]=pd.to_datetime(d["timestamp"],unit="s",utc=True); d=d.set_index("dt"); out=d[["open","high","low","close"]].resample(f"{minutes}min",label="right",closed="right").agg({"open":"first","high":"max","low":"min","close":"last"}).dropna().reset_index(); out["timestamp"]=(out["dt"].astype("int64")//10**9).astype(int); return out[["timestamp","open","high","low","close"]]
+    """Aggregate 1m interval-start candles into complete higher-timeframe bars only."""
+    minutes=max(1,int(minutes)); d=df.copy().sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
+    if d.empty:return d[["timestamp","open","high","low","close"]]
+    d["dt"]=pd.to_datetime(d["timestamp"],unit="s",utc=True); d=d.set_index("dt")
+    out=d[["open","high","low","close"]].resample(f"{minutes}min",label="left",closed="left").agg({"open":"first","high":"max","low":"min","close":"last"}).dropna().reset_index()
+    latest_start=int(float(df.sort_values("timestamp").iloc[-1]["timestamp"])); complete_until=latest_start+60
+    out=out[(out["dt"].astype("int64")//10**9 + minutes*60) <= complete_until].copy()
+    out["timestamp"]=(out["dt"].astype("int64")//10**9).astype(int)
+    return out[["timestamp","open","high","low","close"]].reset_index(drop=True)
 
 def choose_expiry(s:dict)->int:
     if s["indicator_agreement"]>=4 and s["strength"]>=.8 and s["adx14"]>=30:return 5
@@ -78,17 +105,19 @@ def ai_review(snapshot,memory):
     if not key:return {"decision":"REJECT","confidence":0,"reason":"AI provider not configured"}
     model=os.getenv("OPENROUTER_MODEL","openrouter/free").strip()
     try:
-        r=requests.post("https://openrouter.ai/api/v1/chat/completions",headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json={"model":model,"messages":[{"role":"system","content":"Return strict JSON only."},{"role":"user","content":_ai_prompt(snapshot,memory)}],"temperature":0.1},timeout=AI_TIMEOUT); r.raise_for_status(); content=r.json()["choices"][0]["message"]["content"]; a=json.loads(content[content.find("{"):content.rfind("}")+1]); return a if isinstance(a,dict) else {"decision":"REJECT","confidence":0,"reason":"invalid AI response"}
+        r=requests.post("https://openrouter.ai/api/v1/chat/completions",headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json={"model":model,"messages":[{"role":"system","content":"Return strict JSON only."},{"role":"user","content":_ai_prompt(snapshot,memory)}],"temperature":0.1,"max_tokens":300},timeout=AI_TIMEOUT); r.raise_for_status(); content=r.json()["choices"][0]["message"]["content"]; a=json.loads(content[content.find("{"):content.rfind("}")+1]); return a if isinstance(a,dict) else {"decision":"REJECT","confidence":0,"reason":"invalid AI response"}
     except Exception as exc:log.warning("AI review unavailable: %s",exc); return {"decision":"REJECT","confidence":0,"reason":"AI review unavailable"}
 
 async def analyze(asset,broker,memory):
     df,err=await broker.candles(asset,60,ANALYSIS_CANDLE_COUNT,360)
-    if err or df is None or len(df)<ANALYSIS_CANDLE_COUNT//2:return Analysis(asset,"REJECT",reason=err or "insufficient fresh candles")
+    if err or df is None:return Analysis(asset,"REJECT",reason=err or "no live candles")
+    base=closed_1m(df)
+    if len(base)<ANALYSIS_CANDLE_COUNT//2:return Analysis(asset,"REJECT",reason=f"insufficient closed candles ({len(base)})")
     try:
-        snap1=technical_snapshot(df); frames={"1m":snap1}
+        snap1=technical_snapshot(base); frames={"1m":snap1}
         for mins in (3,5,10,15):
-            agg=resample_ohlc(df,mins)
-            if len(agg)<MIN_CONTEXT_CANDLES:return Analysis(asset,"REJECT",reason=f"insufficient {mins}m context")
+            agg=resample_ohlc(base,mins)
+            if len(agg)<MIN_CONTEXT_CANDLES:return Analysis(asset,"REJECT",reason=f"insufficient complete {mins}m context ({len(agg)})")
             frames[f"{mins}m"]=technical_snapshot(agg)
     except Exception as exc:return Analysis(asset,"REJECT",reason=f"technical calculation failed: {exc}")
     primary=frames["5m"]; direction=primary["direction"]
