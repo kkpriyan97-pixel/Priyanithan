@@ -54,8 +54,6 @@ def build_application():
     application.add_handler(a.CommandHandler("session", _session_cmd))
 
     visual = importlib.import_module("candice_visual_asset_ui")
-    # Replace the app callback reference as well as the handler. This prevents
-    # any later code from registering the old text-only callback.
     native = getattr(a, "assets_callback", None)
     if native is not None and getattr(native, "__name__", "") != "_callback":
         a._native_assets_callback = native
@@ -66,7 +64,7 @@ def build_application():
 
 
 builtins.build_application = build_application
-for _module in ("candice_visual_cards_hotfix", "candice_visual_asset_ui"):
+for _module in ("candice_visual_cards_hotfix", "candice_visual_asset_ui", "candice_flex_only_hotfix"):
     try:
         importlib.import_module(_module)
     except Exception:
