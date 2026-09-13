@@ -13,6 +13,20 @@ def _runtime_ready(app):
         return False
 
 
+def _install_own_brain_247_standalone(app):
+    """Start the independent Own Brain layer without waiting for Telegram."""
+    try:
+        if getattr(app, '_candice_own_brain_247', False):
+            return True
+        from candice_own_brain_247 import install as install_own_brain_247
+        install_own_brain_247(app)
+        print('CANDICE OWN BRAIN 24/7 STANDALONE — TELEGRAM START NOT REQUIRED')
+        return True
+    except Exception as exc:
+        print('CANDICE OWN BRAIN 24/7 STANDALONE FAILED', repr(exc))
+        return False
+
+
 def _notify_strategy_start(app):
     """Send a non-trading startup status to every authorized Telegram user."""
     try:
@@ -128,20 +142,28 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE OWN STRATEGY V4 FAILED', repr(exc))
 
-    # 24/7 Own Brain watcher: observe every newly closed 1m candle.
-    # Observation/learning only. It never calls the AI reviewer and never places trades.
-    # The existing 5m checkpoint remains the only signal gate.
-    try:
-        from candice_own_brain_247 import install as install_own_brain_247
-        install_own_brain_247(app)
-        print('CANDICE OWN BRAIN 24/7 LAYER INSTALLED — EVERY CLOSED 1M CANDLE — 5M SIGNAL GATE ONLY')
-    except Exception as exc:
-        print('CANDICE OWN BRAIN 24/7 LAYER FAILED', repr(exc))
+    # Normally already installed standalone. Keep this guarded fallback for
+    # environments where the standalone pass happened after Telegram readiness.
+    _install_own_brain_247_standalone(app)
 
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7')
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7')
 
 
 def _load_runtime():
+    app = None
+    # Own Brain gets its own startup path. It must not wait for Telegram handlers.
+    for _ in range(300):
+        app = sys.modules.get('app') or sys.modules.get('__main__')
+        if app is not None and hasattr(app, 'scan_once'):
+            if _install_own_brain_247_standalone(app):
+                break
+        time.sleep(0.05)
+    else:
+        print('CANDICE OWN BRAIN 24/7 STANDALONE FAILED: app runtime not ready')
+        return
+
+    # Telegram-dependent layers still wait for Telegram handlers. Their failure or
+    # delayed startup must never stop the independent Own Brain watcher.
     for _ in range(300):
         app = sys.modules.get('app') or sys.modules.get('__main__')
         if app is not None and hasattr(app, 'scan_once') and hasattr(app, '_card_base') and _runtime_ready(app):
@@ -149,7 +171,7 @@ def _load_runtime():
             break
         time.sleep(0.05)
     else:
-        print('CANDICE RUNTIME PATCH FAILED: Telegram handlers were not ready')
+        print('CANDICE TELEGRAM OPTIONAL — handlers not ready; 24/7 Own Brain remains running')
         return
 
     for _ in range(120):
