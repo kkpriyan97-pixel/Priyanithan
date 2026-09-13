@@ -8,6 +8,11 @@ def _load_runtime():
         app = sys.modules.get('app') or sys.modules.get('__main__')
         if app is not None and hasattr(app, 'scan_once') and hasattr(app, '_card_base'):
             try:
+                from candice_telegram_ratefix import install as install_telegram_ratefix
+                install_telegram_ratefix(app)
+            except Exception as exc:
+                print('CANDICE TELEGRAM RATEFIX FAILED', repr(exc))
+            try:
                 from candice_runtime_patch import install
                 install(app)
             except Exception as exc:
