@@ -64,7 +64,6 @@ def _install_layers(app):
 
 
 def _load_runtime():
-    # Wait until Telegram handlers are registered before monkey-patching.
     for _ in range(300):
         app = sys.modules.get('app') or sys.modules.get('__main__')
         if app is not None and hasattr(app, 'scan_once') and hasattr(app, '_card_base') and _runtime_ready(app):
@@ -75,9 +74,6 @@ def _load_runtime():
         print('CANDICE RUNTIME PATCH FAILED: Telegram handlers were not ready')
         return
 
-    # Watchdog: the Telegram dispatch handler resolves app.asset_callback at
-    # callback time, so keep the ready-timer layer installed even if another
-    # runtime layer replaces the callback later during startup/reload.
     for _ in range(120):
         time.sleep(0.5)
         try:
@@ -89,7 +85,7 @@ def _load_runtime():
                 from candice_ready_timer import install as install_ready_timer
                 install_ready_timer(app)
         except Exception as exc:
-            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc)
+            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc))
 
 
 threading.Thread(target=_load_runtime, daemon=True).start()
