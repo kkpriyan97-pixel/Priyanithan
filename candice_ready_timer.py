@@ -5,15 +5,14 @@ import time
 
 
 def install(app):
-    """Show a resilient 5-minute diagnostic countdown and always expose the decision result."""
-    if getattr(app, '_candice_ready_timer_v3', False):
+    """Show a resilient 5-minute signal checkpoint while AI keeps running continuously."""
+    if getattr(app, '_candice_ready_timer_v4', False):
         return
 
     base_asset_callback = app.asset_callback
     tasks = {}
 
     async def safe_timer_edit(uid, message_id, text):
-        """Never let a transient Telegram edit failure kill the countdown task."""
         for attempt in range(3):
             try:
                 return await app.edit_text(uid, message_id, text)
@@ -52,12 +51,12 @@ def install(app):
                     f'🔵 Momentum confirmation\n'
                     f'🟣 Volatility / breakout check\n'
                     f'🟠 MACD confirmation\n'
-                    f'🟡 AI decision gate\n\n'
+                    f'🧠 AI MANAGER • 24/7 ACTIVE\n\n'
                     f'⚡ READY FOR QUALIFIED SIGNAL\n'
                     f'⏱️ 1 / 2 / 3 / 5 / 10 / 15 MIN\n'
                     f'📩 Signal alert • 10 SEC before entry\n\n'
-                    f'🧠 AI DECISION TIMER • {mm:02d}:{ss:02d}\n'
-                    f'🔎 Timer end = AI decision + status report\n\n'
+                    f'⏱️ 5-MIN SIGNAL CHECKPOINT • {mm:02d}:{ss:02d}\n'
+                    f'🔬 AI continues analyzing every 1 MIN — timer is UI/status only\n\n'
                     f'🛡️ MANUAL TRADE ONLY • AUTO-TRADE OFF'
                 )
                 ok = await safe_timer_edit(uid, message_id, text)
@@ -70,20 +69,20 @@ def install(app):
             return
 
         complete = (
-            f'{app.header("DECISION TIMER COMPLETE")}\n\n'
+            f'{app.header("5-MIN SIGNAL CHECKPOINT")}\n\n'
             f'📈 {asset}\n'
-            f'⏱️ 05:00 diagnostic window finished\n\n'
-            f'🔬 Research: CHECKED\n'
-            f'🧠 AI manager: RUNNING NOW\n'
-            f'🎯 Decision: ANALYZING\n\n'
-            f'⏳ Waiting for the actual AI decision result...'
+            f'⏱️ Checkpoint reached\n\n'
+            f'🔬 1M research: CONTINUOUS\n'
+            f'🧠 AI manager: 24/7 ACTIVE\n'
+            f'🎯 Signal gate: CHECKING NOW\n\n'
+            f'⏳ Waiting for the actual qualified decision result...'
         )
         await safe_timer_edit(uid, message_id, complete)
-        app.log.info('ASSET READY TIMER COMPLETE chat=%s asset=%s — FORCE DECISION SCAN START', uid, asset)
+        app.log.info('ASSET READY TIMER COMPLETE chat=%s asset=%s — SIGNAL CHECKPOINT SCAN START', uid, asset)
 
         scan = getattr(app, '_candice_original_scan', None)
         if scan is None:
-            await safe_timer_edit(uid, message_id, complete.replace('RUNNING NOW', 'UNAVAILABLE').replace('ANALYZING', 'NO SIGNAL').replace('⏳ Waiting for the actual AI decision result...', '❌ Decision scanner is unavailable.'))
+            await safe_timer_edit(uid, message_id, complete.replace('ACTIVE', 'UNAVAILABLE').replace('CHECKING NOW', 'UNAVAILABLE').replace('⏳ Waiting for the actual qualified decision result...', '❌ Decision scanner is unavailable.'))
             app.log.error('ASSET READY TIMER DECISION SCAN UNAVAILABLE chat=%s asset=%s', uid, asset)
             return
 
@@ -156,5 +155,5 @@ def install(app):
         tasks[uid] = asyncio.create_task(ready_countdown(uid, q.message.message_id, asset, 300))
 
     app.asset_callback = patched_asset_callback
-    app._candice_ready_timer_v3 = True
-    app.log.info('CANDICE ASSET READY TIMER ACTIVE — RESILIENT 5M COUNTDOWN — DECISION RESULT REPORTING')
+    app._candice_ready_timer_v4 = True
+    app.log.info('CANDICE ASSET READY TIMER ACTIVE — 5M CHECKPOINT — AI 24/7 STATUS — DECISION RESULT REPORTING')
