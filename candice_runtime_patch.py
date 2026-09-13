@@ -10,6 +10,7 @@ def install(app):
         return
     import candice_engine as engine
     import candice_memory as memory
+    from candice_strategy_v2 import build_plan
 
     engine.AI_TIMEOUT = min(float(getattr(engine, 'AI_TIMEOUT', 8.0)), 8.0)
 
@@ -32,6 +33,26 @@ def install(app):
     base_brain = engine.human_brain
     def learned_brain(frames, memory_context=None):
         ctx = memory_context or {}; result = base_brain(frames, ctx)
+        try:
+            primary = frames.get('5m') or frames.get('1m') or {}
+            plan = build_plan(primary, frames, primary.get('candle_patterns', ()))
+            result = dict(result)
+            result['strategy_v2'] = plan.to_dict()
+            result['next_candle_direction'] = plan.next_candle_direction
+            result['next_candle_timeframe'] = plan.next_candle_timeframe
+            result['confirmation_required'] = plan.confirmation_required
+            result['recommended_expiry_v2'] = plan.recommended_expiry
+            result['allowed_expiries_v2'] = plan.allowed_expiries
+            result['situation_v2'] = plan.situation
+            result['risk_flags_v2'] = plan.risk_flags
+            result['strategy_reasons_v2'] = plan.reasons
+            if plan.wait:
+                result['approve'] = False
+                result['expiry'] = 0
+                result['reason'] = 'Strategy V2 WAIT: ' + ('; '.join(plan.reasons + plan.risk_flags) or 'insufficient confirmation')
+            engine.log.info('CANDICE STRATEGY V2 pair=%s pattern=%s situation=%s next=%s/%s expiry=%s wait=%s',ctx.get('asset',''),plan.pattern,plan.situation,plan.next_candle_direction,plan.next_candle_timeframe,plan.recommended_expiry,plan.wait)
+        except Exception as exc:
+            engine.log.warning('CANDICE STRATEGY V2 enrichment failed: %s', exc)
         if not ctx.get('recovery_mode'): return result
         direction = result.get('direction', '')
         aligned = sum(1 for key in ('1m','3m','5m','10m','15m') if frames.get(key, {}).get('direction') == direction)
@@ -63,12 +84,16 @@ def install(app):
 
         primary = frames.get('5m', snap1)
         brain = engine.human_brain(frames, {**(memory_context or {}), 'asset': asset})
+        strategy_v2 = brain.get('strategy_v2', {})
         context_agreement = sum(1 for k in ('10m','15m') if k in frames and frames[k].get('direction') == primary.get('direction'))
         context_conflict = sum(1 for k in ('10m','15m') if k in frames and frames[k].get('direction') and frames[k].get('direction') != primary.get('direction'))
         technical_expiry = engine.choose_expiry(primary, frames)
-        if brain.get('expiry') in engine.EXPIRIES: technical_expiry = brain['expiry']
+        v2_expiry = int(brain.get('recommended_expiry_v2', 0) or 0)
+        if v2_expiry in engine.EXPIRIES and not brain.get('strategy_v2', {}).get('wait', False): technical_expiry = v2_expiry
+        elif brain.get('strategy_v2', {}).get('wait', False): technical_expiry = 0
+        if brain.get('expiry') in engine.EXPIRIES: technical_expiry = brain['expiry'] if not brain.get('strategy_v2', {}).get('wait', False) else 0
 
-        ai_input = {'manager_mode':'CANDICE_AI_ORCHESTRATOR','broker':'Olymptrade market-data feed','olymptrade_ai':'not directly exposed as a public API; do not impersonate or scrape it','decision_role':'main human-like market manager','1m':snap1,'3m':frames.get('3m',{}),'5m':primary,'10m':frames.get('10m',{}),'15m':frames.get('15m',{}),'human_brain_evidence':brain,'context_agreement':context_agreement,'context_conflict':context_conflict,'candidate_expiry':technical_expiry,'hard_rules':{'manual_only':True,'auto_trade':False,'allowed_expiry':list(engine.EXPIRIES),'closed_candle_only':True}}
+        ai_input = {'manager_mode':'CANDICE_AI_ORCHESTRATOR','broker':'Olymptrade market-data feed','olymptrade_ai':'not directly exposed as a public API; do not impersonate or scrape it','decision_role':'main human-like market manager','1m':snap1,'3m':frames.get('3m',{}),'5m':primary,'10m':frames.get('10m',{}),'15m':frames.get('15m',{}),'human_brain_evidence':brain,'strategy_v2':strategy_v2,'next_candle_direction':brain.get('next_candle_direction','WAIT'),'next_candle_timeframe':brain.get('next_candle_timeframe','1m closed candle'),'confirmation_required':brain.get('confirmation_required',''),'situation':brain.get('situation_v2',''),'candidate_expiry':technical_expiry,'hard_rules':{'manual_only':True,'auto_trade':False,'allowed_expiry':list(engine.EXPIRIES),'closed_candle_only':True}}
         ai = await asyncio.to_thread(engine.ai_review, ai_input, memory_context or {})
         decision = str(ai.get('decision','')).upper(); ai_direction = str(ai.get('direction','')).upper()
         raw_conf = float(ai.get('confidence',0) or 0); conf = int(round(raw_conf*100)) if 0 <= raw_conf <= 1 else int(round(raw_conf)); conf=max(0,min(100,conf))
@@ -78,6 +103,7 @@ def install(app):
         agreement = int(primary.get('indicator_agreement',0) or 0)
 
         if decision != 'APPROVE': return finish(engine.Analysis(asset,'REJECT',direction=ai_direction,confidence=conf,expiry=ai_exp,score=float(brain.get('score',0)),reason=str(ai.get('reason','AI manager WAIT')),timeframe='1m+3m+5m+10m+15m',evidence=tuple(brain.get('patterns',()))))
+        if brain.get('strategy_v2', {}).get('wait'): return finish(engine.Analysis(asset,'REJECT',direction=ai_direction,confidence=conf,expiry=ai_exp,score=float(brain.get('score',0)),reason='Strategy V2 WAIT — next-candle/context confirmation not safe',timeframe='1m+3m+5m+10m+15m',evidence=tuple(brain.get('patterns',()))))
         if ai_direction not in {'UP','DOWN'}: return finish(engine.Analysis(asset,'REJECT',confidence=conf,reason='AI manager returned invalid direction'))
         if conf < engine.MIN_CONF: return finish(engine.Analysis(asset,'REJECT',direction=ai_direction,confidence=conf,expiry=ai_exp,reason='AI manager confidence below safety threshold'))
         if not snap1.get('direction') or not primary.get('direction'): return finish(engine.Analysis(asset,'REJECT',direction=ai_direction,confidence=conf,expiry=ai_exp,reason='No dominant market direction'))
@@ -85,9 +111,6 @@ def install(app):
         if context_conflict >= 2 and primary.get('strength',0) < 1.0: return finish(engine.Analysis(asset,'REJECT',direction=ai_direction,confidence=conf,expiry=ai_exp,reason='Higher-timeframe context conflicts'))
         if recovery and not (conf >= 78 and aligned >= 4 and agreement >= 4 and brain.get('regime') in {'trend','breakout'}): return finish(engine.Analysis(asset,'REJECT',direction=ai_direction,confidence=conf,expiry=ai_exp,reason='RECOVERY STRICT manager gate'))
 
-        # AI may approve direction but omit/return expiry=0. Repair only from the
-        # deterministic technical/human selector, and only when its direction
-        # agrees with the approved market direction. Never invent/force expiry.
         final_expiry = ai_exp
         expiry_source = 'AI'
         if final_expiry not in engine.EXPIRIES:
@@ -101,7 +124,7 @@ def install(app):
         indicator_evidence = tuple(name for name,value in (('Parabolic SAR Reversal',primary.get('psar_direction')),('Moving Average Crossover',primary.get('ma_crossover')),('Donchian Channel Breakout',primary.get('donchian_breakout')),('MACD Crossover',primary.get('macd_crossover')),('Rate of Change Crossover',primary.get('roc_direction'))) if value == ai_direction)
         candle_evidence = tuple(primary.get('bullish_patterns',()) if ai_direction == 'UP' else primary.get('bearish_patterns',()))
         evidence = tuple(dict.fromkeys(indicator_evidence + candle_evidence))
-        engine.log.info('CANDICE AI ORCHESTRATOR pair=%s decision=%s direction=%s confidence=%s expiry=%s expiry_source=%s regime=%s brain_score=%.2f aligned=%s recovery=%s', asset,decision,ai_direction,conf,final_expiry,expiry_source,brain.get('regime',''),float(brain.get('score',0)),aligned,recovery)
+        engine.log.info('CANDICE AI ORCHESTRATOR pair=%s decision=%s direction=%s confidence=%s expiry=%s expiry_source=%s regime=%s v2_situation=%s next=%s/%s pattern=%s brain_score=%.2f aligned=%s recovery=%s',asset,decision,ai_direction,conf,final_expiry,expiry_source,brain.get('regime',''),brain.get('situation_v2',''),brain.get('next_candle_direction',''),brain.get('next_candle_timeframe',''),brain.get('strategy_v2',{}).get('pattern',''),float(brain.get('score',0)),aligned,recovery)
         return finish(engine.Analysis(asset,'APPROVE',direction=ai_direction,confidence=conf,expiry=final_expiry,score=float(brain.get('score',0)),reason=str(ai.get('reason','AI manager approved after multi-source analysis')),timeframe='1m+3m+5m+10m+15m',evidence=evidence))
 
     app._candice_last_analysis = {}; app.analyze = orchestrator_analyze
@@ -124,4 +147,4 @@ def install(app):
                 else: app.log.info('CANDICE RESEARCH 1M REJECT pair=%s reason=%s',asset,err or 'no fresh candles')
         except Exception: app.log.exception('CANDICE 1M research-only cycle failed')
     app.scan_once=patched_scan_once; app.SIGNAL_CADENCE_MINUTES=5; app.SIGNAL_WINDOW_SECOND=50; app._candice_runtime_patch_v5=True
-    app.log.info('CANDICE RUNTIME PATCH V5 ACTIVE — 1M AI — 5M SIGNAL CHECKPOINT — SAFE EXPIRY REPAIR — OUTCOME LEARNING')
+    app.log.info('CANDICE RUNTIME PATCH V5 ACTIVE — 1M AI — 5M SIGNAL CHECKPOINT — SAFE EXPIRY REPAIR — OUTCOME LEARNING — STRATEGY V2')
