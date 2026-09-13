@@ -65,6 +65,13 @@ def _install_layers(app):
         print('CANDICE STRATEGY V2 ACTIVE — PATTERN → NEXT CANDLE → SITUATION → DURATION')
     except Exception as exc:
         print('CANDICE STRATEGY V2 FAILED', repr(exc))
+    try:
+        from candice_strategy_v4 import build_plan as build_plan_v4
+        app._candice_strategy_v2_builder = build_plan_v4
+        app._candice_own_strategy_v4 = True
+        print('CANDICE OWN STRATEGY V4 ACTIVE — MEMORY → PROBABILITY → SESSION → NEXT CANDLE GATE')
+    except Exception as exc:
+        print('CANDICE OWN STRATEGY V4 FAILED', repr(exc))
     print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST')
 
 
@@ -90,8 +97,7 @@ def _load_runtime():
                 from candice_ready_timer import install as install_ready_timer
                 install_ready_timer(app)
         except Exception as exc:
-            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc)
-            )
+            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc))
 
 
 threading.Thread(target=_load_runtime, daemon=True).start()
