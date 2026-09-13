@@ -86,7 +86,6 @@ def install(app):
         if brain.get('expiry') in engine.EXPIRIES:
             candidate = brain['expiry']
 
-        # Hard safety context is supplied to the AI; it cannot bypass these later checks.
         ai_input = {
             'manager_mode': 'CANDICE_AI_ORCHESTRATOR',
             'broker': 'Olymptrade market-data feed',
@@ -114,7 +113,6 @@ def install(app):
         aligned = sum(1 for key in ('1m','3m','5m','10m','15m') if frames.get(key, {}).get('direction') == ai_direction)
         agreement = int(primary.get('indicator_agreement', 0) or 0)
 
-        # Final non-bypassable safety rails. AI remains the primary decision maker.
         if decision != 'APPROVE':
             return engine.Analysis(asset, 'REJECT', direction=ai_direction, confidence=conf, expiry=ai_exp, score=float(brain.get('score', 0)), reason=str(ai.get('reason', 'AI manager WAIT')), timeframe='1m+3m+5m+10m+15m', evidence=tuple(brain.get('patterns', ())))
         if ai_direction not in {'UP', 'DOWN'}:
@@ -148,6 +146,8 @@ def install(app):
     app.log.info('CANDICE AI ORCHESTRATOR ACTIVE — AI IS MAIN MANAGER — HUMAN BRAIN IS EVIDENCE — HARD SAFETY RAILS ON')
 
     original_scan = app.scan_once
+    app._candice_original_scan = original_scan
+
     async def patched_scan_once():
         now_ts = time.time(); minute = int(now_ts // 60)
         slot = (minute % 5) == 4
