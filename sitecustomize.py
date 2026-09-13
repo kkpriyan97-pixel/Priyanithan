@@ -18,6 +18,11 @@ def _load_runtime():
             except Exception as exc:
                 print('CANDICE RECOVERY TIMER FAILED', repr(exc))
             try:
+                from candice_ready_timer import install as install_ready_timer
+                install_ready_timer(app)
+            except Exception as exc:
+                print('CANDICE READY TIMER FAILED', repr(exc))
+            try:
                 from candice_card_override import install as install_card
                 install_card(app)
             except Exception as exc:
