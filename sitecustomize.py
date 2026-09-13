@@ -23,6 +23,11 @@ def _load_runtime():
             except Exception as exc:
                 print('CANDICE AI 24/7 FAILED', repr(exc))
             try:
+                from candice_checkpoint import install as install_checkpoint
+                install_checkpoint(app)
+            except Exception as exc:
+                print('CANDICE 5M CHECKPOINT FAILED', repr(exc))
+            try:
                 from candice_recovery_timer import install as install_recovery_timer
                 install_recovery_timer(app)
             except Exception as exc:
