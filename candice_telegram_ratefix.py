@@ -6,7 +6,7 @@ import time
 
 def install(app):
     """Serialize Telegram edits, throttle traffic, and honor flood-control cooldowns."""
-    if getattr(app, '_candice_telegram_ratefix_v2', False):
+    if getattr(app, '_candice_telegram_ratefix_v3', False):
         return
 
     original_edit_text = app.edit_text
@@ -39,7 +39,10 @@ def install(app):
     async def safe_call(cid, fn, *args):
         await wait_turn(cid)
         try:
-            return await fn(*args)
+            # IMPORTANT: cid belongs to the wrapped app method and must be
+            # passed through. The previous V2 wrapper accidentally dropped it,
+            # causing Telegram editMessageText to receive the text as message_id.
+            return await fn(cid, *args)
         except Exception as exc:
             retry = retry_seconds(exc)
             if retry is not None:
@@ -56,5 +59,5 @@ def install(app):
 
     app.edit_text = safe_edit_text
     app.edit_card = safe_edit_card
-    app._candice_telegram_ratefix_v2 = True
-    app.log.info('CANDICE TELEGRAM RATEFIX V2 ACTIVE — %.2fs minimum interval + RetryAfter cooldown', minimum_interval)
+    app._candice_telegram_ratefix_v3 = True
+    app.log.info('CANDICE TELEGRAM RATEFIX V3 ACTIVE — %.2fs minimum interval + RetryAfter cooldown', minimum_interval)
