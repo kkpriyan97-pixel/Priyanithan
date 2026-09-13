@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import time
 
 
 def install(app):
-    """Run Own Brain V4 on every newly closed 1m candle, 24/7.
+    """Run Own Brain V4 independently on every newly closed 1m candle, 24/7.
 
-    This is observation/learning only. It never calls the AI reviewer and never
-    places a trade. The existing 5m checkpoint remains the only signal gate.
+    Observation/learning only. Never calls the AI reviewer and never places a trade.
+    The existing 5m checkpoint remains the only signal gate.
     """
     if getattr(app, '_candice_own_brain_247', False):
         return
@@ -15,24 +16,40 @@ def install(app):
     import candice_engine as engine
     from candice_strategy_v4 import build_plan
 
-    original_scan = app.scan_once
-    app._candice_brain_247_original_scan = original_scan
     app._candice_brain_247_last_minute = {}
 
-    async def brain_watch():
-        try:
-            assets = await app.broker.live_assets()
-            for uid, asset in list(app.selected.items()):
-                if uid in app.active or asset not in assets:
+    async def brain_watch_once():
+        assets = await app.broker.live_assets()
+        selected = list(app.selected.items())
+        app.log.info('CANDICE OWN BRAIN 24/7 TICK assets=%d selected=%d', len(assets), len(selected))
+
+        for uid, asset in selected:
+            try:
+                if uid in app.active:
+                    app.log.info('CANDICE OWN BRAIN 24/7 SKIP pair=%s reason=trade_active', asset)
                     continue
-                df, err = await app.broker.candles(asset, 60, engine.ANALYSIS_CANDLE_COUNT, 360)
+                if asset not in assets:
+                    app.log.info('CANDICE OWN BRAIN 24/7 SKIP pair=%s reason=asset_not_live', asset)
+                    continue
+
+                df, err = await app.broker.candles(
+                    asset, 60, engine.ANALYSIS_CANDLE_COUNT, 360
+                )
                 if err or df is None or len(df) < 120:
-                    app.log.info('CANDICE OWN BRAIN 24/7 WAIT pair=%s reason=%s', asset, err or 'insufficient candles')
+                    app.log.info(
+                        'CANDICE OWN BRAIN 24/7 WAIT pair=%s reason=%s',
+                        asset, err or 'insufficient candles'
+                    )
                     continue
 
                 closed = engine.closed_1m(df)
                 if len(closed) < 120:
+                    app.log.info(
+                        'CANDICE OWN BRAIN 24/7 WAIT pair=%s reason=insufficient closed candles count=%s',
+                        asset, len(closed)
+                    )
                     continue
+
                 candle_minute = int(closed.index[-1].timestamp() // 60)
                 if app._candice_brain_247_last_minute.get(asset) == candle_minute:
                     continue
@@ -45,9 +62,32 @@ def install(app):
                         frames[f'{mins}m'] = engine.technical_snapshot(agg)
 
                 primary = frames.get('5m', frames['1m'])
-                plan = build_plan(primary, frames, primary.get('candle_patterns', ()))
+                plan = build_plan(
+                    primary,
+                    frames,
+                    primary.get('candle_patterns', ())
+                )
+
+                # Record observation only. This does not create a trade outcome.
+                try:
+                    app.record({
+                        'ts': time.time(),
+                        'asset': asset,
+                        'brain_247': True,
+                        'candle_ts': float(closed.index[-1].timestamp()),
+                        'direction': frames['1m'].get('direction', ''),
+                        'pattern': plan.pattern,
+                        'situation': plan.situation,
+                        'next_candle_direction': plan.next_candle_direction,
+                        'next_candle_timeframe': plan.next_candle_timeframe,
+                        'expiry': plan.recommended_expiry,
+                        'wait': bool(plan.wait),
+                    })
+                except Exception as exc:
+                    app.log.warning('CANDICE OWN BRAIN 24/7 MEMORY OBSERVATION FAILED pair=%s: %s', asset, exc)
+
                 app.log.info(
-                    'CANDICE OWN BRAIN 24/7 CANDLE pair=%s candle=%s direction=%s pattern=%s situation=%s next=%s/%s probability_gate=%s expiry=%s wait=%s',
+                    'CANDICE OWN BRAIN 24/7 CANDLE pair=%s candle=%s direction=%s pattern=%s situation=%s next=%s/%s probability_gate=adaptive expiry=%s wait=%s',
                     asset,
                     closed.index[-1].strftime('%H:%M:%S UAE'),
                     frames['1m'].get('direction', ''),
@@ -55,17 +95,34 @@ def install(app):
                     plan.situation,
                     plan.next_candle_direction,
                     plan.next_candle_timeframe,
-                    'adaptive',
                     plan.recommended_expiry,
                     plan.wait,
                 )
-        except Exception:
-            app.log.exception('CANDICE OWN BRAIN 24/7 WATCH FAILED')
+            except Exception:
+                app.log.exception('CANDICE OWN BRAIN 24/7 ASSET WATCH FAILED pair=%s', asset)
 
-    async def patched_scan_once():
-        await brain_watch()
-        await original_scan()
+    async def brain_watch_loop():
+        app.log.info('CANDICE OWN BRAIN 24/7 LOOP STARTED — INDEPENDENT 1M CLOSED-CANDLE LOOP')
+        while True:
+            try:
+                await brain_watch_once()
+            except Exception:
+                app.log.exception('CANDICE OWN BRAIN 24/7 WATCH FAILED')
 
-    app.scan_once = patched_scan_once
+            # Wake shortly after each minute boundary so the newly closed candle is available.
+            now = time.time()
+            next_minute = (int(now // 60) + 1) * 60 + 2
+            await asyncio.sleep(max(1.0, next_minute - time.time()))
+
     app._candice_own_brain_247 = True
-    app.log.info('CANDICE OWN BRAIN 24/7 ACTIVE — EVERY CLOSED 1M CANDLE — SIGNALS STILL 5M ONLY')
+
+    # Do not monkey-patch scan_once: checkpoint/runtime layers may replace it later,
+    # and the base scheduler may hold a direct global reference. Run independently.
+    loop = getattr(app, 'BOT_LOOP', None)
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(asyncio.create_task, brain_watch_loop())
+        app._candice_own_brain_247_task_scheduled = True
+        app.log.info('CANDICE OWN BRAIN 24/7 ACTIVE — INDEPENDENT LOOP SCHEDULED')
+    else:
+        app._candice_own_brain_247_task_scheduled = False
+        app.log.warning('CANDICE OWN BRAIN 24/7 ACTIVE — LOOP NOT READY, STARTUP RETRY REQUIRED')
