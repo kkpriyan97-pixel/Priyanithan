@@ -18,6 +18,11 @@ def _load_runtime():
             except Exception as exc:
                 print('CANDICE RUNTIME PATCH FAILED', repr(exc))
             try:
+                from candice_ai_247 import install as install_ai_247
+                install_ai_247(app)
+            except Exception as exc:
+                print('CANDICE AI 24/7 FAILED', repr(exc))
+            try:
                 from candice_recovery_timer import install as install_recovery_timer
                 install_recovery_timer(app)
             except Exception as exc:
