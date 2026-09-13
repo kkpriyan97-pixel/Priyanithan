@@ -29,17 +29,28 @@ def install(app):
         return data
     app.summary = learned_summary
 
+    # Resolve Own Brain at install time. sitecustomize loads layers sequentially,
+    # so the V4 builder may not be attached to app yet. Prefer V4 directly.
+    strategy_builder = getattr(app, '_candice_strategy_v2_builder', None)
+    strategy_version = 'V4' if getattr(app, '_candice_own_strategy_v4', False) and strategy_builder else ''
+    if not strategy_builder:
+        try:
+            from candice_strategy_v4 import build_plan as strategy_builder
+            strategy_version = 'V4'
+            app._candice_strategy_v2_builder = strategy_builder
+            app._candice_own_strategy_v4 = True
+            app.log.info('CANDICE OWN STRATEGY V4 RESOLVED DIRECTLY BY RUNTIME')
+        except Exception as exc:
+            app.log.warning('CANDICE OWN STRATEGY V4 DIRECT RESOLUTION FAILED: %s', exc)
+            from candice_strategy_v2 import build_plan as strategy_builder
+            strategy_version = 'V2'
+            app.log.info('CANDICE STRATEGY V2 SAFETY FALLBACK RESOLVED BY RUNTIME')
+
     base_brain = engine.human_brain
     def learned_brain(frames, memory_context=None):
         ctx = memory_context or {}; result = base_brain(frames, ctx)
         try:
             primary = frames.get('5m') or frames.get('1m') or {}
-            # Use the runtime-selected Own Brain builder when available.
-            # sitecustomize installs V4 here; V2 remains the safe fallback.
-            strategy_builder = getattr(app, '_candice_strategy_v2_builder', None)
-            strategy_version = 'V4' if getattr(app, '_candice_own_strategy_v4', False) and strategy_builder else 'V2'
-            if strategy_builder is None:
-                from candice_strategy_v2 import build_plan as strategy_builder
             plan = strategy_builder(primary, frames, primary.get('candle_patterns', ()))
             result = dict(result)
             result['strategy_v2'] = plan.to_dict()
