@@ -12,19 +12,7 @@ def _runtime_ready(app):
         return False
 
 
-def _load_runtime():
-    # IMPORTANT: wait until Telegram Application + handlers are registered.
-    # Runtime callback monkey-patching before handler registration caused the
-    # ASSET READY callback/timer to race with bot_main().
-    for _ in range(300):
-        app = sys.modules.get('app') or sys.modules.get('__main__')
-        if app is not None and hasattr(app, 'scan_once') and hasattr(app, '_card_base') and _runtime_ready(app):
-            break
-        time.sleep(0.05)
-    else:
-        print('CANDICE RUNTIME PATCH FAILED: Telegram handlers were not ready')
-        return
-
+def _install_layers(app):
     try:
         from candice_telegram_ratefix import install as install_telegram_ratefix
         install_telegram_ratefix(app)
@@ -51,8 +39,6 @@ def _load_runtime():
     except Exception as exc:
         print('CANDICE RECOVERY TIMER FAILED', repr(exc))
     try:
-        # Must be installed AFTER Telegram handlers exist so the dispatch
-        # handler always resolves the patched asset_callback at runtime.
         from candice_ready_timer import install as install_ready_timer
         install_ready_timer(app)
     except Exception as exc:
@@ -63,6 +49,35 @@ def _load_runtime():
     except Exception as exc:
         print('CANDICE CARD OVERRIDE FAILED', repr(exc))
     print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — ASSET TIMER LAST')
+
+
+def _load_runtime():
+    # Wait until Telegram handlers are registered before monkey-patching.
+    for _ in range(300):
+        app = sys.modules.get('app') or sys.modules.get('__main__')
+        if app is not None and hasattr(app, 'scan_once') and hasattr(app, '_card_base') and _runtime_ready(app):
+            _install_layers(app)
+            break
+        time.sleep(0.05)
+    else:
+        print('CANDICE RUNTIME PATCH FAILED: Telegram handlers were not ready')
+        return
+
+    # Watchdog: the Telegram dispatch handler resolves app.asset_callback at
+    # callback time, so keep the ready-timer layer installed even if another
+    # runtime layer replaces the callback later during startup/reload.
+    for _ in range(120):
+        time.sleep(0.5)
+        try:
+            app = sys.modules.get('app') or sys.modules.get('__main__')
+            if app is None or not _runtime_ready(app):
+                continue
+            if not getattr(app, '_candice_ready_timer_v5', False):
+                print('CANDICE READY TIMER WATCHDOG: reinstalling missing layer')
+                from candice_ready_timer import install as install_ready_timer
+                install_ready_timer(app)
+        except Exception as exc:
+            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc))
 
 
 threading.Thread(target=_load_runtime, daemon=True).start()
