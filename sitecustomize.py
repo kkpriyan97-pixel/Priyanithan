@@ -53,6 +53,13 @@ def _install_layers(app):
         install_card(app)
     except Exception as exc:
         print('CANDICE CARD OVERRIDE FAILED', repr(exc))
+    try:
+        from candice_strategy_v2 import build_plan
+        app._candice_strategy_v2_builder = build_plan
+        app._candice_strategy_v2 = True
+        print('CANDICE STRATEGY V2 ACTIVE — PATTERN → NEXT CANDLE → SITUATION → DURATION')
+    except Exception as exc:
+        print('CANDICE STRATEGY V2 FAILED', repr(exc))
     print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — ASSET TIMER LAST')
 
 
@@ -82,7 +89,7 @@ def _load_runtime():
                 from candice_ready_timer import install as install_ready_timer
                 install_ready_timer(app)
         except Exception as exc:
-            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc))
+            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc)
 
 
 threading.Thread(target=_load_runtime, daemon=True).start()
