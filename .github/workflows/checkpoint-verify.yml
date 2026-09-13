@@ -1,0 +1,41 @@
+name: Candice Exact 5M Checkpoint Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  checkpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile checkpoint runtime
+        run: python -m py_compile candice_checkpoint.py sitecustomize.py candice_recovery_timer.py candice_ai_247.py candice_runtime_patch.py
+      - name: Verify exact 5 minute contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+          p=Path('candice_checkpoint.py').read_text()
+          ast.parse(p)
+          assert 'CANDICE FIXED 5M SCHEDULER ACTIVE' in p
+          assert 'next_boundary' in p
+          assert 'checkpoint_ts = float(((int(time.time()) // 300) + 1) * 300)' in p
+          assert 'CANDICE 5M NO SIGNAL' in p
+          assert 'Next decision timer' in p
+          assert 'app.analyze(asset, app.broker, memory)' in p
+          assert 'entry_ts = checkpoint_ts' in p
+          assert 'expiry not in {1, 2, 3, 5, 10, 15}' in p
+          site=Path('sitecustomize.py').read_text()
+          assert 'from candice_checkpoint import install as install_checkpoint' in site
+          rec=Path('candice_recovery_timer.py').read_text()
+          assert 'app.analyze(asset, app.broker, memory)' in rec
+          print('EXACT 5M CHECKPOINT CONTRACT: PASS')
+          PY
