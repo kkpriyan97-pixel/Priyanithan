@@ -1,0 +1,35 @@
+name: Candice Telegram Ratefix Verify
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  verify-ratefix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile runtime patch modules
+        run: python -m py_compile candice_telegram_ratefix.py candice_ready_timer.py candice_recovery_timer.py sitecustomize.py
+      - name: Verify flood-safe contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          rate=Path('candice_telegram_ratefix.py').read_text()
+          site=Path('sitecustomize.py').read_text()
+          ready=Path('candice_ready_timer.py').read_text()
+          recovery=Path('candice_recovery_timer.py').read_text()
+          assert 'minimum_interval = 1.25' in rate
+          assert 'asyncio.Lock' in rate
+          assert 'app.edit_text = safe_edit_text' in rate
+          assert 'app.edit_card = safe_edit_card' in rate
+          assert 'candice_telegram_ratefix' in site
+          assert 'ASSET READY TIMER TICK' in ready
+          assert 'RECOVERY TIMER TICK' in recovery
+          print('TELEGRAM RATEFIX CONTRACT: PASS')
+          PY
