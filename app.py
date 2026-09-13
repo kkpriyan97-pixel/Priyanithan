@@ -132,14 +132,10 @@ def _card_base(asset, direction, entry_ts, candle_ts, expiry, confidence, timefr
     d.text((55,1205),'🛡️ MANUAL TRADE ONLY',font=f_mid,fill=(65,235,155)); d.text((55,1245),'AUTO-TRADE OFF  •  DEMO MODE',font=f_small,fill=(150,185,215)); d.text((735,1208),str(timeframe),font=f_small,fill=(90,185,240)); d.text((735,1245),datetime.fromtimestamp(candle_ts,UAE).strftime('%H:%M:%S UAE'),font=f_small,fill=(125,160,190))
     bio=BytesIO(); img.save(bio,format='JPEG',quality=92,optimize=True); bio.seek(0); return bio
 
-def build_signal_card(asset,direction,entry_ts,candle_ts,expiry,confidence,timeframe,evidence):
-    return _card_base(asset,direction,entry_ts,candle_ts,expiry,confidence,timeframe,evidence,f'{PRE_ENTRY_SECONDS} SEC BEFORE ENTRY','ALERT')
-
+def build_signal_card(asset,direction,entry_ts,candle_ts,expiry,confidence,timeframe,evidence): return _card_base(asset,direction,entry_ts,candle_ts,expiry,confidence,timeframe,evidence,f'{PRE_ENTRY_SECONDS} SEC BEFORE ENTRY','ALERT')
 def build_live_timer_card(asset,direction,entry_ts,candle_ts,expiry,confidence,timeframe,evidence,remaining,phase):
-    if phase=='pre':
-        text=f'{remaining:02d} SEC'; label='ENTRY IN'
-    else:
-        mm,ss=divmod(max(0,int(remaining)),60); text=f'{mm:02d}:{ss:02d}'; label='LIVE TIMER'
+    if phase=='pre': text=f'{remaining:02d} SEC'; label='ENTRY IN'
+    else: mm,ss=divmod(max(0,int(remaining)),60); text=f'{mm:02d}:{ss:02d}'; label='LIVE TIMER'
     return _card_base(asset,direction,entry_ts,candle_ts,expiry,confidence,timeframe,evidence,text,label)
 
 async def send_signal_card(cid,asset,direction,entry_ts,candle_ts,expiry,confidence,timeframe,evidence):
@@ -163,20 +159,14 @@ async def edit_text(cid,mid,text,reply_markup=None):
 async def cmd_access(update,ctx):
     if not ACCESS or not ctx.args or ctx.args[0].strip()!=ACCESS: await update.message.reply_text('🔒 CANDICE AI\n\nAccess denied.'); return
     uid=authorize_user(update.effective_user.id); users.add(uid); log.info('CANDICE USER AUTHORIZED chat=%s persistent_users=%d',uid,len(users)); await cmd_assets(update,ctx)
-
 async def cmd_start(update,ctx):
     if update.effective_user.id not in users: await update.message.reply_text('🔒 CANDICE AI\n\nUse /access <code> first.'); return
     await cmd_assets(update,ctx)
-
 async def cmd_assets(update,ctx):
     assets=await broker.live_assets(); names=' • '.join(assets) if assets else 'No fresh FLEX assets available'; text=(f'{header("FLEX ASSET SELECTOR")}\n\n📈 LIVE MARKET\n🟢 Fresh 1-minute candle VERIFIED\n\n🔥 Available: {len(assets)}\n{names}\n\n⚡ FLEX / FIXED-TIME\n🧠 Candice AI research ACTIVE\n🛡️ Technical + AI confirmation required\n\n👇 Select your asset'); await send_text(update.effective_user.id,text,reply_markup=keyboard(assets))
-
 async def cmd_status(update,ctx):
     reset_daily(); uid=update.effective_user.id; await send_text(uid,f'{header("SYSTEM STATUS")}\n\n🛰️ Broker: {"🟢 CONNECTED" if broker.connected() else "🔴 DISCONNECTED"}\n📈 FLEX: {selected.get(uid,"NONE")}\n🔄 Scanner: every 1 minute\n⏱️ Pre-entry alert: {PRE_ENTRY_SECONDS}s\n👤 Authorized users: {len(users)}\n🧠 Session: {session_state()}\n❌ Daily losses: {daily["losses"]}/{MAX_DAILY_LOSSES}\n🔥 Loss streak: {daily["streak"]}/{MAX_STREAK}\n\n🚫 Auto-trade OFF\n🚫 Martingale OFF\n🚫 Forex mode OFF\n🖼️ Visual signal cards + live timer ON')
-
-async def cmd_session(update,ctx):
-    reset_daily(); await send_text(update.effective_user.id,f'{header("LIVE SCAN CONTROL")}\n\n🟢 CONTINUOUS SIGNAL ENGINE\n🔄 Analysis: every 1 minute\n🕯️ Candle: closed 1M\n⏱️ Expiry: 1 / 2 / 3 / 5 / 10 / 15 MIN\n⏳ Pre-entry signal: {PRE_ENTRY_SECONDS} SEC BEFORE ENTRY\n⏱️ Live timer: ON\n🏁 Expiry verification: ACTIVE\n🔬 Research: 24/7\n🛡️ Risk gates: ACTIVE\n🚫 Auto-trade OFF • Manual only')
-
+async def cmd_session(update,ctx): await cmd_status(update,ctx)
 async def cmd_update(update,ctx): await cmd_session(update,ctx)
 
 async def asset_callback(update,ctx):
@@ -190,24 +180,17 @@ async def asset_callback(update,ctx):
 
 async def live_timer(cid,msg,s,phase,end):
     if msg is None:return
-    log.info('LIVE TIMER START chat=%s message_id=%s phase=%s seconds=%.1f',cid,msg.message_id,phase,max(0,end-time.time()))
-    last=None
+    log.info('LIVE TIMER START chat=%s message_id=%s phase=%s seconds=%.1f',cid,msg.message_id,phase,max(0,end-time.time())); last=None
     while active.get(cid) is s and time.time()<end:
         rem=max(0,int(end-time.time()))
         if rem!=last:
-            last=rem
-            ok=await edit_card(cid,msg.message_id,s,rem,phase)
-            log.info('LIVE TIMER TICK chat=%s message_id=%s phase=%s remaining=%s edit=%s',cid,msg.message_id,phase,rem,ok)
+            last=rem; ok=await edit_card(cid,msg.message_id,s,rem,phase); log.info('LIVE TIMER TICK chat=%s message_id=%s phase=%s remaining=%s edit=%s',cid,msg.message_id,phase,rem,ok)
         await asyncio.sleep(0.2)
     if active.get(cid) is s:
-        ok=await edit_card(cid,msg.message_id,s,0,phase)
-        log.info('LIVE TIMER END chat=%s message_id=%s phase=%s edit=%s',cid,msg.message_id,phase,ok)
+        ok=await edit_card(cid,msg.message_id,s,0,phase); log.info('LIVE TIMER END chat=%s message_id=%s phase=%s edit=%s',cid,msg.message_id,phase,ok)
 
 async def result_monitor(uid,s,signal_msg):
-    entry_end=s.entry_ts
-    await live_timer(uid,signal_msg,s,'pre',entry_end)
-    end=s.entry_ts+int(s.expiry)*60.0
-    await live_timer(uid,signal_msg,s,'trade',end)
+    entry_end=s.entry_ts; await live_timer(uid,signal_msg,s,'pre',entry_end); end=s.entry_ts+int(s.expiry)*60.0; await live_timer(uid,signal_msg,s,'trade',end)
     await send_text(uid,f'{header("EXPIRY VERIFICATION")}\n\n📈 {s.asset}\n➡️ Direction • {s.direction}\n💰 Entry • {s.entry:.6f}\n🕒 Boundary • {datetime.fromtimestamp(end,UAE).strftime("%H:%M:%S UAE")}\n\n🔎 Waiting for the boundary candle to close...')
     row=None; err=''
     for _ in range(8):
@@ -261,12 +244,17 @@ async def scheduler():
         try:await scan_once()
         except Exception:log.exception('scan cycle failed')
 
+async def asset_callback_dispatch(update,ctx):
+    fn=globals().get('asset_callback')
+    if fn is None:return
+    return await fn(update,ctx)
+
 async def bot_main():
     global tg_app,BOT_LOOP
     if not TOKEN:raise RuntimeError('TELEGRAM_BOT_TOKEN is missing')
     BOT_LOOP=asyncio.get_running_loop(); tg_app=Application.builder().token(TOKEN).build()
     for command,fn in [('start',cmd_start),('access',cmd_access),('assets',cmd_assets),('status',cmd_status),('session',cmd_session),('update',cmd_update)]:tg_app.add_handler(CommandHandler(command,fn))
-    tg_app.add_handler(CallbackQueryHandler(asset_callback,r'^asset:')); await tg_app.initialize(); await tg_app.start()
+    tg_app.add_handler(CallbackQueryHandler(asset_callback_dispatch,r'^asset:')); await tg_app.initialize(); await tg_app.start()
     webhook_base=os.getenv('TELEGRAM_WEBHOOK_URL','').strip().rstrip('/')
     if not webhook_base:
         render_url=os.getenv('RENDER_EXTERNAL_URL','').strip().rstrip('/')
