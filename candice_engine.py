@@ -83,8 +83,8 @@ def human_brain(frames:dict,memory:dict|None=None):
     score+=strength*.35+min(agreement,5)*.04+min(adx/40,1)*.10
     if pattern_dir==direction:score+=min(.12,abs(pattern_score)*.18);reasons.append("candlestick pattern confirmation")
     elif pattern_dir and pattern_dir!=direction:score-=min(.16,abs(pattern_score)*.20);reasons.append("candlestick reversal conflict")
-    if bullish_patterns and direction=="UP": reasons.append("bullish candle structure")
-    if bearish_patterns and direction=="DOWN": reasons.append("bearish candle structure")
+    if bullish_patterns and direction=="UP":reasons.append("bullish candle structure")
+    if bearish_patterns and direction=="DOWN":reasons.append("bearish candle structure")
     if ind_conf>=3:score-=.18;reasons.append("indicator conflict")
     if rsi>=75 or rsi<=25:score-=.18;reasons.append("overextended RSI")
     if body<.25:score-=.10;reasons.append("weak candle body")
@@ -135,11 +135,14 @@ def _request_ai(url,key,model,ai_input):
     if not choices:raise RuntimeError("AI response has no choices")
     content=(choices[0].get("message") or {}).get("content","")
     parsed=_parse_ai_content(content)
-    if not parsed:raise RuntimeError("AI returned invalid JSON")
+    if not parsed:raise RuntimeError("AI response is not valid JSON")
     return parsed
 
 def ai_review(ai_input,memory=None):
-    providers=(("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"))
+    providers=(
+        ("GROQ",os.getenv("GROQ_API_KEY"),os.getenv("GROQ_MODEL","openai/gpt-oss-120b"),"https://api.groq.com/openai/v1/chat/completions"),
+        ("CEREBRAS",os.getenv("CEREBRAS_API_KEY"),os.getenv("CEREBRAS_MODEL","gpt-oss-120b"),"https://api.cerebras.ai/v1/chat/completions"),
+    )
     for name,key,model,url in providers:
         if not key:continue
         try:
@@ -163,7 +166,9 @@ def analyze(asset,df,memory=None):
     context_agreement=sum(1 for n in ("3m","10m","15m") if frames.get(n,{}).get("direction")==direction);context_conflict=sum(1 for n in ("3m","10m","15m") if frames.get(n,{}).get("direction") and frames.get(n,{}).get("direction")!=direction)
     if context_agreement<1:return Analysis(asset,"REJECT",direction=direction,expiry=candidate,score=brain["score"],reason="Multi-timeframe alignment is weak",timeframe="1m+3m+5m+10m+15m")
     if context_conflict>=2 and primary["strength"]<1.0:return Analysis(asset,"REJECT",direction=direction,expiry=candidate,score=brain["score"],reason="Higher-timeframe context conflicts",timeframe="1m+5m+10m+15m")
-    ai_input={"1m":frames["1m"],"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"human_brain":brain,"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":candidate};ai=await asyncio.to_thread(ai_review,ai_input,memory or {});decision=str(ai.get("decision","")).upper();ai_direction=str(ai.get("direction","")).upper();raw_conf=float(ai.get("confidence",0) or 0);conf=int(round(raw_conf*100)) if 0 <= raw_conf <= 1 else int(round(raw_conf));conf=max(0,min(100,conf));ai_exp=int(ai.get("expiry",0) or 0)
+    ai_input={"1m":frames["1m"],"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"human_brain":brain,"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":candidate}
+    ai=ai_review(ai_input,memory or {})
+    decision=str(ai.get("decision","")).upper();ai_direction=str(ai.get("direction","")).upper();raw_conf=float(ai.get("confidence",0) or 0);conf=int(round(raw_conf*100)) if 0 <= raw_conf <= 1 else int(round(raw_conf));conf=max(0,min(100,conf));ai_exp=int(ai.get("expiry",0) or 0)
     if decision!="APPROVE" or ai_direction!=direction or conf<MIN_CONF or ai_exp not in EXPIRIES:return Analysis(asset,"REJECT",direction=ai_direction,confidence=conf,expiry=ai_exp,score=brain["score"],reason=str(ai.get("reason","AI gate rejected")),timeframe="1m+3m+5m+10m+15m",evidence=tuple(brain.get("patterns",())))
     indicator_evidence=tuple(name for name,value in (("Parabolic SAR Reversal",primary["psar_direction"]),("Moving Average Crossover",primary["ma_crossover"]),("Donchian Channel Breakout",primary["donchian_breakout"]),("MACD Crossover",primary["macd_crossover"]),("Rate of Change Crossover",primary["roc_direction"])) if value==direction)
     candle_evidence=tuple(primary.get("bullish_patterns",()) if direction=="UP" else primary.get("bearish_patterns",()))
