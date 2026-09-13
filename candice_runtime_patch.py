@@ -6,24 +6,18 @@ from datetime import datetime
 
 def install(app):
     """Runtime compatibility layer for AI learning/cadence without broker access."""
-    if getattr(app, '_candice_runtime_patch_v1', False):
+    if getattr(app, '_candice_runtime_patch_v2', False):
         return
     import candice_engine as engine
     import candice_memory as memory
-
-    # Faster AI timeout keeps the 10-second pre-entry window viable.
     engine.AI_TIMEOUT = min(float(getattr(engine, 'AI_TIMEOUT', 8.0)), 8.0)
-
-    # Feed the AI gate outcome history grouped by direction/expiry.
     base_summary = memory.summary
     def learned_summary(asset=None):
         data = base_summary(asset)
-        events = list(data.get('recent', []))
         by_expiry = dict(data.get('by_expiry', {}))
         by_direction = dict(data.get('by_direction', {}))
         if not by_expiry or not by_direction:
-            all_events = memory.recent(asset, 100)
-            for e in all_events:
+            for e in memory.recent(asset, 100):
                 if e.get('result') not in ('WIN', 'LOSS'):
                     continue
                 ek = str(e.get('expiry', '?')); dk = str(e.get('direction', '?'))
@@ -33,10 +27,14 @@ def install(app):
         data['by_expiry'] = by_expiry
         data['by_direction'] = by_direction
         data['learning_mode'] = 'outcome-calibrated'
+        recovery_mode = False
+        for uid, selected_asset in list(app.selected.items()):
+            if selected_asset == asset and app.recovery_until.get(uid, 0) > time.time():
+                recovery_mode = True
+                break
+        data['recovery_mode'] = recovery_mode
         return data
     app.summary = learned_summary
-
-    # Recovery mode is deliberately stricter; it never forces a trade.
     base_brain = engine.human_brain
     def learned_brain(frames, memory_context=None):
         ctx = memory_context or {}
@@ -50,15 +48,13 @@ def install(app):
         strict_ok = bool(result.get('expiry') in engine.EXPIRIES and score >= 0.78 and aligned >= 4 and agreement >= 4 and result.get('regime') in {'trend','breakout'})
         result['approve'] = bool(result.get('approve') and strict_ok)
         result['recovery_mode'] = True
-        result['reason'] = ('RECOVERY STRICT: ' + str(result.get('reason', '')))
+        result['reason'] = 'RECOVERY STRICT: ' + str(result.get('reason', ''))
         if not strict_ok:
             engine.log.info('RECOVERY GATE REJECT pair=%s score=%.2f aligned=%s agreement=%s', ctx.get('asset',''), score, aligned, agreement)
         else:
             engine.log.info('RECOVERY GATE APPROVE pair=%s score=%.2f aligned=%s agreement=%s', ctx.get('asset',''), score, aligned, agreement)
         return result
     engine.human_brain = learned_brain
-
-    # Preserve the original signal engine but only permit qualified sends on 5-minute slots.
     original_scan = app.scan_once
     async def patched_scan_once():
         now_ts = time.time(); minute = int(now_ts // 60)
@@ -67,7 +63,6 @@ def install(app):
         if slot:
             await original_scan()
             return
-        # Continue 1-minute research so the AI/technical pipeline stays active between signal slots.
         try:
             assets = await app.broker.live_assets()
             for uid, asset in list(app.selected.items()):
@@ -82,9 +77,8 @@ def install(app):
                     app.log.info('CANDICE RESEARCH 1M REJECT pair=%s reason=%s', asset, err or 'no fresh candles')
         except Exception:
             app.log.exception('CANDICE 1M research-only cycle failed')
-
     app.scan_once = patched_scan_once
     app.SIGNAL_CADENCE_MINUTES = 5
     app.SIGNAL_WINDOW_SECOND = 50
-    app._candice_runtime_patch_v1 = True
+    app._candice_runtime_patch_v2 = True
     app.log.info('CANDICE RUNTIME PATCH ACTIVE — 1M RESEARCH — 5M SIGNAL SLOTS — STRICT RECOVERY — OUTCOME LEARNING')
