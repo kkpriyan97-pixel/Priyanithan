@@ -127,7 +127,18 @@ def _install_layers(app):
         _notify_strategy_start(app)
     except Exception as exc:
         print('CANDICE OWN STRATEGY V4 FAILED', repr(exc))
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST')
+
+    # 24/7 Own Brain watcher: observe every newly closed 1m candle.
+    # Observation/learning only. It never calls the AI reviewer and never places trades.
+    # The existing 5m checkpoint remains the only signal gate.
+    try:
+        from candice_own_brain_247 import install as install_own_brain_247
+        install_own_brain_247(app)
+        print('CANDICE OWN BRAIN 24/7 LAYER INSTALLED — EVERY CLOSED 1M CANDLE — 5M SIGNAL GATE ONLY')
+    except Exception as exc:
+        print('CANDICE OWN BRAIN 24/7 LAYER FAILED', repr(exc))
+
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7')
 
 
 def _load_runtime():
