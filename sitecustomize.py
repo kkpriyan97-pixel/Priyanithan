@@ -24,6 +24,11 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE RUNTIME PATCH FAILED', repr(exc))
     try:
+        from candice_ai_fallback import install as install_ai_fallback
+        install_ai_fallback(app)
+    except Exception as exc:
+        print('CANDICE AI FALLBACK FAILED', repr(exc))
+    try:
         from candice_ai_247 import install as install_ai_247
         install_ai_247(app)
     except Exception as exc:
@@ -48,7 +53,7 @@ def _install_layers(app):
         install_card(app)
     except Exception as exc:
         print('CANDICE CARD OVERRIDE FAILED', repr(exc))
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — ASSET TIMER LAST')
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — ASSET TIMER LAST')
 
 
 def _load_runtime():
