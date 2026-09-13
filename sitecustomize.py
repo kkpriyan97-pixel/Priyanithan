@@ -29,6 +29,11 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE AI FALLBACK FAILED', repr(exc))
     try:
+        from candice_zai_provider import install as install_zai_provider
+        install_zai_provider(app)
+    except Exception as exc:
+        print('CANDICE Z.AI PROVIDER FAILED', repr(exc))
+    try:
         from candice_ai_247 import install as install_ai_247
         install_ai_247(app)
     except Exception as exc:
@@ -60,7 +65,7 @@ def _install_layers(app):
         print('CANDICE STRATEGY V2 ACTIVE — PATTERN → NEXT CANDLE → SITUATION → DURATION')
     except Exception as exc:
         print('CANDICE STRATEGY V2 FAILED', repr(exc))
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — ASSET TIMER LAST')
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM HANDLERS FIRST — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST')
 
 
 def _load_runtime():
@@ -85,7 +90,8 @@ def _load_runtime():
                 from candice_ready_timer import install as install_ready_timer
                 install_ready_timer(app)
         except Exception as exc:
-            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc))
+            print('CANDICE READY TIMER WATCHDOG FAILED', repr(exc)
+            )
 
 
 threading.Thread(target=_load_runtime, daemon=True).start()
