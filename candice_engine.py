@@ -59,10 +59,7 @@ def technical_snapshot(df:pd.DataFrame)->dict:
     if len(df)<MIN_CONTEXT_CANDLES:raise ValueError("insufficient candles")
     d=df.copy().sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True);c=d.close;e9,e21,e50=_ema(c,9),_ema(c,21),_ema(c,50);r=_rsi(c);m=_macd(c);sig=_ema(m,9);adx=_adx(d);atr=_atr(d);hh=c.rolling(20).max();ll=c.rolling(20).min();mid=(hh+ll)/2;last,prev=d.iloc[-1],d.iloc[-2]
     votes=["UP" if e9.iloc[-1]>e21.iloc[-1] else "DOWN","UP" if c.iloc[-1]>e50.iloc[-1] else "DOWN","UP" if m.iloc[-1]>sig.iloc[-1] else "DOWN","UP" if r.iloc[-1]>52 else "DOWN","UP" if c.iloc[-1]>mid.iloc[-1] else "DOWN"];up,down=votes.count("UP"),votes.count("DOWN");direction="UP" if up>down else "DOWN" if down>up else "";strength=max(up,down)/len(votes);psar=_psar_direction(d);donchian=_donchian(d);roc=_roc_direction(c);macd_cross="UP" if m.iloc[-1]>sig.iloc[-1] and m.iloc[-2]<=sig.iloc[-2] else "DOWN" if m.iloc[-1]<sig.iloc[-1] and m.iloc[-2]>=sig.iloc[-2] else "";ma_cross="UP" if e9.iloc[-1]>e21.iloc[-1] and e9.iloc[-2]<=e21.iloc[-2] else "DOWN" if e9.iloc[-1]<e21.iloc[-1] and e9.iloc[-2]>=e21.iloc[-2] else "";named={"PSAR":psar,"MA":"UP" if e9.iloc[-1]>e21.iloc[-1] else "DOWN","DONCHIAN":donchian,"MACD":"UP" if m.iloc[-1]>sig.iloc[-1] else "DOWN","ROC":roc};agreement=sum(1 for v in named.values() if v and v==direction);conflicts=sum(1 for v in named.values() if v and v!=direction);body=abs(last.close-last.open);rng=max(last.high-last.low,1e-12)
-    patterns=detect_candlestick_patterns(d)
-    pattern_bull=tuple(patterns.get("bullish",()))
-    pattern_bear=tuple(patterns.get("bearish",()))
-    pattern_dir=patterns.get("direction","")
+    patterns=detect_candlestick_patterns(d);pattern_bull=tuple(patterns.get("bullish",()));pattern_bear=tuple(patterns.get("bearish",()));pattern_dir=patterns.get("direction","")
     return {"price":_safe(last.close),"direction":direction,"vote_up":up,"vote_down":down,"strength":strength,"ema9":_safe(e9.iloc[-1]),"ema21":_safe(e21.iloc[-1]),"ema50":_safe(e50.iloc[-1]),"rsi14":_safe(r.iloc[-1]),"macd":_safe(m.iloc[-1]),"macd_signal":_safe(sig.iloc[-1]),"adx14":_safe(adx.iloc[-1]),"atr14":_safe(atr.iloc[-1]),"body_ratio":_safe(body/rng),"range20":_safe(hh.iloc[-1]-ll.iloc[-1]),"prev_close":_safe(prev.close),"psar_direction":psar,"ma_crossover":ma_cross,"donchian_breakout":donchian,"macd_crossover":macd_cross,"roc_direction":roc,"indicator_agreement":agreement,"indicator_conflicts":conflicts,"candle_patterns":patterns.get("patterns",()),"bullish_patterns":pattern_bull,"bearish_patterns":pattern_bear,"pattern_direction":pattern_dir,"pattern_score":_safe(patterns.get("score",0.0)),"candle_ts":int(_safe(last.timestamp))}
 
 def resample_ohlc(df:pd.DataFrame,minutes:int)->pd.DataFrame:
@@ -84,10 +81,8 @@ def human_brain(frames:dict,memory:dict|None=None):
     elif adx<18:regime="range"
     else:regime="transition"
     score+=strength*.35+min(agreement,5)*.04+min(adx/40,1)*.10
-    if pattern_dir==direction:
-        score+=min(.12,abs(pattern_score)*.18); reasons.append("candlestick pattern confirmation")
-    elif pattern_dir and pattern_dir!=direction:
-        score-=min(.16,abs(pattern_score)*.20); reasons.append("candlestick reversal conflict")
+    if pattern_dir==direction:score+=min(.12,abs(pattern_score)*.18);reasons.append("candlestick pattern confirmation")
+    elif pattern_dir and pattern_dir!=direction:score-=min(.16,abs(pattern_score)*.20);reasons.append("candlestick reversal conflict")
     if bullish_patterns and direction=="UP": reasons.append("bullish candle structure")
     if bearish_patterns and direction=="DOWN": reasons.append("bearish candle structure")
     if ind_conf>=3:score-=.18;reasons.append("indicator conflict")
@@ -98,9 +93,7 @@ def human_brain(frames:dict,memory:dict|None=None):
     if agreement>=4:reasons.append("indicator agreement")
     if adx>=25:reasons.append("trend strength")
     if regime=="range" and agreement<4:score-=.10;reasons.append("range market")
-    score=max(0.0,min(1.0,score))
-    high_tf_aligned=bool(direction and ten.get("direction")==direction and fifteen.get("direction")==direction)
-    min_high_tf_adx=min(float(ten.get("adx14",0) or 0),float(fifteen.get("adx14",0) or 0)) if high_tf_aligned else 0.0
+    score=max(0.0,min(1.0,score));high_tf_aligned=bool(direction and ten.get("direction")==direction and fifteen.get("direction")==direction);min_high_tf_adx=min(float(ten.get("adx14",0) or 0),float(fifteen.get("adx14",0) or 0)) if high_tf_aligned else 0.0
     if high_tf_aligned and score>=.72 and min_high_tf_adx>=25 and adx<35:expiry=15
     elif high_tf_aligned and score>=.62 and min_high_tf_adx>=18 and adx<30:expiry=10
     elif score>=.86 and adx>=35 and body>=.55:expiry=1
@@ -108,16 +101,12 @@ def human_brain(frames:dict,memory:dict|None=None):
     elif score>=.76 and adx>=22:expiry=3
     elif score>=.68 and adx>=18:expiry=5
     else:expiry=0
-    approve=bool(expiry and score>=.68 and conflicts<3 and not (rsi>=82 or rsi<=18))
-    reason="; ".join(dict.fromkeys(reasons)) or "insufficient independent confirmation"
-    log.info("HUMAN BRAIN pair=%s regime=%s direction=%s score=%.2f expiry=%s aligned=%s conflicts=%s patterns=%s",memory.get("asset",""),regime,direction,score,expiry,aligned,conflicts,','.join(s.get('candle_patterns',()) or ()))
+    approve=bool(expiry and score>=.68 and conflicts<3 and not (rsi>=82 or rsi<=18));reason="; ".join(dict.fromkeys(reasons)) or "insufficient independent confirmation";log.info("HUMAN BRAIN pair=%s regime=%s direction=%s score=%.2f expiry=%s aligned=%s conflicts=%s patterns=%s",memory.get("asset",""),regime,direction,score,expiry,aligned,conflicts,','.join(s.get('candle_patterns',()) or ()))
     if not approve:log.info("HUMAN GATE REJECT pair=%s reason=%s",memory.get("asset",""),reason)
     return {"approve":approve,"direction":direction,"score":score,"expiry":expiry,"regime":regime,"reason":reason,"patterns":s.get("candle_patterns",()),"pattern_direction":pattern_dir}
 
 def choose_expiry(s:dict,frames:dict|None=None)->int:
-    frames=frames or {};agreement=int(s.get("indicator_agreement",0));strength=float(s.get("strength",0));adx=float(s.get("adx14",0));body=float(s.get("body_ratio",0));direction=s.get("direction","")
-    f10=frames.get("10m",{});f15=frames.get("15m",{})
-    high_tf_aligned=bool(direction and f10.get("direction")==direction and f15.get("direction")==direction)
+    frames=frames or {};agreement=int(s.get("indicator_agreement",0));strength=float(s.get("strength",0));adx=float(s.get("adx14",0));body=float(s.get("body_ratio",0));direction=s.get("direction","");f10=frames.get("10m",{});f15=frames.get("15m",{});high_tf_aligned=bool(direction and f10.get("direction")==direction and f15.get("direction")==direction)
     if high_tf_aligned:
         adx10=float(f10.get("adx14",0) or 0);adx15=float(f15.get("adx14",0) or 0);min_high_tf_adx=min(adx10,adx15)
         if strength>=.8 and min_high_tf_adx>=25 and adx<35:return 15
@@ -139,51 +128,46 @@ def _parse_ai_content(content):
     except Exception:return None
 
 def _request_ai(url,key,model,ai_input):
-    payload={"model":model,"messages":[{"role":"user","content":_ai_prompt(ai_input.get("technical",ai_input),ai_input.get("memory",{}))}],"temperature":.1,"max_completion_tokens":400,"response_format":{"type":"json_object"}}
-    if "gpt-oss" in model.lower():payload["include_reasoning"]=False;payload["reasoning_effort"]="low"
+    payload={"model":model,"messages":[{"role":"user","content":_ai_prompt(ai_input.get("technical",ai_input),ai_input.get("memory",{}))}],"temperature":.1,"max_tokens":400}
     r=requests.post(url,headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
-    if not r.ok:raise RuntimeError(f"HTTP {r.status_code}: {r.text.replace(chr(10),' ')[:600]}")
-    choices=r.json().get("choices") or []
-    if not choices:raise ValueError("AI response has no choices")
-    parsed=_parse_ai_content((choices[0].get("message") or {}).get("content",""))
-    if not parsed:raise ValueError("AI returned invalid JSON")
+    if not r.ok:raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+    data=r.json();choices=data.get("choices") or []
+    if not choices:raise RuntimeError("AI response has no choices")
+    content=(choices[0].get("message") or {}).get("content","")
+    parsed=_parse_ai_content(content)
+    if not parsed:raise RuntimeError("AI returned invalid JSON")
     return parsed
 
-def ai_review(snapshot,memory):
-    providers=(("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"));attempted=False
+def ai_review(ai_input,memory=None):
+    providers=(("GROQ",os.getenv("GROQ_API_KEY","").strip(),os.getenv("GROQ_MODEL","openai/gpt-oss-120b").strip(),"https://api.groq.com/openai/v1/chat/completions"),("CEREBRAS",os.getenv("CEREBRAS_API_KEY","").strip(),os.getenv("CEREBRAS_MODEL","gpt-oss-120b").strip(),"https://api.cerebras.ai/v1/chat/completions"))
     for name,key,model,url in providers:
         if not key:continue
-        attempted=True
         try:
-            result=_request_ai(url,key,model,{"technical":snapshot,"memory":memory});log.info("AI PROVIDER=%s MODEL=%s DECISION=%s CONFIDENCE=%s EXPIRY=%s",name,model,result.get("decision",""),result.get("confidence",0),result.get("expiry",0));return result
+            result=_request_ai(url,key,model,ai_input);log.info("AI PROVIDER=%s model=%s decision=%s confidence=%s expiry=%s",name,model,result.get("decision",""),result.get("confidence",0),result.get("expiry",0));return result
         except Exception as exc:log.warning("AI provider %s unavailable: %s",name,exc)
-    if not attempted:return {"decision":"REJECT","confidence":0,"reason":"Groq/Cerebras AI provider not configured"}
-    return {"decision":"REJECT","confidence":0,"reason":"Groq and Cerebras AI review unavailable"}
+    return {"decision":"REJECT","confidence":0,"expiry":0,"reason":"AI review unavailable"}
 
-async def analyze(asset,broker,memory):
-    df,err=await broker.candles(asset,60,ANALYSIS_CANDLE_COUNT,360)
-    if err or df is None or len(df)<120:return Analysis(asset,"REJECT",reason=err or "insufficient fresh candles")
-    base=closed_1m(df)
-    if len(base)<120:return Analysis(asset,"REJECT",reason=f"insufficient closed candles ({len(base)})")
-    try:
-        snap1=technical_snapshot(base);frames={"1m":snap1}
-        for mins in (3,5,10,15):
-            agg=resample_ohlc(base,mins)
-            if len(agg)>=60:frames[f"{mins}m"]=technical_snapshot(agg)
-    except Exception as exc:return Analysis(asset,"REJECT",reason=f"technical calculation failed: {exc}")
-    primary=frames.get("5m",snap1);direction=primary["direction"]
-    if not direction or snap1["direction"]!=direction:return Analysis(asset,"REJECT",direction=direction,score=primary["strength"],reason="1m/5m direction conflict",timeframe="1m+5m")
-    brain=human_brain(frames,{**(memory or {}),"asset":asset})
-    if not brain["approve"]:return Analysis(asset,"REJECT",direction=direction,expiry=brain["expiry"],score=brain["score"],reason=f"Human brain WAIT: {brain['reason']}",timeframe="1m+3m+5m+10m+15m",evidence=tuple(brain.get("patterns",())))
-    context_agreement=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"]==direction);context_conflict=sum(1 for k in ("10m","15m") if k in frames and frames[k]["direction"] and frames[k]["direction"]!=direction);technical_expiry=choose_expiry(primary,frames);candidate=brain["expiry"] if brain["expiry"] in EXPIRIES else technical_expiry
-    if not candidate:return Analysis(asset,"REJECT",direction=direction,score=brain["score"],reason="No safe expiry",timeframe="1m+5m")
+
+def analyze(asset,df,memory=None):
+    if df is None or len(df)<MIN_CONTEXT_CANDLES:return Analysis(asset,"REJECT",reason="Insufficient candle history")
+    d=closed_1m(df)
+    if len(d)<MIN_CONTEXT_CANDLES:return Analysis(asset,"REJECT",reason="Waiting for closed 1m candle")
+    frames={"1m":technical_snapshot(d)}
+    for n in (3,5,10,15):
+        r=resample_ohlc(d,n)
+        if len(r)>=MIN_CONTEXT_CANDLES:frames[f"{n}m"]=technical_snapshot(r)
+    primary=frames.get("5m") or frames["1m"];brain=human_brain(frames,memory or {})
+    direction=primary.get("direction","");candidate=int(brain.get("expiry") or choose_expiry(primary,frames) or 0)
+    if not direction:return Analysis(asset,"REJECT",reason="No dominant market direction")
+    if not brain.get("approve"):return Analysis(asset,"REJECT",direction=direction,expiry=candidate,score=brain["score"],reason=brain["reason"],timeframe="1m+3m+5m+10m+15m",evidence=tuple(brain.get("patterns",())))
+    context_agreement=sum(1 for n in ("3m","10m","15m") if frames.get(n,{}).get("direction")==direction);context_conflict=sum(1 for n in ("3m","10m","15m") if frames.get(n,{}).get("direction") and frames.get(n,{}).get("direction")!=direction)
+    if context_agreement<1:return Analysis(asset,"REJECT",direction=direction,expiry=candidate,score=brain["score"],reason="Multi-timeframe alignment is weak",timeframe="1m+3m+5m+10m+15m")
     if context_conflict>=2 and primary["strength"]<1.0:return Analysis(asset,"REJECT",direction=direction,expiry=candidate,score=brain["score"],reason="Higher-timeframe context conflicts",timeframe="1m+5m+10m+15m")
-    ai_input={"1m":snap1,"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"human_brain":brain,"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":candidate};ai=await asyncio.to_thread(ai_review,ai_input,memory or {});decision=str(ai.get("decision","")).upper();ai_direction=str(ai.get("direction","")).upper();raw_conf=float(ai.get("confidence",0) or 0);conf=int(round(raw_conf*100)) if 0 <= raw_conf <= 1 else int(round(raw_conf));conf=max(0,min(100,conf));ai_exp=int(ai.get("expiry",0) or 0)
+    ai_input={"1m":frames["1m"],"3m":frames.get("3m",{}),"5m":primary,"10m":frames.get("10m",{}),"15m":frames.get("15m",{}),"human_brain":brain,"context_agreement":context_agreement,"context_conflict":context_conflict,"candidate_expiry":candidate};ai=await asyncio.to_thread(ai_review,ai_input,memory or {});decision=str(ai.get("decision","")).upper();ai_direction=str(ai.get("direction","")).upper();raw_conf=float(ai.get("confidence",0) or 0);conf=int(round(raw_conf*100)) if 0 <= raw_conf <= 1 else int(round(raw_conf));conf=max(0,min(100,conf));ai_exp=int(ai.get("expiry",0) or 0)
     if decision!="APPROVE" or ai_direction!=direction or conf<MIN_CONF or ai_exp not in EXPIRIES:return Analysis(asset,"REJECT",direction=ai_direction,confidence=conf,expiry=ai_exp,score=brain["score"],reason=str(ai.get("reason","AI gate rejected")),timeframe="1m+3m+5m+10m+15m",evidence=tuple(brain.get("patterns",())))
     indicator_evidence=tuple(name for name,value in (("Parabolic SAR Reversal",primary["psar_direction"]),("Moving Average Crossover",primary["ma_crossover"]),("Donchian Channel Breakout",primary["donchian_breakout"]),("MACD Crossover",primary["macd_crossover"]),("Rate of Change Crossover",primary["roc_direction"])) if value==direction)
     candle_evidence=tuple(primary.get("bullish_patterns",()) if direction=="UP" else primary.get("bearish_patterns",()))
-    evidence=tuple(dict.fromkeys(indicator_evidence+candle_evidence))
-    return Analysis(asset,"APPROVE",direction=direction,confidence=conf,expiry=ai_exp,score=brain["score"],reason=str(ai.get("reason","Human brain + candle patterns + multi-timeframe technical + AI alignment")),timeframe="1m+3m+5m+10m+15m",evidence=evidence)
+    evidence=tuple(dict.fromkeys(indicator_evidence+candle_evidence));return Analysis(asset,"APPROVE",direction=direction,confidence=conf,expiry=ai_exp,score=brain["score"],reason=str(ai.get("reason","Human brain + candle patterns + multi-timeframe technical + AI alignment")),timeframe="1m+3m+5m+10m+15m",evidence=evidence)
 
 def session_state(now=None):
     now=now or datetime.now(timezone.utc);return "SIGNAL" if now.hour%3<2 else "RESEARCH"
