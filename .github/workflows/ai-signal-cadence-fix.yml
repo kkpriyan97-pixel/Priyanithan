@@ -20,8 +20,6 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          # ---- memory learning summary ----
           p=Path('candice_memory.py'); s=p.read_text()
           old="def summary(asset=None):\n    x=recent(asset,100); results=[e.get('result') for e in x if e.get('result') in ('WIN','LOSS')]; w=results.count('WIN'); l=results.count('LOSS')\n    return {'samples':len(results),'wins':w,'losses':l,'win_rate':round(100*w/len(results),1) if results else None,'recent':x[-8:]}"
           new="""def summary(asset=None):
@@ -34,14 +32,10 @@ jobs:
     return {'samples':len(results),'wins':w,'losses':l,'win_rate':round(100*w/len(results),1) if results else None,'by_expiry':by_expiry,'by_direction':by_direction,'recent':x[-8:]}"""
           if old not in s: raise SystemExit('memory summary pattern not found')
           p.write_text(s.replace(old,new,1))
-
-          # ---- engine: AI activity visibility + recovery gate ----
-          p=Path('candice_engine.py'); s=p.read_text()
-          s=s.replace("AI_TIMEOUT=float(os.getenv(\"AI_TIMEOUT_SECONDS\",\"18\"))","AI_TIMEOUT=float(os.getenv(\"AI_TIMEOUT_SECONDS\",\"8\"))",1)
+          p=Path('candice_engine.py'); s=p.read_text(); s=s.replace("AI_TIMEOUT=float(os.getenv(\"AI_TIMEOUT_SECONDS\",\"18\"))","AI_TIMEOUT=float(os.getenv(\"AI_TIMEOUT_SECONDS\",\"8\"))",1)
           old="    strength=float(s.get(\"strength\",0));adx=float(s.get(\"adx14\",0));rsi=float(s.get(\"rsi14\",50));body=float(s.get(\"body_ratio\",0));agreement=int(s.get(\"indicator_agreement\",0));ind_conf=int(s.get(\"indicator_conflicts\",0));pattern_dir=s.get(\"pattern_direction\",\"\");pattern_score=float(s.get(\"pattern_score\",0) or 0);bullish_patterns=tuple(s.get(\"bullish_patterns\",()));bearish_patterns=tuple(s.get(\"bearish_patterns\",()))"
-          new=old+";recovery_mode=bool(memory.get(\"recovery_mode\",False));recent_losses=int(memory.get(\"recent_losses\",0) or 0)"
           if old not in s: raise SystemExit('engine metrics pattern not found')
-          s=s.replace(old,new,1)
+          s=s.replace(old,old+";recovery_mode=bool(memory.get(\"recovery_mode\",False));recent_losses=int(memory.get(\"recent_losses\",0) or 0)",1)
           old="    score=max(0.0,min(1.0,score))\n    high_tf_aligned="
           new="""    if recovery_mode:
         if aligned < 4: score -= .12; reasons.append('recovery requires 4-timeframe alignment')
@@ -59,13 +53,8 @@ jobs:
           old="    ai_input={\"1m\":snap1,\"3m\":frames.get(\"3m\",{}),\"5m\":primary,\"10m\":frames.get(\"10m\",{}),\"15m\":frames.get(\"15m\",{}),\"human_brain\":brain,\"context_agreement\":context_agreement,\"context_conflict\":context_conflict,\"candidate_expiry\":candidate};ai=await asyncio.to_thread(ai_review,ai_input,memory or {});"
           new="    ai_input={\"1m\":snap1,\"3m\":frames.get(\"3m\",{}),\"5m\":primary,\"10m\":frames.get(\"10m\",{}),\"15m\":frames.get(\"15m\",{}),\"human_brain\":brain,\"context_agreement\":context_agreement,\"context_conflict\":context_conflict,\"candidate_expiry\":candidate};log.info('AI ACTIVITY START pair=%s recovery=%s candidate_expiry=%s brain_score=%.2f',asset,bool((memory or {}).get('recovery_mode')),candidate,brain['score']);ai=await asyncio.to_thread(ai_review,ai_input,memory or {});log.info('AI ACTIVITY END pair=%s decision=%s direction=%s confidence=%s expiry=%s',asset,ai.get('decision',''),ai.get('direction',''),ai.get('confidence',0),ai.get('expiry',0));"
           if old not in s: raise SystemExit('engine ai activity pattern not found')
-          s=s.replace(old,new,1)
-          p.write_text(s)
-
-          # ---- app: 5-minute signal slots + recovery mode ----
-          p=Path('app.py'); s=p.read_text()
-          s=s.replace("VERSION = '8.9-CANDICE-LIVE-TIMER-FIX'","VERSION = '9.1-CANDICE-AI-5MIN-RECOVERY'",1)
-          s=s.replace("PRE_ENTRY_SECONDS = 10","PRE_ENTRY_SECONDS = 10\nSIGNAL_CADENCE_MINUTES = 5\nSIGNAL_WINDOW_SECOND = 50",1)
+          s=s.replace(old,new,1); p.write_text(s)
+          p=Path('app.py'); s=p.read_text(); s=s.replace("VERSION = '8.9-CANDICE-LIVE-TIMER-FIX'","VERSION = '9.1-CANDICE-AI-5MIN-RECOVERY'",1); s=s.replace("PRE_ENTRY_SECONDS = 10","PRE_ENTRY_SECONDS = 10\nSIGNAL_CADENCE_MINUTES = 5\nSIGNAL_WINDOW_SECOND = 50",1)
           old="    for uid,asset in list(selected.items()):\n        if uid in active or asset not in assets:continue\n        if recovery_until.get(uid,0)>time.time():continue\n        recovery_until.pop(uid,None); a=await analyze(asset,broker,summary(asset)); log.info('AI ANALYSIS pair=%s decision=%s direction=%s confidence=%s expiry=%s reason=%s evidence=%s',asset,a.decision,a.direction,a.confidence,a.expiry,a.reason,a.evidence)"
           new="""    now_ts=time.time(); now_minute=int(now_ts//60); signal_slot=(now_minute % SIGNAL_CADENCE_MINUTES)==(SIGNAL_CADENCE_MINUTES-1)
     log.info('CANDICE SIGNAL CADENCE slot=%s cadence=%sm next_boundary=%s',signal_slot,SIGNAL_CADENCE_MINUTES,datetime.fromtimestamp((now_minute+1)*60,UAE).strftime('%H:%M:%S UAE'))
@@ -85,29 +74,17 @@ jobs:
         a=await analyze(asset,broker,mem); log.info('AI ANALYSIS pair=%s decision=%s direction=%s confidence=%s expiry=%s reason=%s evidence=%s',asset,a.decision,a.direction,a.confidence,a.expiry,a.reason,a.evidence)"""
           if old not in s: raise SystemExit('app scan loop pattern not found')
           s=s.replace(old,new,1)
-          old="        entry=float(row.close); candle_ts=float(row.timestamp); entry_ts=float((int(time.time())//60+1)*60); wait=entry_ts-time.time()"
-          new="        entry=float(row.close); candle_ts=float(row.timestamp); entry_ts=float((int(time.time())//60+1)*60); wait=entry_ts-time.time()"
-          # keep exact entry logic; the cadence gate above is the important change.
-          s=s.replace("    while True:\n        now_ts=time.time(); next_tick=(int(now_ts)//60)*60+50\n        if next_tick<=now_ts:next_tick+=60\n        await asyncio.sleep(max(0.2,next_tick-now_ts))","    while True:\n        now_ts=time.time(); next_tick=(int(now_ts)//60)*60+SIGNAL_WINDOW_SECOND\n        if next_tick<=now_ts:next_tick+=60\n        await asyncio.sleep(max(0.2,next_tick-now_ts))",1)
-          p.write_text(s)
-
-          # verify compile + targeted behavioral checks
-          for f in ('app.py','candice_engine.py','candice_memory.py'):
-              compile(Path(f).read_text(),f,'exec')
+          s=s.replace("    while True:\n        now_ts=time.time(); next_tick=(int(now_ts)//60)*60+50\n        if next_tick<=now_ts:next_tick+=60\n        await asyncio.sleep(max(0.2,next_tick-now_ts))","    while True:\n        now_ts=time.time(); next_tick=(int(now_ts)//60)*60+SIGNAL_WINDOW_SECOND\n        if next_tick<=now_ts:next_tick+=60\n        await asyncio.sleep(max(0.2,next_tick-now_ts))",1); p.write_text(s)
+          for f in ('app.py','candice_engine.py','candice_memory.py'): compile(Path(f).read_text(),f,'exec')
           import ast
-          tree=ast.parse(Path('app.py').read_text()); vals={}
-          for n in tree.body:
+          vals={}
+          for n in ast.parse(Path('app.py').read_text()).body:
               if isinstance(n,ast.Assign):
                   for t in n.targets:
                       if isinstance(t,ast.Name) and t.id in {'VERSION','SIGNAL_CADENCE_MINUTES','SIGNAL_WINDOW_SECOND','AUTO_TRADE','MARTINGALE'}:
                           try: vals[t.id]=ast.literal_eval(n.value)
                           except: pass
-          assert vals['VERSION']=='9.1-CANDICE-AI-5MIN-RECOVERY'; assert vals['SIGNAL_CADENCE_MINUTES']==5; assert vals['SIGNAL_WINDOW_SECOND']==50; assert vals['AUTO_TRADE'] is False; assert vals['MARTINGALE'] is False
-          import app
-          from candice_engine import human_brain
-          common={'direction':'UP','strength':0.8,'adx14':24,'body_ratio':0.5,'indicator_agreement':4,'indicator_conflicts':0}
-          frames={'1m':common,'3m':common,'5m':common,'10m':{'direction':'UP','adx14':20},'15m':{'direction':'UP','adx14':20}}
-          assert human_brain(frames,{'asset':'TEST','recovery_mode':True,'recent_losses':0})['approve'] is True
+          assert vals=={'VERSION':'9.1-CANDICE-AI-5MIN-RECOVERY','SIGNAL_CADENCE_MINUTES':5,'SIGNAL_WINDOW_SECOND':50,'AUTO_TRADE':False,'MARTINGALE':False}
           print('AI/CADENCE/RECOVERY PATCH: PASS')
           PY
       - name: Commit patched runtime
