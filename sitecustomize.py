@@ -13,6 +13,11 @@ def _load_runtime():
             except Exception as exc:
                 print('CANDICE RUNTIME PATCH FAILED', repr(exc))
             try:
+                from candice_recovery_timer import install as install_recovery_timer
+                install_recovery_timer(app)
+            except Exception as exc:
+                print('CANDICE RECOVERY TIMER FAILED', repr(exc))
+            try:
                 from candice_card_override import install as install_card
                 install_card(app)
             except Exception as exc:
