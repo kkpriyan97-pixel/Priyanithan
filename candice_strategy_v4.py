@@ -58,6 +58,8 @@ def _probability(snapshot, plan, ctx):
 
 
 def build_plan(snapshot: dict, frames: dict | None = None, patterns=None):
+    # Own Brain V4 is deliberately the active strategy builder. V2 remains the
+    # safety foundation; V4 only adapts it from persisted demo outcomes.
     base = build_v2_plan(snapshot, frames, patterns)
     ctx = learning_context(None)
     probability, regime, samples = _probability(snapshot, base, ctx)
@@ -65,8 +67,6 @@ def build_plan(snapshot: dict, frames: dict | None = None, patterns=None):
     risks = list(base.risk_flags)
     adjustment = int(base.confidence_adjustment)
 
-    # Fresh-session safety: do not let a new strategy override the proven V2
-    # logic until enough outcome samples exist.
     if samples < MIN_SAMPLES:
         reasons.append("own brain cold-start: V2 remains authoritative")
         adjustment = min(adjustment, 0)
@@ -87,7 +87,6 @@ def build_plan(snapshot: dict, frames: dict | None = None, patterns=None):
                             reasons=tuple(dict.fromkeys(reasons + ["OWN BRAIN → WAIT"])),
                             risk_flags=tuple(dict.fromkeys(risks)))
         else:
-            # The own brain may shorten an expiry but never lengthen a weak setup.
             expiry = base.recommended_expiry
             if probability < .66 and expiry >= 5:
                 expiry = 3 if 3 in base.allowed_expiries else 2 if 2 in base.allowed_expiries else expiry
@@ -109,4 +108,10 @@ def build_plan(snapshot: dict, frames: dict | None = None, patterns=None):
         "samples": samples,
         "wait": final.wait,
     })
+    print(
+        "CANDICE OWN BRAIN V4 ACTIVITY "
+        f"direction={final.next_candle_direction} pattern={final.pattern} "
+        f"regime={regime} probability={probability:.2%} samples={samples} "
+        f"expiry={final.recommended_expiry} wait={final.wait}"
+    )
     return final
