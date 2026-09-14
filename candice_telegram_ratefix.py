@@ -6,7 +6,7 @@ import time
 
 def install(app):
     """Hard Telegram edit guard: never queue timer edits during flood control."""
-    if getattr(app, '_candice_telegram_ratefix_v6', False):
+    if getattr(app, '_candice_telegram_ratefix_v7', False):
         return
 
     original_edit_text = app.edit_text
@@ -33,11 +33,9 @@ def install(app):
         async with lock:
             now = time.monotonic()
 
-            # Never sleep/queue behind Telegram flood control. Timer ticks are
-            # disposable; dropping them is preferable to creating a backlog.
+            # Timer updates are disposable. Never sleep or build a backlog.
             if now < cooldown_until.get(cid, 0.0):
                 return False
-
             if now - last_edit.get(cid, 0.0) < minimum_interval:
                 return False
 
@@ -57,9 +55,14 @@ def install(app):
                 raise
 
     async def safe_edit_text(cid, mid, text, reply_markup=None):
+        # The first ASSET READY timer update must be immediate. The base asset
+        # callback already edited this same message, so a normal 30s throttle
+        # would leave the user seeing a static card for the first 30 seconds.
+        is_ready_timer = 'DECISION TIMER •' in str(text) and 'NEXT 5-MIN CHECKPOINT •' in str(text)
+        interval = 0.0 if is_ready_timer else text_interval
         return await safe_call(
             cid, original_edit_text, mid, text, reply_markup,
-            minimum_interval=text_interval,
+            minimum_interval=interval,
         )
 
     async def safe_edit_card(cid, mid, signal, remaining, phase):
@@ -71,7 +74,7 @@ def install(app):
 
     app.edit_text = safe_edit_text
     app.edit_card = safe_edit_card
-    app._candice_telegram_ratefix_v6 = True
+    app._candice_telegram_ratefix_v7 = True
     app.log.info(
-        'CANDICE TELEGRAM RATEFIX V6 ACTIVE — non-queued throttle: text=30s card-pre=5s card-trade=15s + RetryAfter drop'
+        'CANDICE TELEGRAM RATEFIX V7 ACTIVE — immediate first READY timer + non-queued throttle: text=30s card-pre=5s card-trade=15s + RetryAfter drop'
     )
