@@ -5,8 +5,8 @@ import time
 
 
 def install(app):
-    """Show a low-traffic exact 5-minute UI countdown; the checkpoint engine owns decisions."""
-    if getattr(app, '_candice_ready_timer_v5', False):
+    """Show the exact 5-minute decision countdown without Telegram flood spam."""
+    if getattr(app, '_candice_ready_timer_v6', False):
         return
 
     base_asset_callback = app.asset_callback
@@ -24,7 +24,7 @@ def install(app):
         return ((now // 300) + 1) * 300
 
     async def ready_countdown(uid, message_id, asset):
-        app.log.info('ASSET READY TIMER START chat=%s asset=%s mode=exact-boundary-ui', uid, asset)
+        app.log.info('ASSET READY TIMER START chat=%s asset=%s mode=exact-boundary-ui-v6', uid, asset)
         last_display = None
         while True:
             if uid in app.active or app.selected.get(uid) != asset:
@@ -38,16 +38,12 @@ def install(app):
                     return
 
                 remaining = max(0, int(boundary - time.time()))
-                # Low Telegram traffic: update every 5 seconds, except the final 10 seconds.
-                display = remaining if remaining <= 10 else remaining - (remaining % 5)
+                # Telegram-safe traffic: 30s cadence, then every second for final 10s.
+                display = remaining if remaining <= 10 else remaining - (remaining % 30)
                 if display != last_display:
                     last_display = display
                     mm, ss = divmod(display, 60)
-                    boundary_dt = app.datetime.fromtimestamp(boundary, app.UAE) if hasattr(app, 'datetime') else None
-                    if boundary_dt is not None:
-                        boundary_text = boundary_dt.strftime('%H:%M:%S UAE')
-                    else:
-                        boundary_text = app.now().strftime('%H:%M:%S UAE')
+                    boundary_text = app.datetime.fromtimestamp(boundary, app.UAE).strftime('%H:%M:%S UAE') if hasattr(app, 'datetime') else app.now().strftime('%H:%M:%S UAE')
                     text = (
                         f'{app.header("ASSET READY")}\n\n'
                         f'📈 {asset}\n\n'
@@ -61,7 +57,8 @@ def install(app):
                         f'⏱️ ADAPTIVE EXPIRY • 1 / 2 / 3 / 5 / 10 / 15 MIN\n'
                         f'📩 Signal alert • 10 SEC before entry\n\n'
                         f'🎯 NEXT 5-MIN CHECKPOINT • {boundary_text}\n'
-                        f'⏳ DECISION TIMER • {mm:02d}:{ss:02d}\n\n'
+                        f'⏳ DECISION TIMER • {mm:02d}:{ss:02d}\n'
+                        f'🔄 LIVE COUNTDOWN • ACTIVE\n\n'
                         f'🛡️ MANUAL TRADE ONLY • AUTO-TRADE OFF'
                     )
                     ok = await safe_timer_edit(uid, message_id, text)
@@ -69,11 +66,9 @@ def install(app):
 
                 if remaining <= 0:
                     break
-                await asyncio.sleep(1.0 if remaining <= 10 else 5.0)
+                await asyncio.sleep(1.0 if remaining <= 10 else 30.0)
 
-            # The exact checkpoint decision is handled by candice_checkpoint.py.
-            # Do not call _candice_original_scan here: that bypassed the orchestrator
-            # and could create duplicate/late decisions.
+            # The exact checkpoint decision is owned by candice_checkpoint.py.
             await asyncio.sleep(1.0)
             last_display = None
 
@@ -90,5 +85,5 @@ def install(app):
         tasks[uid] = asyncio.create_task(ready_countdown(uid, q.message.message_id, asset))
 
     app.asset_callback = patched_asset_callback
-    app._candice_ready_timer_v5 = True
-    app.log.info('CANDICE ASSET READY TIMER V5 ACTIVE — exact :00/:05/:10 UI — 5s updates — NO SCAN DUPLICATION')
+    app._candice_ready_timer_v6 = True
+    app.log.info('CANDICE ASSET READY TIMER V6 ACTIVE — exact :00/:05/:10 UI — 30s updates + final 10s — NO SCAN DUPLICATION')
