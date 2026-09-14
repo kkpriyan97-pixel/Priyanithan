@@ -1,7 +1,6 @@
-"""Startup hooks for safe Telegram transport and Candice signal gating."""
+"""Startup hooks for safe Telegram transport and Candice analyst gating."""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -23,24 +22,19 @@ def _telegram_request(self, method, url, **kwargs):
     global _ACTIVE_CHAT
     if "api.telegram.org" not in str(url):
         return _ORIGINAL_REQUEST(self, method, url, **kwargs)
-
     is_updates = str(url).endswith("/getUpdates")
     is_send = str(url).endswith("/sendMessage")
-
     if is_send and _ACTIVE_CHAT:
         payload = kwargs.get("json")
         if isinstance(payload, dict):
             payload = dict(payload)
             payload["chat_id"] = _ACTIVE_CHAT
             kwargs["json"] = payload
-
     response = _ORIGINAL_REQUEST(self, method, url, **kwargs)
-
     try:
         data = response.json()
     except Exception:
         data = {}
-
     if is_updates and data.get("ok"):
         for update in data.get("result", []):
             message = update.get("message") or {}
@@ -51,13 +45,10 @@ def _telegram_request(self, method, url, **kwargs):
                 with _LOCK:
                     _ACTIVE_CHAT = chat_id
                 _LOG.info("Telegram chat bound from /start: type=%s", chat.get("type", "unknown"))
-
     if is_send and not response.ok:
         code = data.get("error_code", response.status_code)
         desc = data.get("description", "unknown Telegram API error")
         _LOG.warning("Telegram send failed: code=%s description=%s", code, desc)
-
-    # Never let requests.raise_for_status() print a Telegram URL containing the bot token.
     if is_updates and response.status_code == 409:
         safe = Response()
         safe.status_code = 200
@@ -65,26 +56,27 @@ def _telegram_request(self, method, url, **kwargs):
         safe.headers["Content-Type"] = "application/json"
         safe.url = "https://api.telegram.org/bot<redacted>/getUpdates"
         return safe
-
     return response
 
 
 requests.sessions.Session.request = _telegram_request
 
-
-# Candice must analyze every completed 1-minute candle, but a qualifying setup
-# should create only ONE Telegram signal. A new signal is allowed only after
-# the previous qualification disappears (NO_SIGNAL) and a fresh setup forms.
 _SIGNAL_STATE: dict[str, bool] = {}
 _CONTEXT = threading.local()
 
 
-def _install_signal_gate():
+def _install_analyst():
     while True:
         mod = sys.modules.get("__main__")
         if mod is not None and hasattr(mod, "analyze") and hasattr(mod, "on_olymp_candle"):
             original_analyze = mod.analyze
             original_candle = mod.on_olymp_candle
+            try:
+                from strategy_brain import evaluate as brain_evaluate
+            except Exception:
+                _LOG.exception("Candice own strategy brain failed to load")
+                time.sleep(1)
+                continue
 
             def gated_candle(asset, candle):
                 _CONTEXT.asset = str(asset)
@@ -102,29 +94,45 @@ def _install_signal_gate():
                 if not asset or not isinstance(result, dict):
                     return result
 
-                decision = result.get("decision")
-                active = _SIGNAL_STATE.get(asset, False)
+                try:
+                    brain = brain_evaluate(asset, data, result)
+                except Exception:
+                    _LOG.exception("Candice own strategy brain error asset=%s", asset)
+                    brain = {"allow": False, "regime": "ERROR", "strategy": "brain_error", "score": 0,
+                             "reasons": ["strategy brain error; fail-safe NO_SIGNAL"]}
 
-                if decision == "SIGNAL":
-                    if active:
-                        result = dict(result)
-                        result["decision"] = "NO_SIGNAL"
-                        result["reasons"] = list(result.get("reasons", []))[-7:] + [
-                            "existing qualified setup still active; waiting for a fresh setup"
-                        ]
-                    else:
-                        _SIGNAL_STATE[asset] = True
-                else:
-                    # The setup has broken; the next qualified setup may signal.
+                enriched = dict(result)
+                enriched["brain"] = {
+                    "regime": brain.get("regime"),
+                    "strategy": brain.get("strategy"),
+                    "quality": brain.get("score", 0),
+                }
+                enriched["reasons"] = list(result.get("reasons", []))[-5:] + list(brain.get("reasons", []))[-4:]
+
+                # Own strategy brain is the final analyst gate.
+                if result.get("decision") != "SIGNAL" or not brain.get("allow"):
                     _SIGNAL_STATE[asset] = False
+                    enriched["decision"] = "NO_SIGNAL"
+                    enriched["confidence"] = min(int(enriched.get("confidence", 0) or 0), int(brain.get("score", 0) or 0)) if brain.get("score", 0) else int(enriched.get("confidence", 0) or 0)
+                    return enriched
 
-                return result
+                active = _SIGNAL_STATE.get(asset, False)
+                if active:
+                    enriched["decision"] = "NO_SIGNAL"
+                    enriched["reasons"] = list(enriched.get("reasons", []))[-8:] + [
+                        "existing qualified setup still active; waiting for a fresh setup"
+                    ]
+                    return enriched
+
+                _SIGNAL_STATE[asset] = True
+                enriched["confidence"] = max(int(enriched.get("confidence", 0) or 0), int(brain.get("score", 0) or 0))
+                return enriched
 
             mod.analyze = gated_analyze
             mod.on_olymp_candle = gated_candle
-            _LOG.info("Candice signal transition gate installed: 1m analysis ON, repeated setup alerts OFF")
+            _LOG.info("CANDICE OWN STRATEGY BRAIN installed: 1m observe -> regime -> strategy selection -> multi-confirmation -> signal gate")
             return
         time.sleep(0.25)
 
 
-threading.Thread(target=_install_signal_gate, daemon=True, name="candice-signal-gate").start()
+threading.Thread(target=_install_analyst, daemon=True, name="candice-own-strategy-brain").start()
