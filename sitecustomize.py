@@ -71,6 +71,11 @@ def _notify_strategy_start(app):
 
 def _install_layers(app):
     try:
+        from candice_telegram_guard import install as install_telegram_guard
+        install_telegram_guard(app)
+    except Exception as exc:
+        print('CANDICE TELEGRAM GUARD FAILED', repr(exc))
+    try:
         from candice_telegram_ratefix import install as install_telegram_ratefix
         install_telegram_ratefix(app)
     except Exception as exc:
