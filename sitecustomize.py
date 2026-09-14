@@ -1,110 +1,137 @@
-"""Candice A-Z runtime hardening: Telegram access binding, live countdown, strategy gate and outcomes."""
+"""Candice runtime hardening: real access gate, one active signal per asset, live expiry timer."""
 from __future__ import annotations
-import logging, os, sys, threading, time
+import logging, os, sys, threading, time, re
 import requests
 from requests import Response
 
-_LOG = logging.getLogger("candice.telegram_transport")
-_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-_CONFIGURED_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-_ACTIVE_CHAT = _CONFIGURED_CHAT
-_ACCESS_CODE = os.getenv("CANDICE_ACCESS_CODE", "").strip()
-_LOCK = threading.RLock()
-_ORIGINAL_REQUEST = requests.sessions.Session.request
-_TIMER_RUNNING = set()
+LOG = logging.getLogger("candice.runtime")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+CONFIGURED_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+ACCESS_CODE = os.getenv("CANDICE_ACCESS_CODE", "").strip()
+ACTIVE_CHAT = CONFIGURED_CHAT
+AUTHORIZED = False
+LOCK = threading.RLock()
+ORIGINAL_REQUEST = requests.sessions.Session.request
+ACTIVE_SIGNALS = {}
+TIMERS = set()
 
 
-def _edit_message(chat_id, message_id, text):
-    if not _TOKEN or not chat_id or not message_id: return False
+def _safe_send(chat_id, text):
+    if not TOKEN or not chat_id:
+        return None
     try:
-        r = _ORIGINAL_REQUEST(requests.Session(), "POST", f"https://api.telegram.org/bot{_TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": True}, timeout=15)
+        return ORIGINAL_REQUEST(requests.Session(), "POST", f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True}, timeout=15)
+    except Exception:
+        LOG.exception("Telegram access response failed")
+        return None
+
+
+def _edit(chat_id, message_id, text):
+    if not TOKEN or not chat_id or not message_id:
+        return False
+    try:
+        r = ORIGINAL_REQUEST(requests.Session(), "POST", f"https://api.telegram.org/bot{TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": True}, timeout=15)
         return r.ok
-    except Exception: return False
+    except Exception:
+        return False
 
 
-def _timer_worker(asset, direction, entry, expiry, chat_id, message_id, confidence):
+def _timer(chat_id, message_id, asset, direction, entry, expiry, confidence):
     key = (str(chat_id), int(message_id))
-    with _LOCK:
-        if key in _TIMER_RUNNING: return
-        _TIMER_RUNNING.add(key)
+    with LOCK:
+        if key in TIMERS: return
+        TIMERS.add(key)
     try:
-        end = time.time() + int(expiry) * 60
+        deadline = time.time() + int(expiry) * 60
         while True:
-            remain = max(0, int(end - time.time()))
+            remain = max(0, int(deadline - time.time()))
             if remain <= 0: break
-            mm, ss = divmod(remain, 60)
+            m, s = divmod(remain, 60)
             text = ("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n"
                     f"🟢 SIGNAL • {direction}\n📈 Asset • {asset}\n💰 Entry • {entry:.6f}\n⏱️ Expiry • {expiry} min\n"
-                    f"⏳ TIMER • {mm:02d}:{ss:02d}\n🧠 Confidence • {confidence}%\n"
+                    f"⏳ TIMER • {m:02d}:{s:02d}\n🧠 Confidence • {confidence}%\n"
                     "📡 Source • Olymp Trade live market data\n🛡️ READ-ONLY / DEMO / MANUAL ONLY\n🚫 Auto-trade OFF • Martingale OFF")
-            _edit_message(chat_id, message_id, text)
-            time.sleep(10)
-        _edit_message(chat_id, message_id, ("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • EXPIRY\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏰ TIMER • 00:00\n📈 Asset • {asset}\n➡️ Direction • {direction}\n💰 Entry • {entry:.6f}\n"
+            _edit(chat_id, message_id, text)
+            time.sleep(5)
+        _edit(chat_id, message_id, ("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • EXPIRY\n━━━━━━━━━━━━━━━━━━━━\n"
+            "⏳ TIMER • 00:00\n" f"📈 Asset • {asset}\n➡️ Direction • {direction}\n💰 Entry • {entry:.6f}\n"
             "🏁 EXPIRY REACHED\n📊 Waiting for completed candle outcome…\n🛡️ READ-ONLY / DEMO / MANUAL ONLY"))
     finally:
-        with _LOCK: _TIMER_RUNNING.discard(key)
+        with LOCK: TIMERS.discard(key)
 
 
 def _telegram_request(self, method, url, **kwargs):
-    global _ACTIVE_CHAT
-    url_s = str(url)
-    if "api.telegram.org" not in url_s: return _ORIGINAL_REQUEST(self, method, url, **kwargs)
-    is_updates, is_send = url_s.endswith("/getUpdates"), url_s.endswith("/sendMessage")
-
+    global ACTIVE_CHAT, AUTHORIZED
+    u = str(url)
+    if "api.telegram.org" not in u:
+        return ORIGINAL_REQUEST(self, method, url, **kwargs)
+    is_updates = u.endswith("/getUpdates")
+    is_send = u.endswith("/sendMessage")
     if is_send:
         payload = kwargs.get("json")
         if isinstance(payload, dict):
             payload = dict(payload)
-            if _ACTIVE_CHAT: payload["chat_id"] = _ACTIVE_CHAT
-            text = str(payload.get("text", ""))
-            # Make /start visibly confirm authorization without exposing any secret.
-            if text.startswith("🎯 CANDICE AI 12.0"):
-                text += "\n\n🔐 ACCESS • AUTHORIZED\n👤 Telegram session • BOUND\n📡 Market access • READ-ONLY\n🚫 Order access • DISABLED"
-                payload["text"] = text
+            if ACTIVE_CHAT: payload["chat_id"] = ACTIVE_CHAT
             kwargs["json"] = payload
-
-    response = _ORIGINAL_REQUEST(self, method, url, **kwargs)
+    response = ORIGINAL_REQUEST(self, method, url, **kwargs)
     try: data = response.json()
     except Exception: data = {}
 
     if is_updates and data.get("ok"):
         for update in data.get("result", []):
-            message = update.get("message") or {}; chat = message.get("chat") or {}
-            chat_id = str(chat.get("id", "")).strip(); text = str(message.get("text", "")).strip(); low = text.lower()
-            # /start is the trusted first bind. Optional /access is only accepted when an env code is configured.
-            valid_access = bool(_ACCESS_CODE and low == "/access " + _ACCESS_CODE.lower())
-            if chat_id and (low.startswith("/start") or valid_access):
-                with _LOCK:
-                    _ACTIVE_CHAT = chat_id
+            msg = update.get("message") or {}
+            chat = msg.get("chat") or {}
+            cid = str(chat.get("id", "")).strip()
+            text = str(msg.get("text", "")).strip()
+            low = text.lower()
+            if not cid: continue
+            if low.startswith("/start"):
+                with LOCK:
+                    ACTIVE_CHAT = cid
                     mod = sys.modules.get("__main__")
                     if mod is not None:
-                        try: mod.CHAT_ID = chat_id
+                        try: mod.CHAT_ID = cid
                         except Exception: pass
-                _LOG.info("Telegram chat authorized/bound: type=%s", chat.get("type", "unknown"))
+                    AUTHORIZED = False
+                _safe_send(cid, "🔐 CANDICE AI ACCESS\n\nTelegram session detected.\n\nSend:\n/access YOUR_ACCESS_CODE\n\n⚠️ Access is NOT granted by /start alone.")
+                msg["text"] = "/candice_access_pending"
+            elif low.startswith("/access "):
+                supplied = text.split(" ", 1)[1].strip()
+                ok = bool(ACCESS_CODE) and supplied.casefold() == ACCESS_CODE.casefold()
+                with LOCK:
+                    if ok:
+                        ACTIVE_CHAT = cid; AUTHORIZED = True
+                        mod = sys.modules.get("__main__")
+                        if mod is not None:
+                            try: mod.CHAT_ID = cid
+                            except Exception: pass
+                _safe_send(cid, "🎯 CANDICE AI 12.0\n\n" + ("✅ ONLINE\n🔐 ACCESS • AUTHORIZED\n👤 Telegram session • BOUND\n📡 Market access • READ-ONLY\n🚫 Order access • DISABLED\n\n/status • connection\n/performance • session" if ok else "❌ ACCESS • DENIED\n\nInvalid access code. No market signals will be delivered."))
+                msg["text"] = "/candice_access_handled"
+            elif cid == ACTIVE_CHAT and not AUTHORIZED:
+                msg["text"] = "/candice_unauthorized"
+        import json
+        try:
+            data["result"] = data.get("result", [])
+            response._content = json.dumps(data).encode("utf-8")
+        except Exception: pass
 
     if is_send and response.ok:
         try:
-            result = data.get("result") or {}; message_id = result.get("message_id")
             txt = str((kwargs.get("json") or {}).get("text", ""))
-            if message_id and "CANDICE AI" in txt and "SIGNAL" in txt and "Expiry" in txt:
-                import re
+            mid = (data.get("result") or {}).get("message_id")
+            if AUTHORIZED and mid and "CANDICE AI" in txt and "SIGNAL" in txt and "Expiry" in txt:
                 am = re.search(r"Asset • ([^\n]+)", txt); dm = re.search(r"SIGNAL • (UP|DOWN)", txt)
                 em = re.search(r"Expiry • (\d+) min", txt); im = re.search(r"Entry • ([0-9.]+)", txt); cm = re.search(r"Confidence • (\d+)%", txt)
                 if am and dm and em and im:
-                    args = (am.group(1).strip(), dm.group(1), float(im.group(1)), int(em.group(1)), str((kwargs.get("json") or {}).get("chat_id", _ACTIVE_CHAT)), int(message_id), int(cm.group(1)) if cm else 0)
-                    threading.Thread(target=_timer_worker, args=args, daemon=True, name="candice-expiry-timer").start()
-        except Exception: _LOG.exception("Timer setup failed")
-    elif is_send and not response.ok:
-        _LOG.warning("Telegram send failed: code=%s description=%s", data.get("error_code", response.status_code), data.get("description", "unknown Telegram API error"))
+                    args = (ACTIVE_CHAT, int(mid), am.group(1).strip(), dm.group(1), float(im.group(1)), int(em.group(1)), int(cm.group(1)) if cm else 0)
+                    threading.Thread(target=_timer, args=args, daemon=True, name="candice-expiry-timer").start()
+        except Exception: LOG.exception("Timer setup failed")
 
     if is_updates and response.status_code == 409:
         safe = Response(); safe.status_code = 200; safe._content = b'{"ok":true,"result":[]}'; safe.headers["Content-Type"] = "application/json"; safe.url = "https://api.telegram.org/bot<redacted>/getUpdates"; return safe
     return response
 
 requests.sessions.Session.request = _telegram_request
-_SIGNAL_STATE: dict[str, bool] = {}
-_CONTEXT = threading.local()
 
 
 def _install_analyst():
@@ -116,7 +143,7 @@ def _install_analyst():
                 from strategy_brain import evaluate as brain_evaluate
                 from outcome_engine import on_candle as outcome_on_candle, performance as outcome_performance, register as outcome_register
             except Exception:
-                _LOG.exception("Candice analyst modules failed to load"); time.sleep(1); continue
+                LOG.exception("Analyst modules failed to load"); time.sleep(1); continue
 
             def gated_candle(asset, candle):
                 _CONTEXT.asset = str(asset)
@@ -125,10 +152,9 @@ def _install_analyst():
                     try:
                         completed = outcome_on_candle(asset, candle, getattr(mod, "telegram", None))
                         for row in completed:
-                            res = row[5]
-                            if res == "WIN": mod.risk["wins"] += 1; mod.risk["streak"] = 0
-                            elif res == "LOSS": mod.risk["losses_total"] += 1; mod.risk["losses"] += 1; mod.risk["streak"] += 1
-                    except Exception: _LOG.exception("Outcome evaluation failed asset=%s", asset)
+                            if row[5] == "WIN": mod.risk["wins"] += 1; mod.risk["streak"] = 0
+                            elif row[5] == "LOSS": mod.risk["losses_total"] += 1; mod.risk["losses"] += 1; mod.risk["streak"] += 1
+                    except Exception: LOG.exception("Outcome evaluation failed asset=%s", asset)
                     return result
                 finally:
                     try: del _CONTEXT.asset
@@ -139,21 +165,26 @@ def _install_analyst():
                 if not asset or not isinstance(result, dict): return result
                 try: brain = brain_evaluate(asset, data, result)
                 except Exception:
-                    _LOG.exception("Candice own strategy brain error asset=%s", asset)
+                    LOG.exception("Strategy brain error asset=%s", asset)
                     brain = {"allow": False, "regime": "ERROR", "strategy": "brain_error", "score": 0, "reasons": ["strategy brain error; fail-safe NO_SIGNAL"]}
                 enriched = dict(result); enriched["brain"] = {"regime": brain.get("regime"), "strategy": brain.get("strategy"), "quality": brain.get("score", 0)}
                 enriched["reasons"] = list(result.get("reasons", []))[-5:] + list(brain.get("reasons", []))[-4:]
                 if result.get("decision") != "SIGNAL" or not brain.get("allow"):
-                    _SIGNAL_STATE[asset] = False; enriched["decision"] = "NO_SIGNAL"; return enriched
-                if _SIGNAL_STATE.get(asset, False):
-                    enriched["decision"] = "NO_SIGNAL"; enriched["reasons"] = list(enriched.get("reasons", []))[-8:] + ["existing qualified setup still active; waiting for a fresh setup"]; return enriched
-                _SIGNAL_STATE[asset] = True
-                enriched["confidence"] = max(int(enriched.get("confidence", 0) or 0), int(brain.get("score", 0) or 0))
+                    enriched["decision"] = "NO_SIGNAL"; return enriched
                 return enriched
 
             def wrapped_send_signal(asset, data, tech, expiry=5):
+                key = str(asset).upper()
+                now = time.time()
+                with LOCK:
+                    active = ACTIVE_SIGNALS.get(key)
+                    if active and now < active["until"]:
+                        return {"ok": True, "status": "DUPLICATE_BLOCKED", "asset": key, "reason": "active expiry window"}
+                    if active and now >= active["until"]: ACTIVE_SIGNALS.pop(key, None)
                 result = original_send(asset, data, tech, expiry)
                 if result.get("status") == "SIGNAL":
+                    exp = int(result.get("expiry", expiry or 5))
+                    with LOCK: ACTIVE_SIGNALS[key] = {"until": now + exp * 60, "direction": result.get("direction")}
                     payload = dict(result); payload["timestamp"] = data[-1].get("timestamp", time.time()); payload["entry"] = data[-1].get("close")
                     brain = tech.get("brain") or {}; payload["strategy"] = brain.get("strategy", ""); payload["regime"] = brain.get("regime", ""); outcome_register(payload)
                 return result
@@ -164,15 +195,12 @@ def _install_analyst():
                 def health_with_outcomes():
                     response = original_health()
                     try:
-                        payload = response.get_json(); payload["outcomes"] = outcome_performance(); return mod.jsonify(payload)
+                        payload = response.get_json(); payload["outcomes"] = outcome_performance(); payload["telegram_access"] = {"authorized": AUTHORIZED, "bound": bool(ACTIVE_CHAT)}; return mod.jsonify(payload)
                     except Exception: return response
                 mod.health = health_with_outcomes
-            if not hasattr(mod, "performance_api"):
-                @mod.app.get("/performance")
-                def performance_api():
-                    mod.reset_risk(); return mod.jsonify({"ok": True, "risk": mod.risk.copy(), "outcomes": outcome_performance()})
-            _LOG.info("CANDICE A-Z analyst installed: own brain + fresh setup gate + expiry outcomes + risk feedback + Telegram timer/access")
+            LOG.info("CANDICE A-Z runtime installed: access-code gate + one-active-signal-per-asset + live timer + outcomes")
             return
         time.sleep(0.25)
 
+_CONTEXT = threading.local()
 threading.Thread(target=_install_analyst, daemon=True, name="candice-analyst-stack").start()
