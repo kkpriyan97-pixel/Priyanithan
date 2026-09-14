@@ -5,8 +5,8 @@ import time
 
 
 def install(app):
-    """Serialize Telegram edits and throttle timer traffic by phase."""
-    if getattr(app, '_candice_telegram_ratefix_v4', False):
+    """Serialize Telegram edits and throttle timer traffic conservatively."""
+    if getattr(app, '_candice_telegram_ratefix_v5', False):
         return
 
     original_edit_text = app.edit_text
@@ -15,8 +15,8 @@ def install(app):
     last_edit = {}
     cooldown_until = {}
     text_interval = 30.0
-    card_trade_interval = 10.0
-    card_pre_interval = 1.0
+    card_trade_interval = 15.0
+    card_pre_interval = 5.0
 
     def lock_for(chat_id):
         return locks.setdefault(chat_id, asyncio.Lock())
@@ -45,7 +45,7 @@ def install(app):
         except Exception as exc:
             retry = retry_seconds(exc)
             if retry is not None:
-                cooldown_until[cid] = max(cooldown_until.get(cid, 0.0), time.monotonic() + retry + 0.5)
+                cooldown_until[cid] = max(cooldown_until.get(cid, 0.0), time.monotonic() + retry + 1.0)
                 app.log.warning('CANDICE TELEGRAM FLOOD COOLDOWN chat=%s retry_after=%.1fs', cid, retry)
                 return False
             raise
@@ -59,5 +59,5 @@ def install(app):
 
     app.edit_text = safe_edit_text
     app.edit_card = safe_edit_card
-    app._candice_telegram_ratefix_v4 = True
-    app.log.info('CANDICE TELEGRAM RATEFIX V4 ACTIVE — text=30s trade-card=10s pre-entry=1s + RetryAfter')
+    app._candice_telegram_ratefix_v5 = True
+    app.log.info('CANDICE TELEGRAM RATEFIX V5 ACTIVE — text=30s trade-card=15s pre-entry=5s + RetryAfter')
