@@ -6,7 +6,7 @@ import time
 
 def install(app):
     """Put the live 5-minute decision countdown directly on the ASSET READY card."""
-    if getattr(app, '_candice_ready_timer_v9', False):
+    if getattr(app, '_candice_ready_timer_v10', False):
         return
 
     base_asset_callback = getattr(app, 'asset_callback', None)
@@ -20,9 +20,6 @@ def install(app):
     def next_boundary(ts=None):
         now = int(time.time() if ts is None else ts)
         return ((now // 300) + 1) * 300
-
-    def previous_boundary(boundary):
-        return boundary - 300
 
     def build_ready_text(asset, boundary):
         now = time.time()
@@ -65,13 +62,18 @@ def install(app):
                 text=text,
                 disable_web_page_preview=True,
             )
-            return True
+            return True, None
         except Exception as exc:
+            retry = getattr(exc, 'retry_after', None)
+            try:
+                retry = max(30.0, float(retry)) if retry is not None else None
+            except (TypeError, ValueError):
+                retry = None
             app.log.warning(
-                'ASSET READY TIMER EDIT SKIPPED chat=%s message_id=%s error=%r',
-                uid, mid, exc,
+                'ASSET READY TIMER EDIT SKIPPED chat=%s message_id=%s retry_after=%s error=%r',
+                uid, mid, retry, exc,
             )
-            return False
+            return False, retry
 
     async def ready_countdown(uid, asset, message_id):
         tg = getattr(app, 'tg_app', None)
@@ -81,7 +83,8 @@ def install(app):
 
         boundary = next_boundary()
         last_display = None
-        last_edit = 0.0
+        last_attempt = 0.0
+        blocked_until = 0.0
         app.log.info(
             'ASSET READY TIMER START chat=%s asset=%s message_id=%s mode=SAME_READY_CARD',
             uid, asset, message_id,
@@ -93,16 +96,31 @@ def install(app):
                     return
 
                 remaining = max(0, int(boundary - time.time()))
-                # Smooth 1-second countdown in the final 10 seconds; otherwise 30-second updates.
-                display = remaining if remaining <= 10 else remaining - (remaining % 30)
-                now_mono = time.monotonic()
 
-                if display != last_display and (now_mono - last_edit >= 4.0 or display <= 10):
-                    last_display = display
-                    last_edit = now_mono
-                    ok = await edit_raw(
+                # Telegram-safe schedule: one update every 30s, plus a single
+                # 10-second checkpoint update and the boundary update. Never
+                # generate a 1-second edit storm that can trigger flood control.
+                if remaining <= 10:
+                    display = remaining if remaining in (10, 0) else 10
+                else:
+                    display = remaining - (remaining % 30)
+
+                now_mono = time.monotonic()
+                should_edit = (
+                    display != last_display
+                    and now_mono >= blocked_until
+                    and (now_mono - last_attempt >= 4.0)
+                )
+
+                if should_edit:
+                    last_attempt = now_mono
+                    ok, retry = await edit_raw(
                         tg, uid, message_id, build_ready_text(asset, boundary)
                     )
+                    if ok:
+                        last_display = display
+                    elif retry is not None:
+                        blocked_until = time.monotonic() + retry + 2.0
                     app.log.info(
                         'ASSET READY TIMER TICK chat=%s asset=%s remaining=%s progress=%s edit=%s',
                         uid, asset, remaining,
@@ -113,9 +131,10 @@ def install(app):
                     await asyncio.sleep(1.0)
                     boundary = next_boundary()
                     last_display = None
+                    blocked_until = 0.0
                     continue
 
-                await asyncio.sleep(1.0 if remaining <= 10 else 5.0)
+                await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -135,8 +154,6 @@ def install(app):
         if old is not None and not old.done():
             old.cancel()
 
-        # The base callback has already transformed q.message into ASSET READY.
-        # Keep the countdown on that SAME message; do not create a second Telegram card.
         tasks[uid] = asyncio.create_task(
             ready_countdown(uid, asset, q.message.message_id)
         )
@@ -146,7 +163,7 @@ def install(app):
         )
 
     app.asset_callback = patched_asset_callback
-    app._candice_ready_timer_v9 = True
+    app._candice_ready_timer_v10 = True
     app.log.info(
-        'CANDICE ASSET READY TIMER V9 ACTIVE — countdown + percentage on SAME ASSET READY card'
+        'CANDICE ASSET READY TIMER V10 ACTIVE — same card + percentage + flood-safe automatic countdown'
     )
