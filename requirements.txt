@@ -1,6 +1,2 @@
-Flask
-python-telegram-bot>=21,<23
-requests
-pandas>=2.2,<3
-websockets<14
-Pillow
+Flask>=3.1,<4
+requests>=2.32,<3
