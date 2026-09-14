@@ -151,9 +151,12 @@ def _load_runtime():
         print('CANDICE OWN BRAIN 24/7 STANDALONE FAILED: app runtime not ready')
         return
 
+    # Do not wait for _card_base here: that attribute is created by the
+    # card-override layer itself. Waiting for it made the entire Telegram
+    # checkpoint/timer layer impossible to install on a clean boot.
     for _ in range(600):
         app = sys.modules.get('app') or sys.modules.get('__main__')
-        if app is not None and hasattr(app, 'scan_once') and hasattr(app, '_card_base') and _runtime_ready(app):
+        if app is not None and hasattr(app, 'scan_once') and _runtime_ready(app):
             _install_layers(app)
             break
         time.sleep(0.1)
@@ -167,8 +170,6 @@ def _load_runtime():
             app = sys.modules.get('app') or sys.modules.get('__main__')
             if app is None or not _runtime_ready(app):
                 continue
-            # V7 is the current timer layer. Keep the watchdog marker in sync
-            # so it never repeatedly attempts a no-op reinstall.
             if not getattr(app, '_candice_ready_timer_v7', False):
                 print('CANDICE READY TIMER WATCHDOG: installing missing V7 layer')
                 from candice_ready_timer import install as install_ready_timer
