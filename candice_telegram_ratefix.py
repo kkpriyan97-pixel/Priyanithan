@@ -5,8 +5,8 @@ import time
 
 
 def install(app):
-    """Serialize Telegram edits and throttle timer traffic conservatively."""
-    if getattr(app, '_candice_telegram_ratefix_v5', False):
+    """Hard Telegram edit guard: never queue timer edits during flood control."""
+    if getattr(app, '_candice_telegram_ratefix_v6', False):
         return
 
     original_edit_text = app.edit_text
@@ -21,16 +21,6 @@ def install(app):
     def lock_for(chat_id):
         return locks.setdefault(chat_id, asyncio.Lock())
 
-    async def wait_turn(chat_id, minimum_interval):
-        async with lock_for(chat_id):
-            now = time.monotonic()
-            wait = max(0.0, minimum_interval - (now - last_edit.get(chat_id, 0.0)))
-            cooldown = max(0.0, cooldown_until.get(chat_id, 0.0) - now)
-            delay = max(wait, cooldown)
-            if delay > 0:
-                await asyncio.sleep(delay)
-            last_edit[chat_id] = time.monotonic()
-
     def retry_seconds(exc):
         value = getattr(exc, 'retry_after', None)
         try:
@@ -39,25 +29,49 @@ def install(app):
             return None
 
     async def safe_call(cid, fn, *args, minimum_interval):
-        await wait_turn(cid, minimum_interval)
-        try:
-            return await fn(cid, *args)
-        except Exception as exc:
-            retry = retry_seconds(exc)
-            if retry is not None:
-                cooldown_until[cid] = max(cooldown_until.get(cid, 0.0), time.monotonic() + retry + 1.0)
-                app.log.warning('CANDICE TELEGRAM FLOOD COOLDOWN chat=%s retry_after=%.1fs', cid, retry)
+        lock = lock_for(cid)
+        async with lock:
+            now = time.monotonic()
+
+            # Never sleep/queue behind Telegram flood control. Timer ticks are
+            # disposable; dropping them is preferable to creating a backlog.
+            if now < cooldown_until.get(cid, 0.0):
                 return False
-            raise
+
+            if now - last_edit.get(cid, 0.0) < minimum_interval:
+                return False
+
+            try:
+                result = await fn(cid, *args)
+                last_edit[cid] = time.monotonic()
+                return result
+            except Exception as exc:
+                retry = retry_seconds(exc)
+                if retry is not None:
+                    cooldown_until[cid] = time.monotonic() + retry + 2.0
+                    app.log.warning(
+                        'CANDICE TELEGRAM FLOOD COOLDOWN chat=%s retry_after=%.1fs — dropping timer edits',
+                        cid, retry,
+                    )
+                    return False
+                raise
 
     async def safe_edit_text(cid, mid, text, reply_markup=None):
-        return await safe_call(cid, original_edit_text, mid, text, reply_markup, minimum_interval=text_interval)
+        return await safe_call(
+            cid, original_edit_text, mid, text, reply_markup,
+            minimum_interval=text_interval,
+        )
 
     async def safe_edit_card(cid, mid, signal, remaining, phase):
         interval = card_pre_interval if phase == 'pre' else card_trade_interval
-        return await safe_call(cid, original_edit_card, mid, signal, remaining, phase, minimum_interval=interval)
+        return await safe_call(
+            cid, original_edit_card, mid, signal, remaining, phase,
+            minimum_interval=interval,
+        )
 
     app.edit_text = safe_edit_text
     app.edit_card = safe_edit_card
-    app._candice_telegram_ratefix_v5 = True
-    app.log.info('CANDICE TELEGRAM RATEFIX V5 ACTIVE — text=30s trade-card=15s pre-entry=5s + RetryAfter')
+    app._candice_telegram_ratefix_v6 = True
+    app.log.info(
+        'CANDICE TELEGRAM RATEFIX V6 ACTIVE — non-queued throttle: text=30s card-pre=5s card-trade=15s + RetryAfter drop'
+    )
