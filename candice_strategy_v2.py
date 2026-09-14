@@ -40,7 +40,8 @@ class StrategyPlan:
         return asdict(self)
 
 
-# Pattern-specific rules.  The bias is an expectation, not a guaranteed result.
+# Every pattern emitted by candice_patterns.py has an explicit strategy rule.
+# A pattern is evidence only; confirmation is still required before a signal.
 RULES = {
     "DOJI": PatternRule("DOJI", "NEUTRAL", "Wait for the next closed candle to break the Doji high/low with body confirmation.", (1, 2)),
     "SPINNING TOP": PatternRule("SPINNING TOP", "NEUTRAL", "Require the next candle to close beyond the pattern range in the chosen direction.", (1, 2)),
@@ -62,6 +63,12 @@ RULES = {
     "THREE BLACK CROWS": PatternRule("THREE BLACK CROWS", "DOWN", "Next candle should preserve lower closes without immediate rejection.", (3, 5)),
     "BULLISH KICKER": PatternRule("BULLISH KICKER", "UP", "Next candle should hold the gap/impulse and continue above the kicker high.", (2, 3, 5)),
     "BEARISH KICKER": PatternRule("BEARISH KICKER", "DOWN", "Next candle should hold the impulse and continue below the kicker low.", (2, 3, 5)),
+    "BULLISH THREE INSIDE": PatternRule("BULLISH THREE INSIDE", "UP", "Next candle must close above the three-inside high with bullish body.", (2, 3), True),
+    "BEARISH THREE INSIDE": PatternRule("BEARISH THREE INSIDE", "DOWN", "Next candle must close below the three-inside low with bearish body.", (2, 3), True),
+    "BULLISH THREE OUTSIDE": PatternRule("BULLISH THREE OUTSIDE", "UP", "Next candle must hold above the outside structure high.", (1, 2, 3)),
+    "BEARISH THREE OUTSIDE": PatternRule("BEARISH THREE OUTSIDE", "DOWN", "Next candle must hold below the outside structure low.", (1, 2, 3)),
+    "ABANDONED BABY BULLISH": PatternRule("ABANDONED BABY BULLISH", "UP", "Next candle must confirm above the abandoned-baby structure high.", (2, 3, 5), True),
+    "ABANDONED BABY BEARISH": PatternRule("ABANDONED BABY BEARISH", "DOWN", "Next candle must confirm below the abandoned-baby structure low.", (2, 3, 5), True),
     "INSIDE BAR": PatternRule("INSIDE BAR", "NEUTRAL", "Trade only after a confirmed break of the inside-bar high or low.", (1, 2)),
     "OUTSIDE BAR": PatternRule("OUTSIDE BAR", "NEUTRAL", "Require the next candle to confirm the closing-side breakout; reject immediate reversal conflict.", (1, 2, 3)),
     "BULLISH BREAKOUT CANDLE": PatternRule("BULLISH BREAKOUT CANDLE", "UP", "Next candle must hold above the broken level and avoid immediate rejection.", (1, 2, 3)),
@@ -84,11 +91,6 @@ def _same(frame: dict, direction: str) -> bool:
 
 
 def build_plan(snapshot: dict, frames: dict | None = None, patterns: Iterable[str] | None = None) -> StrategyPlan:
-    """Build a context-aware next-candle plan from already-closed candles.
-
-    The caller must still perform the actual next-candle confirmation.  This
-    function does not forecast a guaranteed candle and does not place trades.
-    """
     frames = frames or {}
     patterns = tuple(patterns or snapshot.get("candle_patterns", ()) or ())
     pattern = _first_pattern(patterns)
@@ -135,14 +137,11 @@ def build_plan(snapshot: dict, frames: dict | None = None, patterns: Iterable[st
     allowed = tuple(rule.base_expiries)
     adjustment = 0
 
-    # Neutral patterns are directionless until the next candle confirms a break.
     if expected == "NEUTRAL":
         expected = trend if trend in ("UP", "DOWN") else "WAIT"
         adjustment -= 8
         risks.append("pattern is not directional by itself")
 
-    # A reversal pattern should not be used against a strong trend without
-    # explicit next-candle confirmation and a location advantage.
     if rule.reversal and trend and rule.bias != trend:
         reasons.append("reversal pattern is opposite the primary trend")
         adjustment -= 8
@@ -173,8 +172,6 @@ def build_plan(snapshot: dict, frames: dict | None = None, patterns: Iterable[st
     if high_tf:
         reasons.append("10m and 15m support the primary direction")
 
-    # Situation controls duration.  Pattern rules only provide the starting
-    # range; context can shorten, lengthen, or invalidate that range.
     if situation == "STRONG_TREND" and mtf >= 3:
         preferred = 1 if body >= .75 and adx >= 35 else 2
         allowed = tuple(x for x in (1, 2, 3) if x in EXPIRIES)
@@ -193,7 +190,6 @@ def build_plan(snapshot: dict, frames: dict | None = None, patterns: Iterable[st
     else:
         preferred = allowed[0] if allowed else 0
 
-    # 10/15 minute expiries require higher-TF agreement; never extend a weak setup.
     if preferred >= 10 and not (high_tf and adx >= 25 and strength >= .8):
         preferred = 5 if 5 in allowed else 3 if 3 in allowed else 0
         risks.append("higher expiry blocked without higher-timeframe support")
