@@ -151,7 +151,12 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE OWN STRATEGY V4 FAILED', repr(exc))
     _install_own_brain_247_standalone(app)
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7 — MULTI-TF SELECTOR — STRATEGY BALANCER — STRATEGY AUDIT')
+    try:
+        from candice_final_guard import install as install_final_guard
+        install_final_guard(app)
+    except Exception as exc:
+        print('CANDICE FINAL GUARD FAILED', repr(exc))
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7 — MULTI-TF SELECTOR — STRATEGY BALANCER — STRATEGY AUDIT — FINAL GUARD')
 
 
 def _load_runtime():
