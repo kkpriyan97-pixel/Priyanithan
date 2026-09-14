@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 from typing import Any
 import requests
 from flask import Flask, jsonify, request
+from olymp_live import OlympLiveFeed
 
-VERSION='10.0-CANDICE-SIGNAL-ONLY'
+VERSION='10.1-CANDICE-OLYMP-LIVE-READONLY'
 AUTO_TRADE=False
 MARTINGALE=False
 EXPIRIES=(2,3,5,10,15)
@@ -18,6 +19,7 @@ logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(le
 log=logging.getLogger('candice'); app=Flask(__name__)
 candles:dict[str,deque]= {}; sent=set(); last_webhook=0.0
 risk={'date':'','losses':0,'streak':0,'signals':0,'wins':0,'losses_total':0}
+live_feed: OlympLiveFeed | None = None
 
 def reset_risk():
     d=datetime.now(timezone.utc).date().isoformat()
@@ -101,14 +103,20 @@ def process(p):
     expiry=int(p.get('expiry',p.get('duration',5)) or 5);expiry=min(EXPIRIES,key=lambda x:abs(x-expiry));entry=data[-1]['close'];ts=data[-1]['timestamp'];key=f'{asset}:{tech["direction"]}:{expiry}:{int(ts//60)}'
     if key in sent:return {'ok':True,'status':'DUPLICATE_BLOCKED','asset':asset}
     sent.add(key);risk['signals']+=1
-    text=('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • DEMO SIGNAL\n━━━━━━━━━━━━━━━━━━━━\n'+f'📈 Asset • {asset}\n➡️ Direction • {"🟢⬆️ UP" if tech["direction"]=="UP" else "🔴⬇️ DOWN"}\n💰 Entry • {entry}\n⏱️ Expiry • {expiry} min\n🧠 Confidence • {tech["confidence"]}%\n\n🔎 VERIFIED REASONS\n'+'\n'.join('• '+x for x in tech['reasons'])+'\n\n🕐 Timeframe • 1-minute\n🛡️ MANUAL ONLY • DEMO MODE\n🚫 AUTO-TRADE OFF • MARTINGALE OFF\n━━━━━━━━━━━━━━━━━━━━')
+    text=('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • DEMO SIGNAL\n━━━━━━━━━━━━━━━━━━━━\n'+f'📈 Asset • {asset}\n➡️ Direction • {"🟢⬆️ UP" if tech["direction"]=="UP" else "🔴⬇️ DOWN"}\n💰 Entry • {entry}\n⏱️ Expiry • {expiry} min\n🧠 Confidence • {tech["confidence"]}%\n\n🔎 VERIFIED REASONS\n'+'\n'.join('• '+x for x in tech['reasons'])+'\n\n🕐 Timeframe • 1-minute\n📡 Source • Olymp Trade live market data\n🛡️ READ-ONLY MARKET FEED • MANUAL ONLY\n🚫 AUTO-TRADE OFF • MARTINGALE OFF\n━━━━━━━━━━━━━━━━━━━━')
     ok=telegram(text);return {'ok':True,'status':'SIGNAL_SENT' if ok else 'SIGNAL_READY','asset':asset,'direction':tech['direction'],'confidence':tech['confidence'],'expiry':expiry,'telegram':ok}
 
+def on_olymp_candle(asset: str, candle: dict) -> None:
+    try:
+        process({'asset':asset,'candles':[candle],'expiry':5})
+    except Exception:
+        log.exception('Olymp candle processing error: %s', asset)
+
 @app.get('/')
-def root():return jsonify({'name':'Candice AI','version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False})
+def root():return jsonify({'name':'Candice AI','version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'market_source':'Olymp Trade live read-only'})
 @app.get('/health')
 def health():
-    reset_risk();return jsonify({'ok':True,'version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'timeframe':'1m','expiries':EXPIRIES,'assets':len(candles),'telegram_configured':bool(TOKEN and CHAT_ID),'last_webhook_at':last_webhook,'risk':risk})
+    reset_risk();return jsonify({'ok':True,'version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'timeframe':'1m','expiries':EXPIRIES,'assets':len(candles),'telegram_configured':bool(TOKEN and CHAT_ID),'last_webhook_at':last_webhook,'risk':risk,'olymp_live':live_feed.status() if live_feed else {'configured':False,'connected':False,'assets':[],'mode':'READ_ONLY_MARKET_DATA','auto_trade':False}})
 @app.post('/webhook/tradingview')
 def webhook():
     if SECRET and ((request.headers.get('X-Candice-Secret','') or request.args.get('secret',''))!=SECRET):return jsonify({'ok':False,'error':'unauthorized'}),401
@@ -126,4 +134,7 @@ def result():
     else:return jsonify({'ok':False,'error':'result must be WIN or LOSS'}),400
     return jsonify({'ok':True,'risk':risk})
 
-if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')),threaded=True)
+if __name__=='__main__':
+    live_feed=OlympLiveFeed(on_olymp_candle)
+    live_feed.start()
+    app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')),threaded=True)
