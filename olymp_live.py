@@ -1,9 +1,25 @@
 from __future__ import annotations
-import asyncio, logging, os, subprocess, sys, threading
+import asyncio, logging, os, subprocess, sys, threading, urllib.parse, urllib.request
 from pathlib import Path
 from typing import Callable
 log=logging.getLogger('candice.olymp_live')
 UPSTREAM='https://github.com/ChipaDevTeam/OlympTradeAPI.git'; LOCAL_API=Path('/tmp/candice_olymptrade_api')
+
+# Telegram command mode uses getUpdates polling. A previous webhook can silently
+# block polling, so clear only the stale webhook at process startup.
+def _clear_telegram_webhook():
+    token=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
+    if not token:return
+    try:
+        url=f'https://api.telegram.org/bot{token}/deleteWebhook'
+        data=urllib.parse.urlencode({'drop_pending_updates':'false'}).encode()
+        with urllib.request.urlopen(urllib.request.Request(url,data=data,method='POST'),timeout=8) as r:
+            ok=bool(__import__('json').loads(r.read().decode()).get('ok'))
+        log.info('Telegram polling startup: stale webhook cleared=%s',ok)
+    except Exception as e:
+        log.warning('Telegram webhook cleanup skipped: %s',e)
+
+_clear_telegram_webhook()
 
 def _load():
     target=LOCAL_API/'olymptrade_ws'
