@@ -86,6 +86,11 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE RUNTIME PATCH FAILED', repr(exc))
     try:
+        from candice_multi_tf_selector import install as install_multi_tf
+        install_multi_tf(app)
+    except Exception as exc:
+        print('CANDICE MULTI-TF SELECTOR FAILED', repr(exc))
+    try:
         from candice_ai_fallback import install as install_ai_fallback
         install_ai_fallback(app)
     except Exception as exc:
@@ -136,7 +141,7 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE OWN STRATEGY V4 FAILED', repr(exc))
     _install_own_brain_247_standalone(app)
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7')
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7 — MULTI-TF SELECTOR')
 
 
 def _load_runtime():
@@ -151,9 +156,6 @@ def _load_runtime():
         print('CANDICE OWN BRAIN 24/7 STANDALONE FAILED: app runtime not ready')
         return
 
-    # Do not wait for _card_base here: that attribute is created by the
-    # card-override layer itself. Waiting for it made the entire Telegram
-    # checkpoint/timer layer impossible to install on a clean boot.
     for _ in range(600):
         app = sys.modules.get('app') or sys.modules.get('__main__')
         if app is not None and hasattr(app, 'scan_once') and _runtime_ready(app):
