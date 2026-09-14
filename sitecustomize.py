@@ -167,8 +167,10 @@ def _load_runtime():
             app = sys.modules.get('app') or sys.modules.get('__main__')
             if app is None or not _runtime_ready(app):
                 continue
-            if not getattr(app, '_candice_ready_timer_v6', False):
-                print('CANDICE READY TIMER WATCHDOG: installing missing V6 layer')
+            # V7 is the current timer layer. Keep the watchdog marker in sync
+            # so it never repeatedly attempts a no-op reinstall.
+            if not getattr(app, '_candice_ready_timer_v7', False):
+                print('CANDICE READY TIMER WATCHDOG: installing missing V7 layer')
                 from candice_ready_timer import install as install_ready_timer
                 install_ready_timer(app)
         except Exception as exc:
