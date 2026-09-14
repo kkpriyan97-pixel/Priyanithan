@@ -5,7 +5,7 @@ from datetime import datetime
 
 
 def install(app):
-    if getattr(app, '_candice_checkpoint_v1', False):
+    if getattr(app, '_candice_checkpoint_v2', False):
         return
 
     base_scan = app.scan_once
@@ -94,6 +94,18 @@ def install(app):
                     asyncio.create_task(no_signal_timer(uid, checkpoint_ts, reason))
                     continue
 
+                # Analysis may finish before the exact entry window. Hold the
+                # qualified decision until the 10-second pre-entry window.
+                wait_to_entry = checkpoint_ts - time.time()
+                if wait_to_entry > app.PRE_ENTRY_SECONDS:
+                    await asyncio.sleep(max(0.0, wait_to_entry - app.PRE_ENTRY_SECONDS))
+                wait = checkpoint_ts - time.time()
+                if wait > app.PRE_ENTRY_SECONDS + 2 or wait < 1:
+                    reason = f'checkpoint_timing_missed seconds_to_entry={wait:.1f}'
+                    app.log.info('CANDICE 5M NO SIGNAL chat=%s pair=%s reason=%s', uid, asset, reason)
+                    asyncio.create_task(no_signal_timer(uid, checkpoint_ts, reason))
+                    continue
+
                 df, err = await app.broker.candles(asset, 60, 60, 120)
                 if err or df is None or df.empty:
                     reason = f'fresh_candle_failed: {err or "empty"}'
@@ -108,41 +120,34 @@ def install(app):
                     continue
                 entry = float(row.close)
                 candle_ts = float(row.timestamp)
-                entry_ts = checkpoint_ts
-                wait = entry_ts - time.time()
-                if wait > app.PRE_ENTRY_SECONDS + 5 or wait < 1:
-                    reason = f'checkpoint_timing_missed seconds_to_entry={wait:.1f}'
-                    app.log.info('CANDICE 5M NO SIGNAL chat=%s pair=%s reason=%s', uid, asset, reason)
-                    asyncio.create_task(no_signal_timer(uid, checkpoint_ts, reason))
-                    continue
                 key = f'{uid}:{asset}:{int(candle_ts)}'
                 if key in app.sent_keys:
                     reason = 'duplicate_candle_signal_blocked'
                     asyncio.create_task(no_signal_timer(uid, checkpoint_ts, reason))
                     continue
 
-                msg = await app.send_signal_card(uid, asset, direction, entry_ts, candle_ts, expiry, confidence, getattr(result, 'timeframe', '1m+3m+5m+10m+15m'), getattr(result, 'evidence', ()))
+                msg = await app.send_signal_card(uid, asset, direction, checkpoint_ts, candle_ts, expiry, confidence, getattr(result, 'timeframe', '1m+3m+5m+10m+15m'), getattr(result, 'evidence', ()))
                 if msg is None:
                     reason = 'telegram_signal_delivery_failed'
                     asyncio.create_task(no_signal_timer(uid, checkpoint_ts, reason))
                     continue
-                signal = app.Signal(asset, direction, confidence, expiry, entry, entry_ts, candle_ts, getattr(result, 'timeframe', '1m+3m+5m+10m+15m'), reason, getattr(result, 'evidence', ()))
+                signal = app.Signal(asset, direction, confidence, expiry, entry, checkpoint_ts, candle_ts, getattr(result, 'timeframe', '1m+3m+5m+10m+15m'), reason, getattr(result, 'evidence', ()))
                 app.active[uid] = signal
                 app.sent_keys.add(key)
                 asyncio.create_task(app.result_monitor(uid, signal, msg))
-                app.log.info('CANDICE 5M SIGNAL LOCKED chat=%s pair=%s entry=%s expiry=%s confidence=%s', uid, asset, datetime.fromtimestamp(entry_ts, app.UAE).strftime('%H:%M:%S UAE'), expiry, confidence)
+                app.log.info('CANDICE 5M SIGNAL LOCKED chat=%s pair=%s entry=%s expiry=%s confidence=%s', uid, asset, datetime.fromtimestamp(checkpoint_ts, app.UAE).strftime('%H:%M:%S UAE'), expiry, confidence)
             except Exception as exc:
                 reason = f'checkpoint_exception={exc}'
                 app.log.exception('CANDICE 5M CHECKPOINT FAILED chat=%s pair=%s', uid, asset)
                 asyncio.create_task(no_signal_timer(uid, checkpoint_ts, reason))
 
     async def fixed_scheduler():
-        app.log.info('CANDICE FIXED 5M SCHEDULER ACTIVE — checkpoints at :00/:05/:10/... — analysis starts 15s before boundary')
+        app.log.info('CANDICE FIXED 5M SCHEDULER V2 ACTIVE — checkpoints at :00/:05/:10/... — analysis starts 30s before boundary')
         while True:
             now = time.time()
             minute = int(now // 60)
             next_boundary = ((minute // 5) + 1) * 5 * 60
-            wake = next_boundary - 15
+            wake = next_boundary - 30
             if wake <= now:
                 wake += 300
             await asyncio.sleep(max(0.2, wake - time.time()))
@@ -159,5 +164,5 @@ def install(app):
 
     app.scan_once = wrapped_scan
     app.scheduler = fixed_scheduler
-    app._candice_checkpoint_v1 = True
-    app.log.info('CANDICE CHECKPOINT V1 ACTIVE — EXACT 5M BOUNDARIES — NO-SIGNAL REASONS + COUNTDOWN')
+    app._candice_checkpoint_v2 = True
+    app.log.info('CANDICE CHECKPOINT V2 ACTIVE — 30s analysis lead + exact 10s entry window + no-signal countdown')
