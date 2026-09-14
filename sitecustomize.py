@@ -85,6 +85,13 @@ def _install_layers(app):
         install_strategy_balancer(app)
     except Exception as exc:
         print('CANDICE STRATEGY BALANCER FAILED', repr(exc))
+    # Install signal-quality policy BEFORE Runtime V4 resolution and AI fallback.
+    # This lets V4 inherit the improved V2 builder and all AI providers share the same policy.
+    try:
+        from candice_signal_quality_fix import install as install_signal_quality_fix
+        install_signal_quality_fix(app)
+    except Exception as exc:
+        print('CANDICE SIGNAL QUALITY FIX FAILED', repr(exc))
     try:
         from candice_runtime_patch import install
         install(app)
