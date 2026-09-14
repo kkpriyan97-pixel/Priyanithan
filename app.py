@@ -1,28 +1,30 @@
 from __future__ import annotations
-import json, logging, os, time, threading
+import json, logging, math, os, threading, time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 import requests
 from flask import Flask, jsonify, request
 from olymp_live import OlympLiveFeed
 
-VERSION='10.2-CANDICE-OLYMP-LIVE-TELEGRAM'
+VERSION='11.0-CANDICE-FULL-BRAIN-READONLY'
 AUTO_TRADE=False
 MARTINGALE=False
 EXPIRIES=(2,3,5,10,15)
 MIN_CONFIDENCE=max(50,min(95,int(os.getenv('MIN_CONFIDENCE','65'))))
 MAX_DAILY_LOSSES=max(1,int(os.getenv('DAILY_MAX_LOSSES','5')))
-MAX_CONSECUTIVE_LOSSES=max(1,int(os.getenv('MAX_CONSECUTIVE_LOSSES','3')))
+MAX_CONSECUTIVE_LOSSES=max(1,int(os.getenv('MAX_CONSECUTIVE_LOSSES','3'))))
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); CHAT_ID=os.getenv('TELEGRAM_CHAT_ID','').strip(); SECRET=os.getenv('TRADINGVIEW_WEBHOOK_SECRET','').strip()
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 log=logging.getLogger('candice'); app=Flask(__name__)
-candles:dict[str,deque]= {}; sent=set(); last_webhook=0.0; telegram_offset=0
+candles:dict[str,deque]= {}
+sent=set(); last_webhook=0.0; telegram_offset=0
 risk={'date':'','losses':0,'streak':0,'signals':0,'wins':0,'losses_total':0}
 live_feed: OlympLiveFeed | None = None
 
+# UAE calendar day is used for daily risk reset.
 def reset_risk():
-    d=datetime.now(timezone.utc).date().isoformat()
+    d=(datetime.now(timezone.utc)+timedelta(hours=4)).date().isoformat()
     if risk['date']!=d:risk.update(date=d,losses=0,streak=0,signals=0,wins=0,losses_total=0)
 
 def f(v):
@@ -46,6 +48,9 @@ def ema(v,p):
     for x in v[p:]:z=x*k+z*(1-k)
     return z
 
+def sma(v,p):
+    return sum(v[-p:])/p if len(v)>=p else None
+
 def rsi(v,p=14):
     if len(v)<=p:return None
     d=[b-a for a,b in zip(v[-p-1:-1],v[-p:])]; g=sum(max(x,0) for x in d)/p; l=sum(max(-x,0) for x in d)/p
@@ -57,32 +62,108 @@ def atr(data,p=14):
     for a,b in zip(data[-p-1:-1],data[-p:]):z.append(max(b['high']-b['low'],abs(b['high']-a['close']),abs(b['low']-a['close'])))
     return sum(z)/p
 
+def macd(v):
+    if len(v)<35:return None,None,None
+    fast=[]; slow=[]
+    for i in range(25,len(v)+1):fast.append(ema(v[:i],12)); slow.append(ema(v[:i],26))
+    line=[a-b for a,b in zip(fast[-len(slow):],slow)]
+    sig=ema(line,9)
+    return line[-1],sig,(line[-1]-sig if sig is not None else None)
+
+def stochastic(data,p=14,signal=3):
+    if len(data)<p+signal:return None,None
+    k=[]
+    for i in range(p,len(data)+1):
+        w=data[i-p:i]; hi=max(x['high'] for x in w); lo=min(x['low'] for x in w); den=hi-lo
+        k.append(50 if den==0 else 100*(w[-1]['close']-lo)/den)
+    return k[-1],sma(k,signal)
+
+def adx(data,p=14):
+    if len(data)<p*2+1:return None,None,None
+    tr=[]; plus=[]; minus=[]
+    for a,b in zip(data[-(p*2+1):-1],data[-(p*2):]):
+        up=b['high']-a['high']; dn=a['low']-b['low']
+        tr.append(max(b['high']-b['low'],abs(b['high']-a['close']),abs(b['low']-a['close'])))
+        plus.append(up if up>dn and up>0 else 0); minus.append(dn if dn>up and dn>0 else 0)
+    atrs=[]; dx=[]
+    for i in range(p,len(tr)+1):
+        tv=sum(tr[i-p:i]); ps=100*sum(plus[i-p:i])/tv if tv else 0; ms=100*sum(minus[i-p:i])/tv if tv else 0
+        dx.append(100*abs(ps-ms)/(ps+ms) if ps+ms else 0); atrs.append((ps,ms))
+    if len(dx)<p:return None,None,None
+    av=sum(dx[-p:])/p; ps,ms=atrs[-1]
+    return av,ps,ms
+
+def levels(data):
+    w=data[-30:]
+    return min(x['low'] for x in w),max(x['high'] for x in w)
+
+def candle_pattern(last,prev):
+    body=abs(last['close']-last['open']); rng=max(last['high']-last['low'],1e-12)
+    upper=last['high']-max(last['open'],last['close']); lower=min(last['open'],last['close'])-last['low']
+    if body/rng<0.25 and lower/rng>0.55:return 'hammer_bullish'
+    if body/rng<0.25 and upper/rng>0.55:return 'shooting_star_bearish'
+    if last['close']>last['open'] and prev['close']<prev['open'] and last['close']>=prev['open'] and last['open']<=prev['close']:return 'bullish_engulfing'
+    if last['close']<last['open'] and prev['close']>prev['open'] and last['open']>=prev['close'] and last['close']<=prev['open']:return 'bearish_engulfing'
+    return 'neutral'
+
 def analyze(data):
-    if len(data)<30:return {'decision':'NO_SIGNAL','confidence':0,'direction':None,'reasons':['Need 30+ one-minute candles']}
-    c=[x['close'] for x in data]; e9=ema(c,9); e21=ema(c,21); e50=ema(c,50); rv=rsi(c); av=atr(data); last=data[-1]; prev=data[-2]
-    up=down=0; reasons=[]
+    if len(data)<60:return {'decision':'NO_SIGNAL','confidence':0,'direction':None,'reasons':[f'Need 60+ one-minute candles ({len(data)}/60)']}
+    c=[x['close'] for x in data]; last=data[-1]; prev=data[-2]
+    e9,e21,e50=ema(c,9),ema(c,21),ema(c,50); rv= rsi(c); av=atr(data); ml,ms,md=macd(c); sk,ss=stochastic(data); ax,di_p,di_m=adx(data); support,resistance=levels(data)
+    up=down=0; reasons=[]; confirmations=0; conflicts=0
+    # Trend: EMA alignment is the primary regime filter.
     if e9 and e21:
-        if e9>e21:up+=2;reasons.append('EMA9 > EMA21 bullish structure')
-        else:down+=2;reasons.append('EMA9 < EMA21 bearish structure')
+        if e9>e21:up+=2;reasons.append('EMA9 > EMA21 bullish')
+        else:down+=2;reasons.append('EMA9 < EMA21 bearish')
     if e21 and e50:
-        if e21>e50:up+=1;reasons.append('EMA21 > EMA50 trend support')
-        else:down+=1;reasons.append('EMA21 < EMA50 trend pressure')
+        if e21>e50:up+=2;reasons.append('EMA21 > EMA50 trend bullish')
+        else:down+=2;reasons.append('EMA21 < EMA50 trend bearish')
+    # Momentum.
     if rv is not None:
-        if 52<=rv<=68:up+=1;reasons.append(f'RSI {rv:.1f} supports upside')
-        elif 32<=rv<=48:down+=1;reasons.append(f'RSI {rv:.1f} supports downside')
-        elif rv>75:down+=1;reasons.append(f'RSI {rv:.1f} overbought warning')
-        elif rv<25:up+=1;reasons.append(f'RSI {rv:.1f} oversold warning')
-    if last['close']>last['open'] and last['close']>=prev['close']:up+=1;reasons.append('Latest 1m candle confirms bullish momentum')
-    if last['close']<last['open'] and last['close']<=prev['close']:down+=1;reasons.append('Latest 1m candle confirms bearish momentum')
-    rng=max(last['high']-last['low'],1e-12)
-    if abs(last['close']-last['open'])/rng>=.55:
-        if last['close']>last['open']:up+=1;reasons.append('Strong bullish candle body')
-        elif last['close']<last['open']:down+=1;reasons.append('Strong bearish candle body')
-    if av and rng<av*.35:up=max(0,up-1);down=max(0,down-1);reasons.append('Low-range candle reduces confidence')
-    if up==down:return {'decision':'NO_SIGNAL','confidence':0,'direction':None,'reasons':reasons[-4:]}
-    direction='UP' if up>down else 'DOWN'; lead=max(up,down); conf=min(92,55+lead*7+abs(up-down)*3)
-    if conf<MIN_CONFIDENCE:return {'decision':'NO_SIGNAL','confidence':conf,'direction':direction,'reasons':reasons[-4:]+[f'Confidence {conf}% below {MIN_CONFIDENCE}% threshold']}
-    return {'decision':'SIGNAL','confidence':conf,'direction':direction,'reasons':reasons[-4:]}
+        if 52<=rv<=68:up+=1;reasons.append(f'RSI {rv:.1f} bullish zone')
+        elif 32<=rv<=48:down+=1;reasons.append(f'RSI {rv:.1f} bearish zone')
+        elif rv>=75:down+=1;conflicts+=1;reasons.append(f'RSI {rv:.1f} overbought caution')
+        elif rv<=25:up+=1;conflicts+=1;reasons.append(f'RSI {rv:.1f} oversold caution')
+    if md is not None and ms is not None:
+        if md>0:up+=2;reasons.append('MACD histogram positive')
+        else:down+=2;reasons.append('MACD histogram negative')
+        if ml>ms:up+=1;reasons.append('MACD line above signal')
+        else:down+=1;reasons.append('MACD line below signal')
+    # Stochastic confirms momentum but penalizes chasing extremes.
+    if sk is not None and ss is not None:
+        if sk>ss and sk<80:up+=1;reasons.append(f'Stochastic K {sk:.1f} rising')
+        elif sk<ss and sk>20:down+=1;reasons.append(f'Stochastic K {sk:.1f} falling')
+        elif sk>=90:down+=1;conflicts+=1;reasons.append(f'Stochastic {sk:.1f} extreme high')
+        elif sk<=10:up+=1;conflicts+=1;reasons.append(f'Stochastic {sk:.1f} extreme low')
+    # ADX measures whether trend strength is sufficient.
+    if ax is not None:
+        if ax>=25:
+            if di_p>di_m:up+=2;reasons.append(f'ADX {ax:.1f} strong +DI trend')
+            elif di_m>di_p:down+=2;reasons.append(f'ADX {ax:.1f} strong -DI trend')
+        else:reasons.append(f'ADX {ax:.1f} weak trend filter')
+    # Price action and candle pattern.
+    if last['close']>last['open'] and last['close']>=prev['close']:up+=1;reasons.append('1m bullish momentum')
+    if last['close']<last['open'] and last['close']<=prev['close']:down+=1;reasons.append('1m bearish momentum')
+    pat=candle_pattern(last,prev)
+    if pat in ('hammer_bullish','bullish_engulfing'):up+=2;reasons.append(pat.replace('_',' '))
+    elif pat in ('shooting_star_bearish','bearish_engulfing'):down+=2;reasons.append(pat.replace('_',' '))
+    # Support/resistance proximity filter.
+    price=last['close'];
+    if av:
+        near_s=abs(price-support)<=av*.35; near_r=abs(resistance-price)<=av*.35
+        if near_s:up+=1;reasons.append('Price near support')
+        if near_r:down+=1;reasons.append('Price near resistance')
+        if last['high']-last['low']<av*.35:conflicts+=1;reasons.append('Very low-range candle')
+    # Consensus / confidence. No external model is required, so AI outages cannot break signals.
+    direction='UP' if up>down else 'DOWN' if down>up else None
+    edge=abs(up-down); raw=50+min(38,edge*4)+min(7,confirms if confirmations else 0)-min(8,conflicts*2)
+    conf=int(max(0,min(95,raw)))
+    # Hard quality gates prevent weak or internally conflicting setups.
+    if direction is None:return {'decision':'NO_SIGNAL','confidence':conf,'direction':None,'reasons':['Technical consensus is tied']+reasons[-5:]}
+    if ax is not None and ax<18:return {'decision':'NO_SIGNAL','confidence':conf,'direction':direction,'reasons':reasons[-5:]+['ADX below 18: trend too weak']}
+    if edge<3:return {'decision':'NO_SIGNAL','confidence':conf,'direction':direction,'reasons':reasons[-5:]+['Signal consensus too weak']}
+    if conf<MIN_CONFIDENCE:return {'decision':'NO_SIGNAL','confidence':conf,'direction':direction,'reasons':reasons[-5:]+[f'Confidence {conf}% below {MIN_CONFIDENCE}% threshold']}
+    return {'decision':'SIGNAL','confidence':conf,'direction':direction,'reasons':reasons[-7:],'indicators':{'EMA9':e9,'EMA21':e21,'EMA50':e50,'RSI':rv,'ATR':av,'MACD':ml,'MACD_signal':ms,'MACD_hist':md,'StochK':sk,'StochD':ss,'ADX':ax,'DI+':di_p,'DI-':di_m,'support':support,'resistance':resistance,'pattern':pat}}
 
 def telegram(text):
     if not TOKEN or not CHAT_ID:return False
@@ -92,50 +173,47 @@ def telegram(text):
 
 def telegram_command_loop():
     global telegram_offset
-    if not TOKEN or not CHAT_ID:
-        log.warning('Telegram command listener disabled: token/chat id not configured'); return
+    if not TOKEN or not CHAT_ID:log.warning('Telegram command listener disabled: token/chat id not configured');return
     log.info('Telegram command listener started')
     while True:
         try:
-            r=requests.get(f'https://api.telegram.org/bot{TOKEN}/getUpdates',params={'timeout':25,'offset':telegram_offset+1,'allowed_updates':json.dumps(['message'])},timeout=35); r.raise_for_status(); data=r.json()
+            r=requests.get(f'https://api.telegram.org/bot{TOKEN}/getUpdates',params={'timeout':25,'offset':telegram_offset+1,'allowed_updates':json.dumps(['message'])},timeout=35);r.raise_for_status();data=r.json()
             for u in data.get('result',[]):
-                telegram_offset=max(telegram_offset,u.get('update_id',telegram_offset))
-                m=u.get('message') or {}; chat=str((m.get('chat') or {}).get('id','')); text=str(m.get('text','')).strip().lower()
-                if chat!=CHAT_ID: continue
-                if text.startswith('/start'):
-                    telegram('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI\n━━━━━━━━━━━━━━━━━━━━\n✅ Bot is ONLINE\n📡 Olymp Trade • LIVE READ-ONLY MARKET DATA\n🕐 1-minute candle analysis\n⏱️ Expiry • 2 / 3 / 5 / 10 / 15 min\n🧠 AI signal engine • DEMO\n🛡️ MANUAL ONLY • AUTO-TRADE OFF\n🚫 MARTINGALE OFF\n\nUse /status to check live connection.\n━━━━━━━━━━━━━━━━━━━━')
+                telegram_offset=max(telegram_offset,u.get('update_id',telegram_offset));m=u.get('message') or {};chat=str((m.get('chat') or {}).get('id',''));text=str(m.get('text','')).strip().lower()
+                if chat!=CHAT_ID:continue
+                if text.startswith('/start'):telegram('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI 11.0\n━━━━━━━━━━━━━━━━━━━━\n✅ ONLINE\n📡 Olymp Trade • LIVE READ-ONLY\n🕐 1m candle engine\n🧠 Full technical consensus\n📊 EMA • RSI • MACD • Stoch • ADX • ATR • S/R • Price Action\n⏱️ Expiry • 2 / 3 / 5 / 10 / 15 min\n🛡️ DEMO / MANUAL ONLY\n🚫 AUTO-TRADE OFF • MARTINGALE OFF\n\n/status • live system status\n/performance • session results')
                 elif text.startswith('/status'):
-                    s=live_feed.status() if live_feed else {'configured':False,'connected':False,'assets':[]}
-                    telegram(f'🎯 CANDICE AI STATUS\n\n📡 Olymp feed • {"🟢 CONNECTED" if s.get("connected") else "🔴 NOT CONNECTED"}\n📈 Assets • {", ".join(s.get("assets",[])) or "-"}\n🕐 Timeframe • 1m\n🛡️ Read-only • YES\n🚫 Auto-trade • OFF\n🚫 Martingale • OFF')
-                elif text.startswith('/help'):
-                    telegram('🎯 CANDICE AI COMMANDS\n\n/start • Start bot\n/status • Live connection status\n/help • Commands')
-        except Exception as e:
-            log.warning('Telegram command listener error: %s',e)
-            time.sleep(5)
+                    s=live_feed.status() if live_feed else {'configured':False,'connected':False,'assets':[]};telegram(f'🎯 CANDICE AI STATUS\n\n📡 Olymp • {"🟢 CONNECTED" if s.get("connected") else "🔴 NOT CONNECTED"}\n📈 Assets • {", ".join(s.get("assets",[])) or "-"}\n🕐 Timeframe • 1m\n🧠 Full brain • ON\n🛡️ Read-only • YES\n🚫 Auto-trade • OFF\n🚫 Martingale • OFF')
+                elif text.startswith('/performance'):
+                    reset_risk();telegram(f'📊 CANDICE SESSION\nSignals • {risk["signals"]}\nWins • {risk["wins"]}\nLosses • {risk["losses_total"]}\nCurrent streak • {risk["streak"]}\nDaily loss stop • {MAX_DAILY_LOSSES}\nConsecutive stop • {MAX_CONSECUTIVE_LOSSES}')
+        except Exception as e:log.warning('Telegram command listener error: %s',e);time.sleep(5)
+
+def seed_olymp_history(asset,candle):
+    q=candles.setdefault(asset,deque(maxlen=300));q.append(candle)
 
 def process(p):
     global last_webhook
-    reset_risk();asset=str(p.get('asset',p.get('symbol','UNKNOWN'))).upper().strip() or 'UNKNOWN'; raw=normalize(p.get('candles',p.get('bars',[]))) or normalize([p])
+    reset_risk();asset=str(p.get('asset',p.get('symbol','UNKNOWN'))).upper().strip() or 'UNKNOWN';raw=normalize(p.get('candles',p.get('bars',[]))) or normalize([p])
     if raw:q=candles.setdefault(asset,deque(maxlen=300));q.extend(raw);data=list(q)
     else:data=list(candles.get(asset,[]))
     last_webhook=time.time();tech=analyze(data)
     if tech['decision']!='SIGNAL':return {'ok':True,'status':'NO_SIGNAL','asset':asset,'technical':tech}
-    if risk['losses']>=MAX_DAILY_LOSSES or risk['streak']>=MAX_CONSECUTIVE_LOSSES:return {'ok':True,'status':'RISK_STOP','asset':asset}
+    if risk['losses']>=MAX_DAILY_LOSSES or risk['streak']>=MAX_CONSECUTIVE_LOSSES:return {'ok':True,'status':'RISK_STOP','asset':asset,'reason':'Risk limit reached'}
     expiry=int(p.get('expiry',p.get('duration',5)) or 5);expiry=min(EXPIRIES,key=lambda x:abs(x-expiry));entry=data[-1]['close'];ts=data[-1]['timestamp'];key=f'{asset}:{tech["direction"]}:{expiry}:{int(ts//60)}'
     if key in sent:return {'ok':True,'status':'DUPLICATE_BLOCKED','asset':asset}
     sent.add(key);risk['signals']+=1
-    text=('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • DEMO SIGNAL\n━━━━━━━━━━━━━━━━━━━━\n'+f'📈 Asset • {asset}\n➡️ Direction • {"🟢⬆️ UP" if tech["direction"]=="UP" else "🔴⬇️ DOWN"}\n💰 Entry • {entry}\n⏱️ Expiry • {expiry} min\n🧠 Confidence • {tech["confidence"]}%\n\n🔎 VERIFIED REASONS\n'+'\n'.join('• '+x for x in tech['reasons'])+'\n\n🕐 Timeframe • 1-minute\n📡 Source • Olymp Trade live market data\n🛡️ READ-ONLY MARKET FEED • MANUAL ONLY\n🚫 AUTO-TRADE OFF • MARTINGALE OFF\n━━━━━━━━━━━━━━━━━━━━')
+    ind=tech.get('indicators',{});text=('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • DEMO SIGNAL\n━━━━━━━━━━━━━━━━━━━━\n'+f'📈 Asset • {asset}\n➡️ Direction • {"🟢⬆️ UP" if tech["direction"]=="UP" else "🔴⬇️ DOWN"}\n💰 Entry • {entry}\n⏱️ Expiry • {expiry} min\n🧠 Confidence • {tech["confidence"]}%\n\n🔎 FULL BRAIN CHECK\n'+'\n'.join('• '+x for x in tech['reasons'])+f'\n\n📊 RSI {ind.get("RSI",0):.1f} • ADX {ind.get("ADX",0) or 0:.1f} • ATR {ind.get("ATR",0) or 0:.4f}\n📍 S {ind.get("support",0):.4f} • R {ind.get("resistance",0):.4f}\n🕐 1-minute • Olymp live market data\n🛡️ READ-ONLY • MANUAL ONLY\n🚫 AUTO-TRADE OFF • MARTINGALE OFF\n━━━━━━━━━━━━━━━━━━━━')
     ok=telegram(text);return {'ok':True,'status':'SIGNAL_SENT' if ok else 'SIGNAL_READY','asset':asset,'direction':tech['direction'],'confidence':tech['confidence'],'expiry':expiry,'telegram':ok}
 
-def on_olymp_candle(asset: str,candle: dict)->None:
+def on_olymp_candle(asset,candle):
     try:process({'asset':asset,'candles':[candle],'expiry':5})
     except Exception:log.exception('Olymp candle processing error: %s',asset)
 
 @app.get('/')
-def root():return jsonify({'name':'Candice AI','version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'market_source':'Olymp Trade live read-only'})
+def root():return jsonify({'name':'Candice AI','version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'market_source':'Olymp Trade live read-only','brain':'EMA+RSI+MACD+STOCHASTIC+ADX+ATR+SUPPORT_RESISTANCE+PRICE_ACTION'})
 @app.get('/health')
 def health():
-    reset_risk();return jsonify({'ok':True,'version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'timeframe':'1m','expiries':EXPIRIES,'assets':len(candles),'telegram_configured':bool(TOKEN and CHAT_ID),'last_webhook_at':last_webhook,'risk':risk,'olymp_live':live_feed.status() if live_feed else {'configured':False,'connected':False,'assets':[],'mode':'READ_ONLY_MARKET_DATA','auto_trade':False}})
+    reset_risk();return jsonify({'ok':True,'version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'timeframe':'1m','expiries':EXPIRIES,'assets':len(candles),'telegram_configured':bool(TOKEN and CHAT_ID),'last_webhook_at':last_webhook,'risk':risk,'brain':'FULL_TECHNICAL_CONSENSUS','olymp_live':live_feed.status() if live_feed else {'configured':False,'connected':False,'assets':[],'mode':'READ_ONLY_MARKET_DATA','auto_trade':False}})
 @app.post('/webhook/tradingview')
 def webhook():
     if SECRET and ((request.headers.get('X-Candice-Secret','') or request.args.get('secret',''))!=SECRET):return jsonify({'ok':False,'error':'unauthorized'}),401
@@ -154,6 +232,6 @@ def result():
     return jsonify({'ok':True,'risk':risk})
 
 if __name__=='__main__':
-    live_feed=OlympLiveFeed(on_olymp_candle);live_feed.start()
+    live_feed=OlympLiveFeed(on_olymp_candle,seed_olymp_history);live_feed.start()
     threading.Thread(target=telegram_command_loop,daemon=True).start()
     app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')),threaded=True)
