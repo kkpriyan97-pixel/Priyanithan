@@ -128,7 +128,8 @@ class OlympLiveFeed:
         self.client = None
         self.forming = {}
         self.tick_count = 0
-        self._subscribe_lock = asyncio.Lock()
+        self.history_attempted = set()
+        self._subscribe_lock = None
 
     def start(self):
         if not self.enabled:
@@ -147,32 +148,50 @@ class OlympLiveFeed:
             self.connected = False
 
     async def _fetch_history(self, asset: str):
-        now = int(time.time())
-        payload = [{"pair": asset, "size": 60, "to": now, "solid": True}]
-        response = await self.client.send_request(10, payload, requires_response=True)
-        if isinstance(response, dict): return response.get("d", [])
-        return response or []
+        """Use the upstream market helper and treat unavailable history as a soft failure.
+        Some session-visible instruments stream ticks but reject historical event-10 requests.
+        Live analysis must continue rather than retrying and flooding the log.
+        """
+        if asset in self.history_attempted:
+            return []
+        self.history_attempted.add(asset)
+        try:
+            response = await self.client.market.get_candles(pair=asset, size=60, count=80, end_time=int(time.time()))
+            return response or []
+        except Exception as e:
+            log.warning("Historical candles unavailable for %s; live-tick warmup will be used (%s)", asset, type(e).__name__)
+            return []
+
+    async def _subscribe_asset(self, asset: str):
+        try:
+            await self.client.market.subscribe_ticks(asset)
+            log.info("Subscribed to Olymp live ticks: %s", asset)
+            return True
+        except Exception:
+            log.exception("Failed to subscribe to Olymp live ticks: %s", asset)
+            return False
 
     async def _metadata_cb(self, message):
         try:
             found = _extract_assets(message)
             new = found - set(self.assets)
-            if new:
-                self.discovered_assets.update(new)
-                self.assets.extend(sorted(new))
-                log.info("OLYMP_ASSETS_DISCOVERED count=%s assets=%s", len(self.assets), sorted(new))
-                for asset in sorted(new):
-                    try:
-                        history = await self._fetch_history(asset)
-                        seeded = await self._history(history, asset)
+            if not new:
+                return
+            self.discovered_assets.update(new)
+            self.assets.extend(sorted(new))
+            log.info("OLYMP_ASSETS_DISCOVERED count=%s assets=%s", len(self.assets), sorted(new))
+            for asset in sorted(new):
+                # Subscribe first so an asset can start warming up immediately.
+                await self._subscribe_asset(asset)
+                try:
+                    history = await self._fetch_history(asset)
+                    seeded = await self._history(history, asset)
+                    if seeded:
                         log.info("HISTORY_SEEDED asset=%s count=%s", asset, seeded)
-                    except Exception:
-                        log.exception("Failed history seed for discovered asset=%s", asset)
-                    try:
-                        await self.client.market.subscribe_ticks(asset)
-                        log.info("Subscribed to discovered Olymp asset: %s", asset)
-                    except Exception:
-                        log.exception("Failed tick subscription for discovered asset=%s", asset)
+                    else:
+                        log.info("LIVE_WARMUP asset=%s; historical seed unavailable", asset)
+                except Exception:
+                    log.exception("Failed history seed for discovered asset=%s", asset)
         except Exception:
             log.exception("Olymp asset metadata parsing failed")
 
@@ -189,8 +208,8 @@ class OlympLiveFeed:
         self.client.register_callback(parameters.E_TICK_UPDATE, tick_cb)
 
         # The upstream client mirrors the browser startup sequence. Register
-        # metadata callbacks before it runs so any account-visible instruments
-        # pushed by the session can be discovered and subscribed read-only.
+        # metadata callbacks before it runs so account/session market instruments
+        # can be discovered and subscribed read-only.
         for event_code in (220, 110, 700, 112, 140, 1038, 1037, 1039, 141, 22, 26, 111, 1054, 1076, 1301, 1097, 241, 230, 231, 75, 1055, 2223, 2301, 55, 150, 152, 151, 126, 602, 601, 2076):
             self.client.register_callback(event_code, self._metadata_cb)
 
@@ -203,21 +222,20 @@ class OlympLiveFeed:
             except Exception:
                 log.exception("Olymp session initialization failed; continuing with configured assets")
 
-            # Always keep explicitly configured assets as a safe fallback. If
-            # the account session exposes more instruments, callbacks above add them.
+            # Keep explicitly configured assets as a safe fallback. Session metadata
+            # can add more instruments dynamically without enabling any order API.
             initial = list(dict.fromkeys(self.assets))
             for asset in initial:
                 try:
                     history = await self._fetch_history(asset)
                     seeded = await self._history(history, asset)
-                    log.info("HISTORY_SEEDED asset=%s count=%s", asset, seeded)
+                    if seeded:
+                        log.info("HISTORY_SEEDED asset=%s count=%s", asset, seeded)
+                    else:
+                        log.info("LIVE_WARMUP asset=%s; historical seed unavailable", asset)
                 except Exception:
                     log.exception("Failed to load Olymp candle history: %s", asset)
-                try:
-                    await self.client.market.subscribe_ticks(asset)
-                    log.info("Subscribed to Olymp live ticks: %s", asset)
-                except Exception:
-                    log.exception("Failed to subscribe to Olymp live ticks: %s", asset)
+                await self._subscribe_asset(asset)
 
             while self.client.connection.is_connected:
                 await asyncio.sleep(15)
