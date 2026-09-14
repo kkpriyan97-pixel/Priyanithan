@@ -5,8 +5,8 @@ import time
 
 
 def install(app):
-    """Serialize Telegram edits, throttle traffic, and honor flood-control cooldowns."""
-    if getattr(app, '_candice_telegram_ratefix_v3', False):
+    """Serialize Telegram edits and throttle timer traffic by phase."""
+    if getattr(app, '_candice_telegram_ratefix_v4', False):
         return
 
     original_edit_text = app.edit_text
@@ -14,12 +14,14 @@ def install(app):
     locks = {}
     last_edit = {}
     cooldown_until = {}
-    minimum_interval = 1.25
+    text_interval = 30.0
+    card_trade_interval = 10.0
+    card_pre_interval = 1.0
 
     def lock_for(chat_id):
         return locks.setdefault(chat_id, asyncio.Lock())
 
-    async def wait_turn(chat_id):
+    async def wait_turn(chat_id, minimum_interval):
         async with lock_for(chat_id):
             now = time.monotonic()
             wait = max(0.0, minimum_interval - (now - last_edit.get(chat_id, 0.0)))
@@ -36,12 +38,9 @@ def install(app):
         except (TypeError, ValueError):
             return None
 
-    async def safe_call(cid, fn, *args):
-        await wait_turn(cid)
+    async def safe_call(cid, fn, *args, minimum_interval):
+        await wait_turn(cid, minimum_interval)
         try:
-            # IMPORTANT: cid belongs to the wrapped app method and must be
-            # passed through. The previous V2 wrapper accidentally dropped it,
-            # causing Telegram editMessageText to receive the text as message_id.
             return await fn(cid, *args)
         except Exception as exc:
             retry = retry_seconds(exc)
@@ -52,12 +51,13 @@ def install(app):
             raise
 
     async def safe_edit_text(cid, mid, text, reply_markup=None):
-        return await safe_call(cid, original_edit_text, mid, text, reply_markup)
+        return await safe_call(cid, original_edit_text, mid, text, reply_markup, minimum_interval=text_interval)
 
     async def safe_edit_card(cid, mid, signal, remaining, phase):
-        return await safe_call(cid, original_edit_card, mid, signal, remaining, phase)
+        interval = card_pre_interval if phase == 'pre' else card_trade_interval
+        return await safe_call(cid, original_edit_card, mid, signal, remaining, phase, minimum_interval=interval)
 
     app.edit_text = safe_edit_text
     app.edit_card = safe_edit_card
-    app._candice_telegram_ratefix_v3 = True
-    app.log.info('CANDICE TELEGRAM RATEFIX V3 ACTIVE — %.2fs minimum interval + RetryAfter cooldown', minimum_interval)
+    app._candice_telegram_ratefix_v4 = True
+    app.log.info('CANDICE TELEGRAM RATEFIX V4 ACTIVE — text=30s trade-card=10s pre-entry=1s + RetryAfter')
