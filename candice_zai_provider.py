@@ -23,7 +23,7 @@ def _extract_json(text):
 
 
 def install(app):
-    if getattr(app, "_candice_zai_v1", False):
+    if getattr(app, "_candice_zai_v2", False):
         return
     import candice_engine as engine
     previous = engine.ai_review
@@ -33,14 +33,17 @@ def install(app):
         if not key or key == "PLEASE_SET_YOUR_ZAI_API_KEY":
             return previous(snapshot, memory)
         models = [x.strip() for x in os.getenv("ZAI_MODELS", "glm-4.7-flash,glm-4.5-flash").split(",") if x.strip()]
-        prompt = engine._ai_prompt(snapshot, memory or {}) + "\nReturn exactly one JSON object: decision, direction, confidence, expiry, reason."
+        prompt = engine._ai_prompt(snapshot, memory or {}) + "\nReturn exactly one JSON object: decision, direction, confidence, expiry, reason. Do not use markdown."
         for model in models:
             for attempt in range(2):
                 try:
+                    # Do not force provider-side response_format. Some Z.ai/GLM
+                    # deployments reject or ignore it; plain JSON prompting is
+                    # more compatible and _extract_json validates the result.
                     r = requests.post(
                         "https://api.z.ai/api/paas/v4/chat/completions",
                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                        json={"model": model, "messages":[{"role":"user","content":prompt}],"temperature":0.1,"max_tokens":400,"response_format":{"type":"json_object"}},
+                        json={"model": model, "messages":[{"role":"user","content":prompt}],"temperature":0.1,"max_tokens":400},
                         timeout=min(float(getattr(engine, "AI_TIMEOUT", 18.0)), 10.0),
                     )
                     if not r.ok:
@@ -68,5 +71,5 @@ def install(app):
         return previous(snapshot, memory)
 
     engine.ai_review = review
-    app._candice_zai_v1 = True
-    app.log.info("CANDICE Z.AI GLM FLASH ROTATION ACTIVE — FAILOVER")
+    app._candice_zai_v2 = True
+    app.log.info("CANDICE Z.AI GLM FLASH ROTATION V2 ACTIVE — PROVIDER-SCHEMA COMPATIBILITY FIX — FAILOVER")
