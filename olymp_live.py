@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -25,15 +26,11 @@ def _clear_telegram_webhook():
     try:
         url = f"https://api.telegram.org/bot{token}/deleteWebhook"
         data = urllib.parse.urlencode({"drop_pending_updates": "false"}).encode()
-        with urllib.request.urlopen(
-            urllib.request.Request(url, data=data, method="POST"), timeout=8
-        ) as r:
+        with urllib.request.urlopen(urllib.request.Request(url, data=data, method="POST"), timeout=8) as r:
             ok = bool(json.loads(r.read().decode()).get("ok"))
         log.info("Telegram polling startup: stale webhook cleared=%s", ok)
     except Exception as e:
-        log.warning(
-            "Telegram webhook cleanup failed (token not logged): %s", type(e).__name__
-        )
+        log.warning("Telegram webhook cleanup failed (token not logged): %s", type(e).__name__)
 
 
 _clear_telegram_webhook()
@@ -42,18 +39,10 @@ _clear_telegram_webhook()
 def _load():
     target = LOCAL_API / "olymptrade_ws"
     if not target.exists():
-        subprocess.run(
-            ["git", "clone", "--depth", "1", UPSTREAM, str(LOCAL_API)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=60,
-        )
+        subprocess.run(["git", "clone", "--depth", "1", UPSTREAM, str(LOCAL_API)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=60)
     sys.path.insert(0, str(LOCAL_API))
     from olymptrade_ws.core.client import OlympTradeClient
     from olymptrade_ws.olympconfig import parameters
-
     return OlympTradeClient, parameters
 
 
@@ -65,7 +54,6 @@ def _num(v):
 
 
 def _rows(value):
-    """Flatten Olymp historical-candle response shapes without losing parent defaults."""
     if isinstance(value, list):
         out = []
         for item in value:
@@ -73,53 +61,74 @@ def _rows(value):
         return out
     if not isinstance(value, dict):
         return []
-
-    # A normal historical response is d -> [{p, tf, candles:[...]}].
     candles = value.get("candles")
     if isinstance(candles, list):
         parent_asset = value.get("p", value.get("pair", value.get("symbol")))
         out = []
         for item in candles:
-            if isinstance(item, dict) and parent_asset and not any(
-                k in item for k in ("p", "pair", "symbol")
-            ):
-                item = dict(item)
-                item["p"] = parent_asset
+            if isinstance(item, dict) and parent_asset and not any(k in item for k in ("p", "pair", "symbol")):
+                item = dict(item); item["p"] = parent_asset
             out.extend(_rows(item))
         return out
-
     for key in ("data", "d", "items", "result"):
         val = value.get(key)
         if isinstance(val, (list, dict)):
             nested = _rows(val)
             if nested:
                 return nested
-
     return [value]
+
+
+_ASSET_RE = re.compile(r"^[A-Z0-9]{3,30}(?:_[A-Z0-9]+)*$")
+_ASSET_KEYS = {"p", "pair", "symbol", "asset", "instrument", "instrument_id"}
+_COLLECTION_KEYS = {"assets", "pairs", "instruments", "symbols", "markets"}
+
+
+def _extract_assets(value):
+    """Extract plausible instrument symbols only from explicit market fields."""
+    found = set()
+    def walk(v, key=""):
+        if isinstance(v, dict):
+            for k, item in v.items():
+                lk = str(k).lower()
+                if lk in _ASSET_KEYS:
+                    vals = item if isinstance(item, list) else [item]
+                    for candidate in vals:
+                        if isinstance(candidate, dict):
+                            for kk in ("p", "pair", "symbol", "asset"):
+                                s = str(candidate.get(kk, "")).upper().strip()
+                                if _ASSET_RE.fullmatch(s): found.add(s)
+                        else:
+                            s = str(candidate).upper().strip()
+                            if _ASSET_RE.fullmatch(s): found.add(s)
+                elif lk in _COLLECTION_KEYS and isinstance(item, (list, dict)):
+                    walk(item, lk)
+                else:
+                    walk(item, lk)
+        elif isinstance(v, list):
+            for item in v: walk(item, key)
+    walk(value)
+    return found
 
 
 class OlympLiveFeed:
     """Read-only Olymp market feed; builds 1m candles from live ticks."""
 
-    def __init__(
-        self,
-        on_candle: Callable[[str, dict], None],
-        on_history: Callable[[str, dict], None] | None = None,
-    ):
+    def __init__(self, on_candle: Callable[[str, dict], None], on_history: Callable[[str, dict], None] | None = None):
         self.on_candle = on_candle
         self.on_history = on_history
         self.token = os.getenv("OLYMPTRADE_ACCESS_TOKEN", "").strip()
-        self.assets = [
-            x.strip().upper()
-            for x in os.getenv("OLYMPTRADE_ASSETS", "ASIA_X").split(",")
-            if x.strip()
-        ]
+        configured = [x.strip().upper() for x in os.getenv("OLYMPTRADE_ASSETS", "ASIA_X").split(",") if x.strip()]
+        self.assets = list(dict.fromkeys(configured))
+        self.configured_assets = list(self.assets)
+        self.discovered_assets = set()
         self.enabled = bool(self.token)
         self.connected = False
         self.thread = None
         self.client = None
         self.forming = {}
         self.tick_count = 0
+        self._subscribe_lock = asyncio.Lock()
 
     def start(self):
         if not self.enabled:
@@ -138,19 +147,34 @@ class OlympLiveFeed:
             self.connected = False
 
     async def _fetch_history(self, asset: str):
-        """Fetch the real Olymp candle response directly.
-
-        The upstream helper currently expects e:1003, while the live server
-        returns the candle batch with e:10 and d:[{p,tf,candles:[...]}].
-        Using send_request here preserves that valid response instead of
-        discarding it as an error.
-        """
         now = int(time.time())
         payload = [{"pair": asset, "size": 60, "to": now, "solid": True}]
         response = await self.client.send_request(10, payload, requires_response=True)
-        if isinstance(response, dict):
-            return response.get("d", [])
+        if isinstance(response, dict): return response.get("d", [])
         return response or []
+
+    async def _metadata_cb(self, message):
+        try:
+            found = _extract_assets(message)
+            new = found - set(self.assets)
+            if new:
+                self.discovered_assets.update(new)
+                self.assets.extend(sorted(new))
+                log.info("OLYMP_ASSETS_DISCOVERED count=%s assets=%s", len(self.assets), sorted(new))
+                for asset in sorted(new):
+                    try:
+                        history = await self._fetch_history(asset)
+                        seeded = await self._history(history, asset)
+                        log.info("HISTORY_SEEDED asset=%s count=%s", asset, seeded)
+                    except Exception:
+                        log.exception("Failed history seed for discovered asset=%s", asset)
+                    try:
+                        await self.client.market.subscribe_ticks(asset)
+                        log.info("Subscribed to discovered Olymp asset: %s", asset)
+                    except Exception:
+                        log.exception("Failed tick subscription for discovered asset=%s", asset)
+        except Exception:
+            log.exception("Olymp asset metadata parsing failed")
 
     async def _main(self):
         try:
@@ -158,29 +182,37 @@ class OlympLiveFeed:
         except Exception:
             log.exception("Unable to load OlympTrade API source")
             return
-
         self.client = Client(access_token=self.token)
 
         async def tick_cb(message):
             await self._ticks(message)
-
         self.client.register_callback(parameters.E_TICK_UPDATE, tick_cb)
+
+        # The upstream client mirrors the browser startup sequence. Register
+        # metadata callbacks before it runs so any account-visible instruments
+        # pushed by the session can be discovered and subscribed read-only.
+        for event_code in (220, 110, 700, 112, 140, 1038, 1037, 1039, 141, 22, 26, 111, 1054, 1076, 1301, 1097, 241, 230, 231, 75, 1055, 2223, 2301, 55, 150, 152, 151, 126, 602, 601, 2076):
+            self.client.register_callback(event_code, self._metadata_cb)
 
         try:
             await self.client.start()
             self.connected = True
-            log.info(
-                "Olymp live market connection established; assets=%s", self.assets
-            )
+            try:
+                await self.client.initialize_session()
+                log.info("Olymp browser-like session initialization completed; account market metadata requested")
+            except Exception:
+                log.exception("Olymp session initialization failed; continuing with configured assets")
 
-            for asset in self.assets:
+            # Always keep explicitly configured assets as a safe fallback. If
+            # the account session exposes more instruments, callbacks above add them.
+            initial = list(dict.fromkeys(self.assets))
+            for asset in initial:
                 try:
                     history = await self._fetch_history(asset)
                     seeded = await self._history(history, asset)
                     log.info("HISTORY_SEEDED asset=%s count=%s", asset, seeded)
                 except Exception:
                     log.exception("Failed to load Olymp candle history: %s", asset)
-
                 try:
                     await self.client.market.subscribe_ticks(asset)
                     log.info("Subscribed to Olymp live ticks: %s", asset)
@@ -199,106 +231,50 @@ class OlympLiveFeed:
                 pass
 
     async def _history(self, history, default_asset=""):
-        if not self.on_history:
-            return 0
-
+        if not self.on_history: return 0
         parsed = []
         for x in _rows(history):
-            asset = str(
-                x.get("p", x.get("pair", x.get("symbol", default_asset)))
-                or default_asset
-            ).upper()
-            o = _num(x.get("open", x.get("o")))
-            hi = _num(x.get("high", x.get("h")))
-            lo = _num(x.get("low", x.get("l")))
-            c = _num(x.get("close", x.get("c")))
+            asset = str(x.get("p", x.get("pair", x.get("symbol", default_asset))) or default_asset).upper()
+            o, hi, lo, c = _num(x.get("open", x.get("o"))), _num(x.get("high", x.get("h"))), _num(x.get("low", x.get("l"))), _num(x.get("close", x.get("c")))
             t = _num(x.get("t", x.get("timestamp", x.get("time"))))
-            if None in (o, hi, lo, c, t) or not asset:
-                continue
-            if t > 10_000_000_000:
-                t /= 1000.0
-            if hi < max(o, c) or lo > min(o, c) or hi < lo:
-                continue
-            parsed.append(
-                (
-                    asset,
-                    t,
-                    {
-                        "open": o,
-                        "high": hi,
-                        "low": lo,
-                        "close": c,
-                        "timestamp": t,
-                    },
-                )
-            )
-
+            if None in (o, hi, lo, c, t) or not asset: continue
+            if t > 10_000_000_000: t /= 1000.0
+            if hi < max(o, c) or lo > min(o, c) or hi < lo: continue
+            parsed.append((asset, t, {"open": o, "high": hi, "low": lo, "close": c, "timestamp": t}))
         parsed.sort(key=lambda z: z[1])
-        seen = set()
-        count = 0
+        seen, count = set(), 0
         for asset, t, candle in parsed:
             key = (asset, int(t))
-            if key in seen:
-                continue
-            seen.add(key)
-            self.on_history(asset, candle)
-            count += 1
+            if key in seen: continue
+            seen.add(key); self.on_history(asset, candle); count += 1
         return count
 
     async def _ticks(self, message):
         rows = message.get("d", []) if isinstance(message, dict) else message
-        if isinstance(rows, dict):
-            rows = [rows]
-        if not isinstance(rows, list):
-            return
-
+        if isinstance(rows, dict): rows = [rows]
+        if not isinstance(rows, list): return
         for x in rows:
-            if not isinstance(x, dict):
-                continue
-            asset = str(
-                x.get("p", x.get("pair", x.get("symbol", "")))
-            ).upper()
+            if not isinstance(x, dict): continue
+            asset = str(x.get("p", x.get("pair", x.get("symbol", "")))).upper()
             try:
                 price = float(x.get("q", x.get("price", x.get("close"))))
                 ts = float(x.get("t", x.get("timestamp", x.get("time"))))
-            except (TypeError, ValueError):
-                continue
-            if asset not in self.assets:
-                continue
-            if ts > 10_000_000_000:
-                ts /= 1000.0
-
+            except (TypeError, ValueError): continue
+            if asset not in self.assets: continue
+            if ts > 10_000_000_000: ts /= 1000.0
             self.tick_count += 1
-            if self.tick_count == 1:
-                log.info(
-                    "First live Olymp tick received: asset=%s price=%s", asset, price
-                )
-
+            if self.tick_count == 1: log.info("First live Olymp tick received: asset=%s price=%s", asset, price)
             bucket = int(ts // 60) * 60
             cur = self.forming.get(asset)
             if cur is None or cur["timestamp"] != bucket:
-                if cur is not None:
-                    self.on_candle(asset, cur)
-                cur = {
-                    "open": price,
-                    "high": price,
-                    "low": price,
-                    "close": price,
-                    "timestamp": float(bucket),
-                }
+                if cur is not None: self.on_candle(asset, cur)
+                cur = {"open": price, "high": price, "low": price, "close": price, "timestamp": float(bucket)}
                 self.forming[asset] = cur
             else:
-                cur["high"] = max(cur["high"], price)
-                cur["low"] = min(cur["low"], price)
-                cur["close"] = price
+                cur["high"] = max(cur["high"], price); cur["low"] = min(cur["low"], price); cur["close"] = price
 
     def status(self):
-        return {
-            "configured": self.enabled,
-            "connected": self.connected,
-            "assets": self.assets,
-            "mode": "READ_ONLY_MARKET_DATA",
-            "timeframe": "1m_from_live_ticks",
-            "auto_trade": False,
-            "ticks_received": self.tick_count,
-        }
+        return {"configured": self.enabled, "connected": self.connected, "assets": self.assets,
+                "configured_assets": self.configured_assets, "discovered_assets": sorted(self.discovered_assets),
+                "asset_discovery": "session_metadata", "mode": "READ_ONLY_MARKET_DATA",
+                "timeframe": "1m_from_live_ticks", "auto_trade": False, "ticks_received": self.tick_count}
