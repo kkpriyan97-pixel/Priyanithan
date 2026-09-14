@@ -6,7 +6,7 @@ import time
 
 def install(app):
     """Put the live 5-minute decision countdown directly on the ASSET READY card."""
-    if getattr(app, '_candice_ready_timer_v10', False):
+    if getattr(app, '_candice_ready_timer_v11', False):
         return
 
     base_asset_callback = getattr(app, 'asset_callback', None)
@@ -54,15 +54,14 @@ def install(app):
             f'🛡️ MANUAL TRADE ONLY • AUTO-TRADE OFF'
         )
 
-    async def edit_raw(tg, uid, mid, text):
+    async def edit_ready(tg, uid, mid, text):
+        """Use the shared rate-limited Telegram edit path; never bypass flood control."""
         try:
-            await tg.bot.edit_message_text(
-                chat_id=uid,
-                message_id=mid,
-                text=text,
-                disable_web_page_preview=True,
-            )
-            return True, None
+            editor = getattr(app, 'edit_text', None)
+            if editor is None:
+                raise RuntimeError('shared Telegram edit guard is unavailable')
+            result = await editor(uid, mid, text, None)
+            return bool(result), None
         except Exception as exc:
             retry = getattr(exc, 'retry_after', None)
             try:
@@ -96,10 +95,6 @@ def install(app):
                     return
 
                 remaining = max(0, int(boundary - time.time()))
-
-                # Telegram-safe schedule: one update every 30s, plus a single
-                # 10-second checkpoint update and the boundary update. Never
-                # generate a 1-second edit storm that can trigger flood control.
                 if remaining <= 10:
                     display = remaining if remaining in (10, 0) else 10
                 else:
@@ -114,7 +109,7 @@ def install(app):
 
                 if should_edit:
                     last_attempt = now_mono
-                    ok, retry = await edit_raw(
+                    ok, retry = await edit_ready(
                         tg, uid, message_id, build_ready_text(asset, boundary)
                     )
                     if ok:
@@ -163,7 +158,7 @@ def install(app):
         )
 
     app.asset_callback = patched_asset_callback
-    app._candice_ready_timer_v10 = True
+    app._candice_ready_timer_v11 = True
     app.log.info(
-        'CANDICE ASSET READY TIMER V10 ACTIVE — same card + percentage + flood-safe automatic countdown'
+        'CANDICE ASSET READY TIMER V11 ACTIVE — SAME CARD + PERCENTAGE + SHARED FLOOD GUARD'
     )
