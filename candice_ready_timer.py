@@ -6,7 +6,7 @@ import time
 
 def install(app):
     """Put the live 5-minute decision countdown directly on the ASSET READY card."""
-    if getattr(app, '_candice_ready_timer_v11', False):
+    if getattr(app, '_candice_ready_timer_v12', False):
         return
 
     base_asset_callback = getattr(app, 'asset_callback', None)
@@ -85,7 +85,7 @@ def install(app):
         last_attempt = 0.0
         blocked_until = 0.0
         app.log.info(
-            'ASSET READY TIMER START chat=%s asset=%s message_id=%s mode=SAME_READY_CARD',
+            'ASSET READY TIMER START chat=%s asset=%s message_id=%s mode=SAME_READY_CARD cadence=1s',
             uid, asset, message_id,
         )
 
@@ -95,16 +95,16 @@ def install(app):
                     return
 
                 remaining = max(0, int(boundary - time.time()))
-                if remaining <= 10:
-                    display = remaining if remaining in (10, 0) else 10
-                else:
-                    display = remaining - (remaining % 30)
+                # Render every second. Telegram is a networked UI, so 1s is
+                # the practical target; 0.5s would only create duplicate edits
+                # and greatly increase flood-control risk.
+                display = remaining
 
                 now_mono = time.monotonic()
                 should_edit = (
                     display != last_display
                     and now_mono >= blocked_until
-                    and (now_mono - last_attempt >= 4.0)
+                    and (now_mono - last_attempt >= 1.0)
                 )
 
                 if should_edit:
@@ -123,13 +123,13 @@ def install(app):
                     )
 
                 if remaining <= 0:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.2)
                     boundary = next_boundary()
                     last_display = None
                     blocked_until = 0.0
                     continue
 
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.2)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -153,12 +153,12 @@ def install(app):
             ready_countdown(uid, asset, q.message.message_id)
         )
         app.log.info(
-            'ASSET READY TIMER TASK CREATED chat=%s asset=%s message_id=%s same_card=TRUE',
+            'ASSET READY TIMER TASK CREATED chat=%s asset=%s message_id=%s same_card=TRUE cadence=1s',
             uid, asset, q.message.message_id,
         )
 
     app.asset_callback = patched_asset_callback
-    app._candice_ready_timer_v11 = True
+    app._candice_ready_timer_v12 = True
     app.log.info(
-        'CANDICE ASSET READY TIMER V11 ACTIVE — SAME CARD + PERCENTAGE + SHARED FLOOD GUARD'
+        'CANDICE ASSET READY TIMER V12 ACTIVE — SAME CARD + 1S COUNTDOWN + PERCENTAGE + SHARED FLOOD GUARD'
     )
