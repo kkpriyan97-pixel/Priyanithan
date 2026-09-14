@@ -2,8 +2,8 @@
 
 This hook only intercepts Telegram Bot API traffic. It learns the real private
 chat from /start/getUpdates and uses that chat for outgoing sendMessage calls,
-which prevents a stale TELEGRAM_CHAT_ID from causing persistent 403/permission
-failures. No bot token or full API URL is ever logged.
+which prevents a stale TELEGRAM_CHAT_ID from causing persistent delivery
+failures. Telegram errors are logged without URLs or tokens.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import os
 import threading
 
 import requests
+from requests import Response
 
 _LOG = logging.getLogger("candice.telegram_transport")
 _TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -59,6 +60,17 @@ def _telegram_request(self, method, url, **kwargs):
         code = data.get("error_code", response.status_code)
         desc = data.get("description", "unknown Telegram API error")
         _LOG.warning("Telegram send failed: code=%s description=%s", code, desc)
+
+    # Never let the application's requests.raise_for_status() print a Telegram
+    # URL containing the bot token. A polling conflict is temporary during
+    # overlapping Render instances, so return an empty successful update set.
+    if is_updates and response.status_code == 409:
+        safe = Response()
+        safe.status_code = 200
+        safe._content = b'{"ok":true,"result":[]}'
+        safe.headers["Content-Type"] = "application/json"
+        safe.url = "https://api.telegram.org/bot<redacted>/getUpdates"
+        return safe
 
     return response
 
