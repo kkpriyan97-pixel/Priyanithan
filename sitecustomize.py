@@ -1,4 +1,4 @@
-"""Startup hooks for safe Telegram transport, strategy gating and outcomes."""
+"""Candice A-Z runtime hardening: Telegram access binding, live countdown, strategy gate and outcomes."""
 from __future__ import annotations
 import logging, os, sys, threading, time
 import requests
@@ -8,14 +8,58 @@ _LOG = logging.getLogger("candice.telegram_transport")
 _TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 _CONFIGURED_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 _ACTIVE_CHAT = _CONFIGURED_CHAT
+_ACCESS_CODE = os.getenv("CANDICE_ACCESS_CODE", "").strip()
 _LOCK = threading.RLock()
 _ORIGINAL_REQUEST = requests.sessions.Session.request
+_LAST_SIGNAL_MESSAGE = {}
+_TIMER_RUNNING = set()
+
+
+def _edit_message(chat_id, message_id, text):
+    if not _TOKEN or not chat_id or not message_id:
+        return False
+    try:
+        r = _ORIGINAL_REQUEST(requests.Session(), "POST", f"https://api.telegram.org/bot{_TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": True}, timeout=15)
+        return r.ok
+    except Exception:
+        return False
+
+
+def _timer_worker(asset, direction, entry, expiry, chat_id, message_id, confidence):
+    key = (str(chat_id), int(message_id))
+    with _LOCK:
+        if key in _TIMER_RUNNING:
+            return
+        _TIMER_RUNNING.add(key)
+    try:
+        end = time.time() + int(expiry) * 60
+        while True:
+            remain = max(0, int(end - time.time()))
+            if remain <= 0:
+                break
+            mm, ss = divmod(remain, 60)
+            text = ("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🟢 SIGNAL • {direction}\n📈 Asset • {asset}\n💰 Entry • {entry:.6f}\n⏱️ Expiry • {expiry} min\n"
+                    f"⏳ TIMER • {mm:02d}:{ss:02d}\n🧠 Confidence • {confidence}%\n"
+                    "📡 Source • Olymp Trade live market data\n🛡️ READ-ONLY / DEMO / MANUAL ONLY\n🚫 Auto-trade OFF • Martingale OFF")
+            _edit_message(chat_id, message_id, text)
+            time.sleep(10)
+        _edit_message(chat_id, message_id, (
+            "━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • EXPIRY\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏰ TIMER • 00:00\n📈 Asset • {asset}\n➡️ Direction • {direction}\n"
+            f"💰 Entry • {entry:.6f}\n🏁 EXPIRY REACHED\n"
+            "📊 Waiting for completed candle outcome…\n🛡️ READ-ONLY / DEMO / MANUAL ONLY"))
+    finally:
+        with _LOCK:
+            _TIMER_RUNNING.discard(key)
 
 
 def _telegram_request(self, method, url, **kwargs):
     global _ACTIVE_CHAT
-    if "api.telegram.org" not in str(url): return _ORIGINAL_REQUEST(self, method, url, **kwargs)
-    is_updates, is_send = str(url).endswith("/getUpdates"), str(url).endswith("/sendMessage")
+    url_s = str(url)
+    if "api.telegram.org" not in url_s:
+        return _ORIGINAL_REQUEST(self, method, url, **kwargs)
+    is_updates, is_send = url_s.endswith("/getUpdates"), url_s.endswith("/sendMessage")
     if is_send and _ACTIVE_CHAT:
         payload = kwargs.get("json")
         if isinstance(payload, dict):
@@ -23,15 +67,44 @@ def _telegram_request(self, method, url, **kwargs):
     response = _ORIGINAL_REQUEST(self, method, url, **kwargs)
     try: data = response.json()
     except Exception: data = {}
+
     if is_updates and data.get("ok"):
         for update in data.get("result", []):
             message = update.get("message") or {}; chat = message.get("chat") or {}
-            chat_id = str(chat.get("id", "")).strip(); text = str(message.get("text", "")).strip().lower()
-            if chat_id and text.startswith("/start"):
-                with _LOCK: _ACTIVE_CHAT = chat_id
-                _LOG.info("Telegram chat bound from /start: type=%s", chat.get("type", "unknown"))
-    if is_send and not response.ok:
-        _LOG.warning("Telegram send failed: code=%s description=%s", data.get("error_code", response.status_code), data.get("description", "unknown Telegram API error"))
+            chat_id = str(chat.get("id", "")).strip(); text = str(message.get("text", "")).strip()
+            low = text.lower()
+            if chat_id and (low.startswith("/start") or (_ACCESS_CODE and low.startswith("/access "))):
+                with _LOCK:
+                    _ACTIVE_CHAT = chat_id
+                    mod = sys.modules.get("__main__")
+                    if mod is not None:
+                        try: mod.CHAT_ID = chat_id
+                        except Exception: pass
+                _LOG.info("Telegram chat authorized/bound: type=%s", chat.get("type", "unknown"))
+
+    if is_send:
+        if response.ok:
+            try:
+                result = data.get("result") or {}
+                message_id = result.get("message_id")
+                if message_id:
+                    # Associate the latest outgoing message with the next signal by inspecting its text.
+                    txt = str((kwargs.get("json") or {}).get("text", ""))
+                    if "CANDICE AI" in txt and "SIGNAL" in txt and "Expiry" in txt:
+                        import re
+                        asset_m = re.search(r"Asset • ([^\n]+)", txt)
+                        dir_m = re.search(r"SIGNAL • (UP|DOWN)", txt)
+                        exp_m = re.search(r"Expiry • (\d+) min", txt)
+                        entry_m = re.search(r"Entry • ([0-9.]+)", txt)
+                        conf_m = re.search(r"Confidence • (\d+)%", txt)
+                        if asset_m and dir_m and exp_m and entry_m:
+                            args = (asset_m.group(1).strip(), dir_m.group(1), float(entry_m.group(1)), int(exp_m.group(1)), str((kwargs.get("json") or {}).get("chat_id", _ACTIVE_CHAT)), int(message_id), int(conf_m.group(1)) if conf_m else 0)
+                            threading.Thread(target=_timer_worker, args=args, daemon=True, name="candice-expiry-timer").start()
+            except Exception:
+                _LOG.exception("Timer setup failed")
+        else:
+            _LOG.warning("Telegram send failed: code=%s description=%s", data.get("error_code", response.status_code), data.get("description", "unknown Telegram API error"))
+
     if is_updates and response.status_code == 409:
         safe = Response(); safe.status_code = 200; safe._content = b'{"ok":true,"result":[]}'; safe.headers["Content-Type"] = "application/json"; safe.url = "https://api.telegram.org/bot<redacted>/getUpdates"; return safe
     return response
@@ -110,7 +183,7 @@ def _install_analyst():
                 def performance_api():
                     mod.reset_risk()
                     return mod.jsonify({"ok": True, "risk": mod.risk.copy(), "outcomes": outcome_performance()})
-            _LOG.info("CANDICE A-Z analyst installed: own brain + fresh setup gate + automatic expiry outcomes + risk feedback")
+            _LOG.info("CANDICE A-Z analyst installed: own brain + fresh setup gate + expiry outcomes + risk feedback + Telegram timer/access")
             return
         time.sleep(0.25)
 
