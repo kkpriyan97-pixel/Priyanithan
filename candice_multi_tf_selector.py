@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import replace
-from datetime import datetime
 
 EXPIRIES = (1, 2, 3, 5, 10, 15)
 TIMEFRAMES = ("1m", "2m", "3m", "5m", "10m", "15m")
@@ -18,6 +16,7 @@ def install(app):
 
     import candice_engine as engine
     from candice_strategy_v4 import build_plan
+    from app import Signal
 
     pending = {}
     sem = asyncio.Semaphore(3)
@@ -171,7 +170,6 @@ def install(app):
         app.log.info("CANDICE 1-MIN PRE-ALERT SENT asset=%s users=%d", best["asset"], len(pending))
 
     async def boundary_scan():
-        # Called by the replacement scheduler at the exact minute boundary.
         minute = int(time.time() // 60)
         if (minute % 5) != 0:
             return
@@ -196,15 +194,12 @@ def install(app):
             entry = float(row.close)
             candle_ts = float(row.timestamp)
             entry_ts = float((int(time.time()) // 60) * 60)
-            if app.active.get(uid):
-                continue
             msg = await app.send_signal_card(uid, fresh["asset"], fresh["direction"], entry_ts, candle_ts, fresh["expiry"], fresh["confidence"], fresh["timeframe"], fresh["evidence"])
             if msg is None:
                 continue
-            s = app.Signal(fresh["asset"], fresh["direction"], fresh["confidence"], fresh["expiry"], entry, entry_ts, candle_ts, fresh["timeframe"], fresh["reason"], fresh["evidence"]) if hasattr(app, "Signal") else None
-            if s is not None:
-                app.active[uid] = s
-                asyncio.create_task(app.result_monitor(uid, s, msg))
+            s = Signal(fresh["asset"], fresh["direction"], fresh["confidence"], fresh["expiry"], entry, entry_ts, candle_ts, fresh["timeframe"], fresh["reason"], fresh["evidence"])
+            app.active[uid] = s
+            asyncio.create_task(app.result_monitor(uid, s, msg))
             app.log.info("CANDICE FINAL SIGNAL asset=%s direction=%s tf=%s expiry=%s confidence=%s", fresh["asset"], fresh["direction"], fresh["timeframe"], fresh["expiry"], fresh["confidence"])
 
     async def patched_scheduler():
