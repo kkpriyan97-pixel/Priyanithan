@@ -3,19 +3,43 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger("candice.olymp_live")
+UPSTREAM = "https://github.com/ChipaDevTeam/OlympTradeAPI.git"
+LOCAL_API = Path("/tmp/candice_olymptrade_api")
+
+
+def _load_olymp_client():
+    """Load the upstream client without installing it as a pip package.
+
+    The upstream repository currently has no setup.py/pyproject.toml, so Render
+    cannot install it from requirements.txt. We clone the pinned source at
+    runtime instead. No trading methods are called by Candice.
+    """
+    target = LOCAL_API / "olymptrade_ws"
+    if not target.exists():
+        LOCAL_API.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "clone", "--depth", "1", UPSTREAM, str(LOCAL_API)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    sys.path.insert(0, str(LOCAL_API))
+    from olymptrade_ws.core.client import OlympTradeClient
+    from olymptrade_ws.olympconfig import parameters
+    return OlympTradeClient, parameters
 
 
 class OlympLiveFeed:
-    """Read-only Olymp Trade market-data bridge.
-
-    This module never calls any order/trade method. It only reads historical
-    candles and subscribes to live 1-minute candles, then forwards them to the
-    Candice analysis engine.
-    """
+    """Read-only Olymp Trade market-data bridge."""
 
     def __init__(self, on_candle: Callable[[str, dict], None]):
         self.on_candle = on_candle
@@ -44,10 +68,9 @@ class OlympLiveFeed:
 
     async def _main(self) -> None:
         try:
-            from olymptrade_ws.main import OlympTradeClient
-            from olymptrade_ws.olympconfig import parameters
+            OlympTradeClient, parameters = _load_olymp_client()
         except Exception:
-            log.exception("OlympTrade API library is unavailable")
+            log.exception("Unable to load OlympTrade API source")
             return
 
         self.client = OlympTradeClient(access_token=self.token)
@@ -63,11 +86,10 @@ class OlympLiveFeed:
             log.info("Olymp live market connection established; assets=%s", self.assets)
 
             for asset in self.assets:
-                # Seed Candice with recent 1m history so it can analyse immediately.
                 try:
                     history = await self.client.market.get_candles(asset, size=60, count=100)
                     await self._handle_candle_message(history if isinstance(history, dict) else {"d": history})
-                    log.info("Loaded Olymp candle history: %s", asset)
+                    log.info("Loaded Olymp 1m candle history: %s", asset)
                 except Exception:
                     log.exception("Failed to load Olymp candle history: %s", asset)
                 try:
@@ -76,11 +98,8 @@ class OlympLiveFeed:
                 except Exception:
                     log.exception("Failed to subscribe to Olymp candles: %s", asset)
 
-            while True:
-                await asyncio.sleep(30)
-                if hasattr(self.client, "is_connected") and not self.client.is_connected:
-                    self.connected = False
-                    break
+            while self.client.connection.is_connected:
+                await asyncio.sleep(10)
         except Exception:
             log.exception("Olymp live market connection error")
         finally:
@@ -96,7 +115,6 @@ class OlympLiveFeed:
             items = [items]
         if not isinstance(items, list):
             return
-
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -109,13 +127,8 @@ class OlympLiveFeed:
             c = item.get("close", item.get("c"))
             t = item.get("time", item.get("timestamp", item.get("t")))
             try:
-                candle = {
-                    "open": float(o),
-                    "high": float(h),
-                    "low": float(l),
-                    "close": float(c),
-                    "timestamp": float(t) if t is not None else None,
-                }
+                candle = {"open": float(o), "high": float(h), "low": float(l), "close": float(c),
+                          "timestamp": float(t) if t is not None else None}
             except (TypeError, ValueError):
                 continue
             if candle["high"] < max(candle["open"], candle["close"]):
@@ -125,10 +138,5 @@ class OlympLiveFeed:
             self.on_candle(asset, candle)
 
     def status(self) -> dict:
-        return {
-            "configured": self.enabled,
-            "connected": self.connected,
-            "assets": self.assets,
-            "mode": "READ_ONLY_MARKET_DATA",
-            "auto_trade": False,
-        }
+        return {"configured": self.enabled, "connected": self.connected,
+                "assets": self.assets, "mode": "READ_ONLY_MARKET_DATA", "auto_trade": False}
