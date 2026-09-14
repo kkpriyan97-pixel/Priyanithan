@@ -8,6 +8,7 @@ STATE = defaultdict(lambda: {"last_setup_key": None, "last_signal_window": None,
 MIN_REAL_CANDLES = int(os.getenv("CANDICE_MIN_REAL_CANDLES", "30"))
 DB_PATH = os.getenv("CANDICE_OUTCOME_DB", "/tmp/candice_outcomes.sqlite3")
 LIVE_CANDLE_MAX_AGE = float(os.getenv("CANDICE_LIVE_CANDLE_MAX_AGE", "90"))
+EXPIRIES = (1, 2, 3, 4, 5, 10, 15)
 
 def _f(x):
     try:
@@ -73,6 +74,17 @@ def _learn(asset, pattern, regime, direction):
         return adj,n,[f'learned pattern history {wins}W/{losses}L']
     except Exception:return 0.0,0,[]
 
+def _expiry(quality, regime, atr, price):
+    """Select an independent expiry from the supported set; never increases stake after a loss."""
+    rel=(atr/max(abs(price),1e-12))*100000.0
+    if quality>=88 and regime in ('TREND_UP','TREND_DOWN'):
+        return 3 if rel>4 else 5
+    if quality>=80:
+        return 2 if rel>7 else 4
+    if quality>=72:
+        return 1 if rel>10 else 3
+    return 2
+
 def evaluate(asset,data,base):
     if len(data)<MIN_REAL_CANDLES:
         return {'allow':False,'regime':'WARMUP','strategy':'market_brain','score':0,'reasons':[f'real candle warmup {len(data)}/{MIN_REAL_CANDLES}']}
@@ -113,4 +125,5 @@ def evaluate(asset,data,base):
     if quality<68:
         return {'allow':False,'regime':regime,'strategy':'market_brain','score':quality,'reasons':reasons+['waiting: setup quality below threshold']}
     st.update(last_setup_key=setup_key,last_signal_window=window,last_direction=direction)
-    return {'allow':True,'regime':regime,'strategy':'market_brain','score':quality,'direction':'UP' if direction>0 else 'DOWN','pattern':pattern,'reasons':reasons+learn_notes+[f'candle/market brain score={ms}',f'indicator confirmations={confirmations} (confirmation only)',f'brain quality={quality}%']}
+    expiry=_expiry(quality,regime,atr,last)
+    return {'allow':True,'regime':regime,'strategy':'market_brain','score':quality,'direction':'UP' if direction>0 else 'DOWN','pattern':pattern,'expiry':expiry,'reasons':reasons+learn_notes+[f'candle/market brain score={ms}',f'indicator confirmations={confirmations} (confirmation only)',f'brain quality={quality}%',f'adaptive expiry={expiry}m']}
