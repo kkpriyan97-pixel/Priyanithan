@@ -81,6 +81,11 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE TELEGRAM RATEFIX FAILED', repr(exc))
     try:
+        from candice_strategy_balancer import install as install_strategy_balancer
+        install_strategy_balancer(app)
+    except Exception as exc:
+        print('CANDICE STRATEGY BALANCER FAILED', repr(exc))
+    try:
         from candice_runtime_patch import install
         install(app)
     except Exception as exc:
@@ -146,7 +151,7 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE OWN STRATEGY V4 FAILED', repr(exc))
     _install_own_brain_247_standalone(app)
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7 — MULTI-TF SELECTOR — STRATEGY AUDIT')
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7 — MULTI-TF SELECTOR — STRATEGY BALANCER — STRATEGY AUDIT')
 
 
 def _load_runtime():
