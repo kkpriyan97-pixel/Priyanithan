@@ -1,12 +1,14 @@
 from __future__ import annotations
-import asyncio, logging, os, subprocess, sys, threading, urllib.parse, urllib.request
+import asyncio, json, logging, os, subprocess, sys, threading, urllib.parse, urllib.request
 from pathlib import Path
 from typing import Callable
-log=logging.getLogger('candice.olymp_live')
-UPSTREAM='https://github.com/ChipaDevTeam/OlympTradeAPI.git'; LOCAL_API=Path('/tmp/candice_olymptrade_api')
 
-# Telegram command mode uses getUpdates polling. A previous webhook can silently
-# block polling, so clear only the stale webhook at process startup.
+log=logging.getLogger('candice.olymp_live')
+UPSTREAM='https://github.com/ChipaDevTeam/OlympTradeAPI.git'
+LOCAL_API=Path('/tmp/candice_olymptrade_api')
+
+# Telegram command mode uses getUpdates polling. Clear only a stale webhook;
+# never include the bot token in logs.
 def _clear_telegram_webhook():
     token=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
     if not token:return
@@ -14,20 +16,39 @@ def _clear_telegram_webhook():
         url=f'https://api.telegram.org/bot{token}/deleteWebhook'
         data=urllib.parse.urlencode({'drop_pending_updates':'false'}).encode()
         with urllib.request.urlopen(urllib.request.Request(url,data=data,method='POST'),timeout=8) as r:
-            ok=bool(__import__('json').loads(r.read().decode()).get('ok'))
+            ok=bool(json.loads(r.read().decode()).get('ok'))
         log.info('Telegram polling startup: stale webhook cleared=%s',ok)
     except Exception as e:
-        log.warning('Telegram webhook cleanup skipped: %s',e)
+        log.warning('Telegram webhook cleanup failed (token not logged): %s',type(e).__name__)
 
 _clear_telegram_webhook()
 
 def _load():
     target=LOCAL_API/'olymptrade_ws'
-    if not target.exists():subprocess.run(['git','clone','--depth','1',UPSTREAM,str(LOCAL_API)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True,timeout=60)
+    if not target.exists():
+        subprocess.run(['git','clone','--depth','1',UPSTREAM,str(LOCAL_API)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True,timeout=60)
     sys.path.insert(0,str(LOCAL_API))
     from olymptrade_ws.core.client import OlympTradeClient
     from olymptrade_ws.olympconfig import parameters
     return OlympTradeClient,parameters
+
+def _num(v):
+    try:return float(v)
+    except (TypeError,ValueError):return None
+
+def _rows(value):
+    """Flatten common Olymp candle response shapes into candidate rows."""
+    if isinstance(value,list):
+        out=[]
+        for item in value: out.extend(_rows(item))
+        return out
+    if not isinstance(value,dict):return []
+    for key in ('candles','data','d','items','result'):
+        val=value.get(key)
+        if isinstance(val,(list,dict)):
+            nested=_rows(val)
+            if nested:return nested
+    return [value]
 
 class OlympLiveFeed:
     '''Read-only Olymp market feed; builds 1m candles from live ticks.'''
@@ -50,8 +71,11 @@ class OlympLiveFeed:
             await self.client.start();self.connected=True;log.info('Olymp live market connection established; assets=%s',self.assets)
             for asset in self.assets:
                 try:
-                    history=await self.client.market.get_candles(asset,size=60,count=100);await self._history(history or []);log.info('Loaded Olymp 1m candle history: %s',asset)
-                except Exception:log.exception('Failed to load Olymp candle history: %s',asset)
+                    history=await self.client.market.get_candles(asset,size=60,count=100)
+                    seeded=await self._history(history or [],asset)
+                    log.info('HISTORY_SEEDED asset=%s count=%s',asset,seeded)
+                except Exception:
+                    log.exception('Failed to load Olymp candle history: %s',asset)
                 try:
                     await self.client.market.subscribe_ticks(asset);log.info('Subscribed to Olymp live ticks: %s',asset)
                 except Exception:log.exception('Failed to subscribe to Olymp live ticks: %s',asset)
@@ -61,18 +85,25 @@ class OlympLiveFeed:
             self.connected=False
             try:await self.client.stop()
             except Exception:pass
-    async def _history(self,h):
-        groups=h.get('d',[]) if isinstance(h,dict) else h
-        if isinstance(groups,dict):groups=[groups]
-        if not isinstance(groups,list):return
-        for g in groups:
-            if not isinstance(g,dict):continue
-            asset=str(g.get('p',g.get('pair',g.get('symbol','')))).upper();rows=g.get('candles') if isinstance(g.get('candles'),list) else [g]
-            for x in rows:
-                if not isinstance(x,dict):continue
-                try:o=float(x.get('open',x.get('o')));hi=float(x.get('high',x.get('h')));lo=float(x.get('low',x.get('l')));c=float(x.get('close',x.get('c')));t=float(x.get('t',x.get('timestamp',x.get('time'))))
-                except(TypeError,ValueError):continue
-                if asset and hi>=max(o,c) and lo<=min(o,c) and self.on_history:self.on_history(asset,{'open':o,'high':hi,'low':lo,'close':c,'timestamp':t})
+    async def _history(self,h,default_asset=''):
+        if not self.on_history:return 0
+        rows=_rows(h); parsed=[]
+        for x in rows:
+            asset=str(x.get('p',x.get('pair',x.get('symbol',default_asset))) or default_asset).upper()
+            # Some API responses use compact o/h/l/c/t fields; others use full names.
+            o=_num(x.get('open',x.get('o')));hi=_num(x.get('high',x.get('h')));lo=_num(x.get('low',x.get('l')));c=_num(x.get('close',x.get('c')));t=_num(x.get('t',x.get('timestamp',x.get('time'))))
+            if None in (o,hi,lo,c,t) or not asset:continue
+            # Normalize milliseconds to seconds.
+            if t>10_000_000_000:t/=1000.0
+            if hi<max(o,c) or lo>min(o,c):continue
+            parsed.append((asset,t,{'open':o,'high':hi,'low':lo,'close':c,'timestamp':t}))
+        parsed.sort(key=lambda z:z[1])
+        seen=set();count=0
+        for asset,t,candle in parsed:
+            key=(asset,int(t))
+            if key in seen:continue
+            seen.add(key);self.on_history(asset,candle);count+=1
+        return count
     async def _ticks(self,m):
         rows=m.get('d',[]) if isinstance(m,dict) else m
         if isinstance(rows,dict):rows=[rows]
@@ -83,6 +114,7 @@ class OlympLiveFeed:
             try:price=float(x.get('q',x.get('price',x.get('close'))));ts=float(x.get('t',x.get('timestamp',x.get('time'))))
             except(TypeError,ValueError):continue
             if asset not in self.assets:continue
+            if ts>10_000_000_000:ts/=1000.0
             self.tick_count+=1
             if self.tick_count==1:log.info('First live Olymp tick received: asset=%s price=%s',asset,price)
             bucket=int(ts//60)*60;cur=self.forming.get(asset)
