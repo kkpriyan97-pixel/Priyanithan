@@ -86,6 +86,11 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE RUNTIME PATCH FAILED', repr(exc))
     try:
+        from candice_strategy_audit import install as install_strategy_audit
+        install_strategy_audit(app)
+    except Exception as exc:
+        print('CANDICE STRATEGY AUDIT FAILED', repr(exc))
+    try:
         from candice_multi_tf_selector import install as install_multi_tf
         install_multi_tf(app)
     except Exception as exc:
@@ -141,7 +146,7 @@ def _install_layers(app):
     except Exception as exc:
         print('CANDICE OWN STRATEGY V4 FAILED', repr(exc))
     _install_own_brain_247_standalone(app)
-    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7 — MULTI-TF SELECTOR')
+    print('CANDICE RUNTIME LAYERS READY — TELEGRAM OPTIONAL — AI FALLBACK ACTIVE — Z.AI LAST RESORT — ASSET TIMER LAST — OWN BRAIN 24/7 — MULTI-TF SELECTOR — STRATEGY AUDIT')
 
 
 def _load_runtime():
@@ -172,8 +177,8 @@ def _load_runtime():
             app = sys.modules.get('app') or sys.modules.get('__main__')
             if app is None or not _runtime_ready(app):
                 continue
-            if not getattr(app, '_candice_ready_timer_v12', False):
-                print('CANDICE READY TIMER WATCHDOG: installing missing V12 layer')
+            if not getattr(app, '_candice_ready_timer_v13', False):
+                print('CANDICE READY TIMER WATCHDOG: installing missing V13 layer')
                 from candice_ready_timer import install as install_ready_timer
                 install_ready_timer(app)
         except Exception as exc:
