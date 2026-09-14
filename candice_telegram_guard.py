@@ -5,8 +5,8 @@ import time
 
 
 def install(app):
-    """Final Telegram transport guard: serialize API traffic and honor RetryAfter."""
-    if getattr(app, '_candice_telegram_guard_v1', False):
+    """Final Telegram transport guard: serialize API traffic without queuing."""
+    if getattr(app, '_candice_telegram_guard_v2', False):
         return
     tg = getattr(app, 'tg_app', None)
     bot = getattr(tg, 'bot', None) if tg is not None else None
@@ -37,18 +37,28 @@ def install(app):
         nonlocal last_call, cooldown_until
         async with lock:
             now = time.monotonic()
-            delay = max(0.0, min_interval - (now - last_call), cooldown_until - now)
-            if delay > 0:
-                await asyncio.sleep(delay)
+
+            # Never sleep here. Sleeping while holding the global lock creates
+            # a backlog when a 1s timer is active. Disposable edits are simply
+            # dropped until the next eligible slot.
+            if now < cooldown_until:
+                return None
+            if now - last_call < min_interval:
+                return None
+
             try:
                 result = await originals[name](*args, **kwargs)
-                last_call = time.monotonic()
+                if result is not None:
+                    last_call = time.monotonic()
                 return result
             except Exception as exc:
                 retry = retry_seconds(exc)
                 if retry is not None:
                     cooldown_until = max(cooldown_until, time.monotonic() + retry + 1.0)
-                    app.log.warning('CANDICE TELEGRAM GLOBAL COOLDOWN retry_after=%.1fs method=%s', retry, name)
+                    app.log.warning(
+                        'CANDICE TELEGRAM GLOBAL COOLDOWN retry_after=%.1fs method=%s',
+                        retry, name,
+                    )
                     return None
                 raise
 
@@ -57,5 +67,5 @@ def install(app):
             return await guarded(_name, *args, **kwargs)
         setattr(bot, name, wrapper)
 
-    app._candice_telegram_guard_v1 = True
-    app.log.info('CANDICE TELEGRAM GUARD V1 ACTIVE — serialized sends/edits + RetryAfter cooldown')
+    app._candice_telegram_guard_v2 = True
+    app.log.info('CANDICE TELEGRAM GUARD V2 ACTIVE — non-queued sends/edits + RetryAfter cooldown')
