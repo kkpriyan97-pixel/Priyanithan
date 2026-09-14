@@ -1,161 +1,109 @@
 from __future__ import annotations
-
-import json
-import os
-import time
-import requests
-
-
-def _text_from_openai_message(message):
-    content = (message or {}).get('content', '')
-    if isinstance(content, str): return content
-    if isinstance(content, list):
-        return ''.join((item if isinstance(item, str) else str(item.get('text') or item.get('content') or '')) for item in content if isinstance(item, (str, dict)))
-    return str(content or '')
+import json, os, requests
 
 
 def _extract_json(text):
-    text = str(text or '').strip().replace('```json', '').replace('```JSON', '').replace('```', '').strip()
+    text=str(text or '').strip().replace('```json','').replace('```JSON','').replace('```','').strip()
     if not text: return None
     try:
-        obj = json.loads(text); return obj if isinstance(obj, dict) else None
+        obj=json.loads(text); return obj if isinstance(obj,dict) else None
     except Exception: pass
-    decoder = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch == '{':
-            try:
-                obj, _ = decoder.raw_decode(text[i:])
-                if isinstance(obj, dict): return obj
-            except Exception: pass
+    a,b=text.find('{'),text.rfind('}')
+    if a>=0 and b>a:
+        try:
+            obj=json.loads(text[a:b+1]); return obj if isinstance(obj,dict) else None
+        except Exception: pass
     return None
 
 
-def _normalize_result(result):
-    if not isinstance(result, dict): return None
-    decision = str(result.get('decision', '')).upper().strip()
-    direction = str(result.get('direction', '')).upper().strip()
-    try: confidence = float(result.get('confidence', 0) or 0)
-    except Exception: confidence = 0.0
-    if 0 <= confidence <= 1: confidence *= 100
-    try: expiry = int(float(result.get('expiry', 0) or 0))
-    except Exception: expiry = 0
-    if decision not in ('APPROVE', 'REJECT') or direction not in ('UP', 'DOWN', '') or expiry not in (0,1,2,3,5,10,15): return None
-    return {'decision':decision,'direction':direction,'confidence':max(0,min(100,int(round(confidence)))),'expiry':expiry,'reason':str(result.get('reason','AI decision'))[:500]}
+def _text(message):
+    c=(message or {}).get('content','')
+    if isinstance(c,str): return c
+    if isinstance(c,list):
+        return ''.join(x if isinstance(x,str) else str((x or {}).get('text') or (x or {}).get('content') or '') for x in c if isinstance(x,(str,dict)))
+    return str(c or '')
 
 
-def _unique_models(*groups):
+def _normalize(x):
+    if not isinstance(x,dict): return None
+    d=str(x.get('decision','')).upper().strip(); direction=str(x.get('direction','')).upper().strip()
+    try: conf=float(x.get('confidence',0) or 0)
+    except Exception: conf=0.0
+    if 0<=conf<=1: conf*=100
+    try: exp=int(float(x.get('expiry',0) or 0))
+    except Exception: exp=0
+    if d not in ('APPROVE','REJECT') or direction not in ('UP','DOWN','') or exp not in (0,1,2,3,5,10,15): return None
+    return {'decision':d,'direction':direction,'confidence':max(0,min(100,int(round(conf)))),'expiry':exp,'reason':str(x.get('reason','AI decision'))[:500]}
+
+
+def _models(models_env,model_env,defaults):
     out=[]
-    for group in groups:
-        for model in group:
-            model=str(model or '').strip()
-            if model and model not in out: out.append(model)
+    for x in [v.strip() for v in os.getenv(models_env,'').split(',') if v.strip()]+[os.getenv(model_env,'').strip()]+defaults:
+        if x and x not in out: out.append(x)
     return out
 
 
-def _env_models(name): return [x.strip() for x in os.getenv(name,'').split(',') if x.strip()]
-
-
 def install(app):
-    if getattr(app, '_candice_ai_fallback_v8', False): return
+    if getattr(app,'_candice_ai_fallback_v9',False): return
     import candice_engine as engine
     original_review=engine.ai_review
 
-    def _openai_call(url,key,model,snapshot,memory,strict=False,json_mode=False,timeout=8.0):
-        prompt=engine._ai_prompt(snapshot,memory or {})
-        if strict: prompt+='\nFINAL OUTPUT RULE: Return exactly one JSON object and nothing else.'
-        payload={'model':model,'messages':[{'role':'user','content':prompt}],'temperature':0.1,'max_tokens':400}
-        if json_mode: payload['response_format']={'type':'json_object'}
-        r=requests.post(url,headers={'Authorization':f'Bearer {key}','Content-Type':'application/json'},json=payload,timeout=timeout)
-        if not r.ok: raise RuntimeError(f'HTTP {r.status_code}: {r.text[:300]}')
+    def openai_call(url,key,model,snapshot,memory):
+        prompt=engine._ai_prompt(snapshot,memory or {})+'\nReturn ONLY one JSON object with keys decision,direction,confidence,expiry,reason. No markdown.'
+        payload={'model':model,'messages':[{'role':'user','content':prompt}],'temperature':0.1,'max_tokens':300}
+        r=requests.post(url,headers={'Authorization':f'Bearer {key}','Content-Type':'application/json'},json=payload,timeout=7)
+        if not r.ok: raise RuntimeError(f'HTTP {r.status_code}: {r.text[:220]}')
         choices=r.json().get('choices') or []
         if not choices: raise ValueError('AI response has no choices')
-        parsed=_extract_json(_text_from_openai_message(choices[0].get('message') or {}))
-        if not parsed: raise ValueError('AI returned invalid JSON')
-        return parsed
+        out=_normalize(_extract_json(_text(choices[0].get('message') or {})))
+        if not out: raise ValueError('AI response is not valid decision JSON')
+        return out
 
-    def _gemini_models():
-        # Do not silently try obsolete Gemini model names. User-supplied GEMINI_MODELS
-        # still takes priority; the known-good current default is Flash only.
-        return _unique_models(_env_models('GEMINI_MODELS'), [os.getenv('GEMINI_MODEL','').strip()], ['gemini-3.6-flash'])
-
-    def _groq_models(): return _unique_models(_env_models('GROQ_MODELS'),[os.getenv('GROQ_MODEL','').strip()],['openai/gpt-oss-120b','openai/gpt-oss-20b','qwen/qwen3.6-27b','groq/compound-mini'])
-    def _mistral_models(): return _unique_models(_env_models('MISTRAL_MODELS'),[os.getenv('MISTRAL_MODEL','').strip()],['mistral-small-latest','mistral-medium-latest','mistral-large-latest','magistral-small-latest'])
-
-    def _gemini_call(key,model,snapshot,memory,strict=False):
-        prompt=engine._ai_prompt(snapshot,memory or {})
-        if strict: prompt+='\nFINAL OUTPUT RULE: Return exactly one JSON object and nothing else.'
-        schema={'type':'object','properties':{'decision':{'type':'string','enum':['APPROVE','REJECT']},'direction':{'type':'string','enum':['UP','DOWN','']},'confidence':{'type':'number'},'expiry':{'type':'integer','enum':[0,1,2,3,5,10,15]},'reason':{'type':'string'}},'required':['decision','direction','confidence','expiry','reason']}
-        payload={'model':model,'input':prompt,'response_format':{'type':'text','mime_type':'application/json','schema':schema}}
-        r=requests.post('https://generativelanguage.googleapis.com/v1beta/interactions',headers={'x-goog-api-key':key,'Content-Type':'application/json'},json=payload,timeout=12.0)
-        if not r.ok: raise RuntimeError(f'HTTP {r.status_code}: {r.text[:300]}')
-        data=r.json(); output_text=data.get('output_text')
-        if not output_text:
+    def gemini_call(key,model,snapshot,memory):
+        prompt=engine._ai_prompt(snapshot,memory or {})+'\nReturn ONLY one JSON object with keys decision,direction,confidence,expiry,reason. No markdown.'
+        # Avoid provider-side structured-output schema because it has caused incompatibility on some current endpoints/models.
+        payload={'model':model,'input':prompt}
+        r=requests.post('https://generativelanguage.googleapis.com/v1beta/interactions',headers={'x-goog-api-key':key,'Content-Type':'application/json'},json=payload,timeout=8)
+        if not r.ok: raise RuntimeError(f'HTTP {r.status_code}: {r.text[:220]}')
+        data=r.json(); txt=data.get('output_text','')
+        if not txt:
             for step in data.get('steps') or []:
                 for item in step.get('content') or []:
-                    if isinstance(item,dict) and isinstance(item.get('text'),str): output_text=item['text']; break
-                if output_text: break
-        parsed=_extract_json(output_text)
-        if not parsed: raise ValueError('Gemini structured output was empty or invalid')
-        return parsed
+                    if isinstance(item,dict) and isinstance(item.get('text'),str): txt=item['text']; break
+                if txt: break
+        out=_normalize(_extract_json(txt))
+        if not out: raise ValueError('Gemini response is not valid decision JSON')
+        return out
 
-    def _rotate_openai(provider,url,key,models,snapshot,memory):
+    def rotate(name,key,models,call):
         failures=[]
-        if not key: return None,[f'{provider}:NOT_CONFIGURED']
+        if not key: return None,[f'{name}:NOT_CONFIGURED']
         for model in models:
-            for attempt in (1,2):
-                try:
-                    out=_openai_call(url,key,model,snapshot,memory,strict=(attempt==2),json_mode=(provider=='GROQ'))
-                    normalized=_normalize_result(out)
-                    if not normalized: raise ValueError('invalid AI decision schema')
-                    engine.log.info('AI FALLBACK OK provider=%s model=%s attempt=%s decision=%s confidence=%s expiry=%s',provider,model,attempt,normalized['decision'],normalized['confidence'],normalized['expiry'])
-                    return normalized,failures
-                except Exception as exc:
-                    failures.append(f'{provider}:{model}:{type(exc).__name__}')
-                    engine.log.warning('AI fallback provider=%s model=%s attempt=%s failed: %s',provider,model,attempt,exc)
-                    msg=str(exc)
-                    if 'HTTP 429' in msg or 'HTTP 404' in msg: break
-                    if attempt==1: time.sleep(0.25)
+            try:
+                out=call(key,model)
+                engine.log.info('AI FALLBACK OK provider=%s model=%s decision=%s confidence=%s expiry=%s',name,model,out['decision'],out['confidence'],out['expiry'])
+                return out,failures
+            except Exception as exc:
+                msg=str(exc); failures.append(f'{name}:{model}:{type(exc).__name__}')
+                engine.log.warning('AI fallback provider=%s model=%s failed: %s',name,model,msg)
+                # Never retry the same model for quota, unavailable-model, or subscription errors.
+                continue
         return None,failures
-
-    def _rotate_gemini(key,models,snapshot,memory):
-        failures=[]
-        if not key: return None,['GEMINI:NOT_CONFIGURED']
-        for model in models:
-            for attempt in (1,2):
-                try:
-                    out=_gemini_call(key,model,snapshot,memory,strict=(attempt==2))
-                    normalized=_normalize_result(out)
-                    if not normalized: raise ValueError('invalid AI decision schema')
-                    engine.log.info('AI FALLBACK OK provider=GEMINI model=%s attempt=%s decision=%s confidence=%s expiry=%s',model,attempt,normalized['decision'],normalized['confidence'],normalized['expiry'])
-                    return normalized,failures
-                except Exception as exc:
-                    failures.append(f'GEMINI:{model}:{type(exc).__name__}')
-                    engine.log.warning('AI fallback provider=GEMINI model=%s attempt=%s failed: %s',model,attempt,exc)
-                    msg=str(exc)
-                    if 'HTTP 429' in msg or 'HTTP 404' in msg: break
-                    if attempt==1: time.sleep(0.25)
-        return None,failures
-
-    def _primary(snapshot,memory):
-        try:
-            result=original_review(snapshot,memory); normalized=_normalize_result(result); reason=str((result or {}).get('reason','')).lower()
-            if normalized and 'unavailable' not in reason and 'not configured' not in reason: return normalized
-        except Exception as exc: engine.log.warning('AI primary failed: %s',exc)
-        return None
 
     def fallback_review(snapshot,memory):
         failures=[]
-        result,errs=_rotate_gemini(os.getenv('GEMINI_API_KEY','').strip(),_gemini_models(),snapshot,memory); failures.extend(errs)
+        result,errs=rotate('GEMINI',os.getenv('GEMINI_API_KEY','').strip(),_models('GEMINI_MODELS','GEMINI_MODEL',['gemini-3.6-flash']),lambda k,m:gemini_call(k,m,snapshot,memory)); failures+=errs
         if result:return result
-        result,errs=_rotate_openai('GROQ','https://api.groq.com/openai/v1/chat/completions',os.getenv('GROQ_API_KEY','').strip(),_groq_models(),snapshot,memory); failures.extend(errs)
+        result,errs=rotate('GROQ',os.getenv('GROQ_API_KEY','').strip(),_models('GROQ_MODELS','GROQ_MODEL',['openai/gpt-oss-120b','openai/gpt-oss-20b','qwen/qwen3.6-27b','groq/compound-mini']),lambda k,m:openai_call('https://api.groq.com/openai/v1/chat/completions',k,m,snapshot,memory)); failures+=errs
         if result:return result
-        result,errs=_rotate_openai('MISTRAL','https://api.mistral.ai/v1/chat/completions',os.getenv('MISTRAL_API_KEY','').strip(),_mistral_models(),snapshot,memory); failures.extend(errs)
+        result,errs=rotate('MISTRAL',os.getenv('MISTRAL_API_KEY','').strip(),_models('MISTRAL_MODELS','MISTRAL_MODEL',['mistral-small-latest','mistral-medium-latest','magistral-small-latest']),lambda k,m:openai_call('https://api.mistral.ai/v1/chat/completions',k,m,snapshot,memory)); failures+=errs
         if result:return result
-        primary=_primary(snapshot,memory)
-        if primary:return primary
-        failures.append('PRIMARY:UNAVAILABLE')
-        return {'decision':'REJECT','direction':'','confidence':0,'expiry':0,'reason':'AI review unavailable — '+', '.join(failures[:30])}
+        try:
+            out=_normalize(original_review(snapshot,memory))
+            if out:return out
+        except Exception as exc: failures.append(f'PRIMARY:{type(exc).__name__}')
+        return {'decision':'REJECT','direction':'','confidence':0,'expiry':0,'reason':'AI review unavailable — '+', '.join(failures[:20])}
 
     engine.ai_review=fallback_review
-    app._candice_ai_fallback_v8=True
-    app.log.info('CANDICE AI FALLBACK V8 ACTIVE — Gemini invalid/quota models skipped fast; Groq → Mistral → primary; FAIL CLOSED')
+    app._candice_ai_fallback_v9=True
+    app.log.info('CANDICE AI FALLBACK V9 ACTIVE — schema-compatible rotation; no forced JSON mode; 404/403/429 skip; FAIL CLOSED')
