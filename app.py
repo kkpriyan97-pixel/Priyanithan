@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, logging, os, time
+import json, logging, os, time, threading
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any
@@ -7,7 +7,7 @@ import requests
 from flask import Flask, jsonify, request
 from olymp_live import OlympLiveFeed
 
-VERSION='10.1-CANDICE-OLYMP-LIVE-READONLY'
+VERSION='10.2-CANDICE-OLYMP-LIVE-TELEGRAM'
 AUTO_TRADE=False
 MARTINGALE=False
 EXPIRIES=(2,3,5,10,15)
@@ -17,14 +17,13 @@ MAX_CONSECUTIVE_LOSSES=max(1,int(os.getenv('MAX_CONSECUTIVE_LOSSES','3')))
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); CHAT_ID=os.getenv('TELEGRAM_CHAT_ID','').strip(); SECRET=os.getenv('TRADINGVIEW_WEBHOOK_SECRET','').strip()
 logging.basicConfig(level=os.getenv('LOG_LEVEL','INFO'),format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 log=logging.getLogger('candice'); app=Flask(__name__)
-candles:dict[str,deque]= {}; sent=set(); last_webhook=0.0
+candles:dict[str,deque]= {}; sent=set(); last_webhook=0.0; telegram_offset=0
 risk={'date':'','losses':0,'streak':0,'signals':0,'wins':0,'losses_total':0}
 live_feed: OlympLiveFeed | None = None
 
 def reset_risk():
     d=datetime.now(timezone.utc).date().isoformat()
-    if risk['date']!=d:
-        risk.update(date=d,losses=0,streak=0,signals=0,wins=0,losses_total=0)
+    if risk['date']!=d:risk.update(date=d,losses=0,streak=0,signals=0,wins=0,losses_total=0)
 
 def f(v):
     try:return float(v)
@@ -32,7 +31,7 @@ def f(v):
 
 def normalize(raw):
     out=[]
-    if not isinstance(raw,list): return out
+    if not isinstance(raw,list):return out
     for x in raw[-300:]:
         if not isinstance(x,dict):continue
         o=f(x.get('open',x.get('o'))); h=f(x.get('high',x.get('h'))); l=f(x.get('low',x.get('l'))); c=f(x.get('close',x.get('c'))); t=f(x.get('timestamp',x.get('time',x.get('t',time.time()))))
@@ -91,11 +90,33 @@ def telegram(text):
         r=requests.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':CHAT_ID,'text':text,'disable_web_page_preview':True},timeout=15);r.raise_for_status();return True
     except Exception as e:log.exception('Telegram error: %s',e);return False
 
+def telegram_command_loop():
+    global telegram_offset
+    if not TOKEN or not CHAT_ID:
+        log.warning('Telegram command listener disabled: token/chat id not configured'); return
+    log.info('Telegram command listener started')
+    while True:
+        try:
+            r=requests.get(f'https://api.telegram.org/bot{TOKEN}/getUpdates',params={'timeout':25,'offset':telegram_offset+1,'allowed_updates':json.dumps(['message'])},timeout=35); r.raise_for_status(); data=r.json()
+            for u in data.get('result',[]):
+                telegram_offset=max(telegram_offset,u.get('update_id',telegram_offset))
+                m=u.get('message') or {}; chat=str((m.get('chat') or {}).get('id','')); text=str(m.get('text','')).strip().lower()
+                if chat!=CHAT_ID: continue
+                if text.startswith('/start'):
+                    telegram('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI\n━━━━━━━━━━━━━━━━━━━━\n✅ Bot is ONLINE\n📡 Olymp Trade • LIVE READ-ONLY MARKET DATA\n🕐 1-minute candle analysis\n⏱️ Expiry • 2 / 3 / 5 / 10 / 15 min\n🧠 AI signal engine • DEMO\n🛡️ MANUAL ONLY • AUTO-TRADE OFF\n🚫 MARTINGALE OFF\n\nUse /status to check live connection.\n━━━━━━━━━━━━━━━━━━━━')
+                elif text.startswith('/status'):
+                    s=live_feed.status() if live_feed else {'configured':False,'connected':False,'assets':[]}
+                    telegram(f'🎯 CANDICE AI STATUS\n\n📡 Olymp feed • {"🟢 CONNECTED" if s.get("connected") else "🔴 NOT CONNECTED"}\n📈 Assets • {", ".join(s.get("assets",[])) or "-"}\n🕐 Timeframe • 1m\n🛡️ Read-only • YES\n🚫 Auto-trade • OFF\n🚫 Martingale • OFF')
+                elif text.startswith('/help'):
+                    telegram('🎯 CANDICE AI COMMANDS\n\n/start • Start bot\n/status • Live connection status\n/help • Commands')
+        except Exception as e:
+            log.warning('Telegram command listener error: %s',e)
+            time.sleep(5)
+
 def process(p):
     global last_webhook
     reset_risk();asset=str(p.get('asset',p.get('symbol','UNKNOWN'))).upper().strip() or 'UNKNOWN'; raw=normalize(p.get('candles',p.get('bars',[]))) or normalize([p])
-    if raw:
-        q=candles.setdefault(asset,deque(maxlen=300));q.extend(raw);data=list(q)
+    if raw:q=candles.setdefault(asset,deque(maxlen=300));q.extend(raw);data=list(q)
     else:data=list(candles.get(asset,[]))
     last_webhook=time.time();tech=analyze(data)
     if tech['decision']!='SIGNAL':return {'ok':True,'status':'NO_SIGNAL','asset':asset,'technical':tech}
@@ -106,11 +127,9 @@ def process(p):
     text=('━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • DEMO SIGNAL\n━━━━━━━━━━━━━━━━━━━━\n'+f'📈 Asset • {asset}\n➡️ Direction • {"🟢⬆️ UP" if tech["direction"]=="UP" else "🔴⬇️ DOWN"}\n💰 Entry • {entry}\n⏱️ Expiry • {expiry} min\n🧠 Confidence • {tech["confidence"]}%\n\n🔎 VERIFIED REASONS\n'+'\n'.join('• '+x for x in tech['reasons'])+'\n\n🕐 Timeframe • 1-minute\n📡 Source • Olymp Trade live market data\n🛡️ READ-ONLY MARKET FEED • MANUAL ONLY\n🚫 AUTO-TRADE OFF • MARTINGALE OFF\n━━━━━━━━━━━━━━━━━━━━')
     ok=telegram(text);return {'ok':True,'status':'SIGNAL_SENT' if ok else 'SIGNAL_READY','asset':asset,'direction':tech['direction'],'confidence':tech['confidence'],'expiry':expiry,'telegram':ok}
 
-def on_olymp_candle(asset: str, candle: dict) -> None:
-    try:
-        process({'asset':asset,'candles':[candle],'expiry':5})
-    except Exception:
-        log.exception('Olymp candle processing error: %s', asset)
+def on_olymp_candle(asset: str,candle: dict)->None:
+    try:process({'asset':asset,'candles':[candle],'expiry':5})
+    except Exception:log.exception('Olymp candle processing error: %s',asset)
 
 @app.get('/')
 def root():return jsonify({'name':'Candice AI','version':VERSION,'mode':'DEMO_SIGNAL_ONLY','auto_trade':False,'martingale':False,'market_source':'Olymp Trade live read-only'})
@@ -135,6 +154,6 @@ def result():
     return jsonify({'ok':True,'risk':risk})
 
 if __name__=='__main__':
-    live_feed=OlympLiveFeed(on_olymp_candle)
-    live_feed.start()
+    live_feed=OlympLiveFeed(on_olymp_candle);live_feed.start()
+    threading.Thread(target=telegram_command_loop,daemon=True).start()
     app.run(host='0.0.0.0',port=int(os.getenv('PORT','10000')),threaded=True)
