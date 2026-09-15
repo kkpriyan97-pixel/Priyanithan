@@ -8,6 +8,11 @@ ACCOUNT = {"mode":"UNKNOWN","balance":None,"currency":"","updated":0.0}
 HOOKED = False
 WRAPPED = False
 
+try:
+    import freshness_patch
+except Exception:
+    LOG.exception("Freshness bridge import failed")
+
 
 def _fmt(v):
     try: return f"{float(v):.6f}"
