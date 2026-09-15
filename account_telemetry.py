@@ -1,8 +1,8 @@
 """Candice read-only account telemetry bridge.
 
-Mirror the account explicitly selected by the authenticated Olymptrade session.
-Support both Demo and Real without guessing from balance size. Never place
-orders and never relabel an unverified account.
+Mirror the account selected by the authenticated Olymptrade session when the
+session exposes an account id/group. Never infer Demo/Real from balance size.
+Never place orders.
 """
 from __future__ import annotations
 
@@ -27,16 +27,8 @@ def _snapshot(feed):
     return raw if isinstance(raw, dict) else {}
 
 
-def _raw_accounts(feed):
-    raw = _snapshot(feed)
-    rows = raw.get("d")
-    return rows if isinstance(rows, list) else []
-
-
 def _norm_id(v):
-    if v is None:
-        return ""
-    return str(v).strip()
+    return "" if v is None else str(v).strip()
 
 
 def _row_account_id(row):
@@ -45,6 +37,14 @@ def _row_account_id(row):
 
 def _row_mode(row):
     return str(row.get("group", row.get("mode", row.get("type", ""))) or "").strip().lower()
+
+
+def _balance(row):
+    return _number(row.get("amount", row.get("amount_real", row.get("amount_free", row.get("balance")))))
+
+
+def _currency(row):
+    return str(row.get("currency", row.get("currency_code", "")) or "").upper()
 
 
 def _explicit_selected(row):
@@ -59,22 +59,21 @@ def _explicit_selected(row):
 
 
 def _find_id_by_key(obj, wanted_keys, depth=0):
-    """Safely find an account id referenced by an explicitly named selector key."""
-    if depth > 5:
+    if depth > 6:
         return ""
     if isinstance(obj, dict):
         for key, value in obj.items():
             k = str(key).strip().lower()
             if k in wanted_keys:
                 if isinstance(value, (str, int, float)):
-                    value = _norm_id(value)
-                    if value:
-                        return value
+                    found = _norm_id(value)
+                    if found:
+                        return found
                 if isinstance(value, dict):
                     for id_key in ("account_id", "accountId", "id"):
-                        value_id = _norm_id(value.get(id_key))
-                        if value_id:
-                            return value_id
+                        found = _norm_id(value.get(id_key))
+                        if found:
+                            return found
             found = _find_id_by_key(value, wanted_keys, depth + 1)
             if found:
                 return found
@@ -88,47 +87,71 @@ def _find_id_by_key(obj, wanted_keys, depth=0):
 
 def _client_selected_id(feed, raw):
     client = getattr(feed, "client", None)
-    objects = [raw, client, feed]
-    for obj in objects:
+    for obj in (raw, client, feed):
         if obj is None:
             continue
-        found = _find_id_by_key(
-            obj,
-            {
-                "selected_account_id", "selectedaccountid", "active_account_id",
-                "activeaccountid", "current_account_id", "currentaccountid",
-                "selected_id", "active_id", "current_id", "selectedaccount",
-                "activeaccount", "currentaccount",
-            },
-        )
+        found = _find_id_by_key(obj, {
+            "selected_account_id", "selectedaccountid", "active_account_id",
+            "activeaccountid", "current_account_id", "currentaccountid",
+            "selected_id", "active_id", "current_id", "selectedaccount",
+            "activeaccount", "currentaccount",
+        })
         if found:
             return found
     return ""
 
 
-def _balance(row):
-    return _number(row.get("amount", row.get("amount_real", row.get("amount_free", row.get("balance")))))
+def _session_selected(rows, feed):
+    """Use the authenticated websocket client's explicit account selection.
 
-
-def _currency(row):
-    return str(row.get("currency", row.get("currency_code", "")) or "").upper()
+    The current Olymptrade client exposes account_id/account_group after its
+    account-info handshake. This is stronger evidence than choosing the
+    largest balance and avoids relabelling an arbitrary account.
+    """
+    client = getattr(feed, "client", None)
+    if client is None:
+        return None, "no_client"
+    session_id = _norm_id(getattr(client, "account_id", None))
+    session_group = str(getattr(client, "account_group", "") or "").strip().lower()
+    if session_id and session_group in {"demo", "real"}:
+        matches = [
+            r for r in rows
+            if isinstance(r, dict)
+            and _row_account_id(r) == session_id
+            and _row_mode(r) == session_group
+            and _balance(r) is not None
+        ]
+        if len(matches) == 1:
+            return matches[0], "authenticated_session_account"
+        if len(matches) > 1:
+            return None, "ambiguous_authenticated_session_account"
+    return None, "session_selection_unavailable"
 
 
 def _find_selected(rows, feed, raw):
+    # 1. Explicit selector metadata, if Olymptrade sends it.
     selected_id = _client_selected_id(feed, raw)
     if selected_id:
-        matches = [row for row in rows if isinstance(row, dict) and _row_account_id(row) == selected_id and _balance(row) is not None]
+        matches = [r for r in rows if isinstance(r, dict) and _row_account_id(r) == selected_id and _balance(r) is not None]
         if len(matches) == 1:
             return matches[0], "explicit_selected_account_id"
         if len(matches) > 1:
             return None, "ambiguous_selected_account_id"
 
-    marked = [row for row in rows if isinstance(row, dict) and _explicit_selected(row) and _balance(row) is not None]
+    # 2. Explicit selected/current/active marker on an account row.
+    marked = [r for r in rows if isinstance(r, dict) and _explicit_selected(r) and _balance(r) is not None]
     if len(marked) == 1:
         return marked[0], "event_selected_marker"
     if len(marked) > 1:
         return None, "ambiguous_selected_marker"
-    return None, "no_explicit_selection"
+
+    # 3. Authenticated client selection. This is the important fallback for
+    # the current websocket implementation, which exposes account_id/group
+    # but does not attach a selected flag to event-55 rows.
+    row, source = _session_selected(rows, feed)
+    if row is not None:
+        return row, source
+    return None, source
 
 
 def _apply(row, source, feed):
@@ -138,10 +161,8 @@ def _apply(row, source, feed):
     mode = _row_mode(row)
     balance = _balance(row)
     if mode not in {"real", "demo"} or balance is None:
-        sc.MODE = "READ_ONLY_UNVERIFIED"
-        sc.BALANCE_TEXT = "ACCOUNT_SELECTION_UNVERIFIED"
+        _clear_unverified(feed, "invalid_selected_account")
         return False
-
     currency = _currency(row)
     account_id = _row_account_id(row)
     feed.account_mode = mode.upper()
@@ -153,10 +174,7 @@ def _apply(row, source, feed):
     sc.MODE = "READ_ONLY_REAL" if mode == "real" else "READ_ONLY_DEMO"
     label = "REAL" if mode == "real" else "DEMO"
     sc.BALANCE_TEXT = f"{balance:.2f}{(' ' + currency) if currency else ''} | {label} SELECTED"
-    LOG.info(
-        "ACCOUNT_SELECTED_SNAPSHOT mode=%s balance=%s currency=%s account_id=%s source=%s",
-        label, balance, currency or "-", account_id or "-", source,
-    )
+    LOG.info("ACCOUNT_SELECTED_SNAPSHOT mode=%s balance=%s currency=%s account_id=%s source=%s", label, balance, currency or "-", account_id or "-", source)
     return True
 
 
@@ -180,25 +198,17 @@ def _sync_once() -> bool:
         return False
     feed = getattr(main, "live_feed", None)
     if feed is None:
-        sc.MODE = "READ_ONLY_UNVERIFIED"
-        sc.BALANCE_TEXT = "ACCOUNT_SELECTION_UNVERIFIED"
         return False
-
     raw = _snapshot(feed)
     rows = raw.get("d") if isinstance(raw.get("d"), list) else []
     if not rows:
         _clear_unverified(feed, "no_account_snapshot")
         return False
-
     row, source = _find_selected(rows, feed, raw)
     if row is not None:
         return _apply(row, source, feed)
-
     _clear_unverified(feed, source)
-    LOG.warning(
-        "ACCOUNT_SELECTION_UNVERIFIED rows=%s reason=%s | waiting for explicit selected-account metadata",
-        len(rows), source,
-    )
+    LOG.warning("ACCOUNT_SELECTION_UNVERIFIED rows=%s reason=%s | waiting for explicit selected-account metadata or authenticated session selection", len(rows), source)
     return False
 
 
@@ -214,15 +224,11 @@ def _watch() -> None:
                 getattr(feed, "account_balance", None),
                 getattr(feed, "account_currency", ""),
                 getattr(feed, "account_id", ""),
-                getattr(feed, "account_selection_source", ""),
-                ok,
+                getattr(feed, "account_selection_source", ""), ok,
             ) if feed is not None else ("UNKNOWN", None, "", "", "", False)
             if state != last:
                 last = state
-                LOG.info(
-                    "ACCOUNT_TELEMETRY_STATE mode=%s balance=%s currency=%s account_id=%s source=%s verified=%s",
-                    state[0], state[1], state[2] or "-", state[3] or "-", state[4] or "-", state[5],
-                )
+                LOG.info("ACCOUNT_TELEMETRY_STATE mode=%s balance=%s currency=%s account_id=%s source=%s verified=%s", state[0], state[1], state[2] or "-", state[3] or "-", state[4] or "-", state[5])
         except Exception:
             LOG.exception("ACCOUNT_TELEMETRY_SYNC failed")
         time.sleep(1)
