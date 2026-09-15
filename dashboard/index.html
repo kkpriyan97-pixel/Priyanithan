@@ -4,26 +4,46 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Candice AI • Live Dashboard</title>
 <style>
-:root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:#070a10;color:#eef2f7}main{max-width:1100px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:20px}.brand{font-size:24px;font-weight:800}.sub{color:#8995a7;font-size:13px}.pill{border:1px solid #263244;border-radius:999px;padding:8px 12px;font-size:12px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{background:#0d121b;border:1px solid #1b2533;border-radius:16px;padding:16px}.label{color:#8995a7;font-size:12px}.value{font-size:22px;font-weight:750;margin-top:8px}.wide{grid-column:span 2}.section{margin-top:16px}.ok{color:#62e6a1}.warn{color:#ffd166}.bad{color:#ff6b7a}.muted{color:#8995a7}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;line-height:1.6}.bar{height:8px;background:#18212d;border-radius:8px;overflow:hidden;margin-top:10px}.bar>i{display:block;height:100%;width:0;background:#62e6a1}.footer{margin-top:18px;color:#657286;font-size:11px}@media(max-width:800px){.grid{grid-template-columns:1fr 1fr}.wide{grid-column:span 2}}@media(max-width:520px){main{padding:14px}.grid{grid-template-columns:1fr}.wide{grid-column:span 1}.top{align-items:flex-start}}
+:root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:#070a10;color:#eef2f7}main{max-width:1100px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:16px}.brand{font-size:27px;font-weight:850}.sub{color:#8995a7;font-size:13px;margin-top:3px}.pill{border:1px solid #263244;border-radius:999px;padding:8px 12px;font-size:12px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{background:#0d121b;border:1px solid #1b2533;border-radius:16px;padding:16px}.label{color:#8995a7;font-size:12px;letter-spacing:.04em}.value{font-size:22px;font-weight:750;margin-top:8px}.wide{grid-column:span 2}.section{margin-top:16px}.ok{color:#62e6a1}.warn{color:#ffd166}.bad{color:#ff6b7a}.muted{color:#8995a7}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;line-height:1.55}.row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #17202d}.row:last-child{border-bottom:0}.bar{height:8px;background:#18212d;border-radius:8px;overflow:hidden;margin-top:10px}.bar>i{display:block;height:100%;width:0;background:#62e6a1}.footer{margin-top:18px;color:#657286;font-size:11px}@media(max-width:800px){.grid{grid-template-columns:1fr 1fr}.wide{grid-column:span 2}}@media(max-width:520px){main{padding:14px}.grid{grid-template-columns:1fr}.wide{grid-column:span 1}.top{align-items:flex-start}.brand{font-size:24px}}
 </style></head>
 <body><main>
-<div class="top"><div><div class="brand">🎯 CANDICE AI</div><div class="sub">Live market intelligence • read-only / manual</div></div><div id="conn" class="pill">CONNECTING…</div></div>
+<div class="top"><div><div class="brand">🎯 CANDICE AI</div><div class="sub">Live market intelligence • read-only / manual only</div></div><div id="conn" class="pill">CONNECTING…</div></div>
 <div class="grid">
 <div class="card"><div class="label">SYSTEM</div><div id="system" class="value">—</div></div>
 <div class="card"><div class="label">ACCOUNT MODE</div><div id="mode" class="value">—</div></div>
 <div class="card"><div class="label">BALANCE</div><div id="balance" class="value">—</div></div>
 <div class="card"><div class="label">LAST UPDATE</div><div id="updated" class="value">—</div></div>
-<div class="card wide"><div class="label">SIGNAL ENGINE</div><div id="signal" class="value">Waiting for live state…</div><div class="sub" id="signalMeta"></div></div>
+<div class="card wide"><div class="label">SIGNAL ENGINE</div><div id="signal" class="value">Starting live telemetry…</div><div class="sub" id="signalMeta"></div></div>
 <div class="card wide"><div class="label">RISK / PERFORMANCE</div><div class="value" id="risk">—</div><div class="bar"><i id="riskbar"></i></div><div class="sub" id="riskMeta"></div></div>
-<div class="card wide"><div class="label">MARKET / CANDLE TELEMETRY</div><div id="market" class="mono muted">No telemetry received yet.</div></div>
+<div class="card wide"><div class="label">LIVE MARKET FEED</div><div id="feed" class="mono muted">Waiting for Render market telemetry…</div></div>
+<div class="card wide"><div class="label">LAST COMPLETED 1M CANDLE</div><div id="candle" class="mono muted">Waiting for a completed real 1-minute candle…</div></div>
 <div class="card wide"><div class="label">VERIFICATION</div><div id="verify" class="mono">Dashboard is read-only. It never places trades.</div></div>
 </div>
-<div class="footer">Candice AI dashboard • Render remains the 24/7 worker; Netlify is the web dashboard layer.</div>
+<div class="footer">Candice AI • Render = 24/7 worker • Netlify = live dashboard • Auto-trade OFF • Martingale OFF</div>
 </main>
 <script>
-const state={system:document.querySelector('#system'),mode:document.querySelector('#mode'),balance:document.querySelector('#balance'),updated:document.querySelector('#updated'),signal:document.querySelector('#signal'),signalMeta:document.querySelector('#signalMeta'),risk:document.querySelector('#risk'),riskMeta:document.querySelector('#riskMeta'),riskbar:document.querySelector('#riskbar'),market:document.querySelector('#market'),verify:document.querySelector('#verify'),conn:document.querySelector('#conn')};
-function set(id,v){state[id].textContent=v==null?'—':v}
-function fmt(v){if(v===null||v===undefined||v==='')return '—';if(typeof v==='number')return v.toLocaleString(undefined,{maximumFractionDigits:2});return String(v)}
-async function load(){try{const r=await fetch('/render/health',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json().catch(()=>({status:'ONLINE'}));state.conn.textContent='● LIVE';state.conn.className='pill ok';set('system',d.status||'ONLINE');set('updated',new Date().toLocaleTimeString());if(d.mode)set('mode',d.mode);if(d.balance!==undefined)set('balance',fmt(d.balance));if(d.signal)set('signal',typeof d.signal==='string'?d.signal:JSON.stringify(d.signal));if(d.version)set('signalMeta','Version '+d.version);if(d.risk){set('risk',`${fmt(d.risk.wins)} WIN / ${fmt(d.risk.losses)} LOSS`);set('riskMeta',`Signals ${fmt(d.risk.signals)} • Streak ${fmt(d.risk.streak)}`);state.riskbar.style.width=Math.min(100,Math.max(0,(Number(d.risk.wins)||0)/Math.max(1,(Number(d.risk.wins)||0)+(Number(d.risk.losses)||0))*100))+'%'}if(d.market)set('market',JSON.stringify(d.market,null,2));state.verify.textContent='✓ Connected to Render • read-only dashboard • auto-trade OFF • martingale OFF';}catch(e){state.conn.textContent='● OFFLINE';state.conn.className='pill bad';set('system','Render unavailable');set('updated',new Date().toLocaleTimeString());state.verify.textContent='Waiting for Render health endpoint. No trading action is performed by this dashboard.'}}
+const $=id=>document.getElementById(id);
+const state={lastCandleTs:0};
+function fmt(v){if(v===null||v===undefined||v==='')return '—';if(typeof v==='number')return v.toLocaleString(undefined,{maximumFractionDigits:6});return String(v)}
+function age(v){if(v===null||v===undefined)return '—';return `${Number(v).toFixed(1)}s ago`}
+function esc(v){return String(v??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function candleText(c){if(!c)return 'No candle telemetry yet.';return `Asset: ${esc(c.asset)}\nTimestamp: ${esc(c.timestamp)}\nOpen: ${fmt(c.open)}\nHigh: ${fmt(c.high)}\nLow: ${fmt(c.low)}\nClose: ${fmt(c.close)}`}
+async function load(){
+ try{
+  const r=await fetch('/render/health?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();const o=d.olymp||{};const rk=d.risk||{};
+  $('conn').textContent='● LIVE';$('conn').className='pill ok';$('system').textContent=o.connected?'ONLINE':'STARTING';
+  const am=o.account_mode||d.mode||'UNKNOWN';$('mode').textContent=am==='DEMO'?'READ_ONLY_DEMO':am==='REAL'?'READ_ONLY_REAL':'READ_ONLY_'+am;
+  $('balance').textContent=o.account_balance!=null?`${fmt(o.account_balance)} ${o.account_currency||''}`.trim():'—';
+  $('updated').textContent=new Date().toLocaleTimeString();
+  $('signal').textContent=(rk.signals||0)>0?`${rk.signals} signal${rk.signals===1?'':'s'} recorded`:'Waiting for qualified setup…';
+  $('signalMeta').textContent=`Version ${d.version||'—'} • 1m live candles • Expiry ${Array.isArray(d.expiries)?d.expiries.join(' / '):'—'} min`;
+  $('risk').textContent=`${fmt(rk.wins)} WIN / ${fmt(rk.losses_total??rk.losses)} LOSS`;
+  $('riskMeta').textContent=`Signals ${fmt(rk.signals)} • Current loss streak ${fmt(rk.streak)} • Daily losses ${fmt(rk.losses)}`;
+  const total=(Number(rk.wins)||0)+(Number(rk.losses_total??rk.losses)||0);$('riskbar').style.width=(total?((Number(rk.wins)||0)/total*100):0)+'%';
+  $('feed').innerHTML=`<div class="row"><span>Connection</span><b class="${o.connected?'ok':'warn'}">${o.connected?'CONNECTED':'STARTING'}</b></div><div class="row"><span>Assets discovered</span><b>${fmt((o.discovered_assets||[]).length)}</b></div><div class="row"><span>Tradeable assets</span><b>${fmt((o.tradeable_assets||[]).length)}</b></div><div class="row"><span>Ticks received</span><b>${fmt(o.ticks_received)}</b></div><div class="row"><span>Completed 1m candles</span><b>${fmt(o.candles_completed)}</b></div><div class="row"><span>Last tick</span><b>${age(o.last_tick_age)}</b></div><div class="row"><span>Last completed candle</span><b>${age(o.last_candle_age)}</b></div><div class="row"><span>Account telemetry</span><b>${age(o.account_age)}</b></div>`;
+  const assets=o.tradeable_assets||[];if(assets.length){$('candle').textContent=`Render reports ${assets.length} tradeable assets and ${fmt(o.candles_completed)} completed real 1m candles.\nLatest candle age: ${age(o.last_candle_age)}\nThe dashboard does not fabricate candle OHLC data.`}else $('candle').textContent='Waiting for live market feed…';
+  $('verify').textContent=`✓ Render connected • account mode auto-detected: ${am} • balance telemetry ${o.account_balance!=null?'available':'not available yet'} • read-only • auto-trade OFF • martingale OFF`;
+ }catch(e){$('conn').textContent='● OFFLINE';$('conn').className='pill bad';$('system').textContent='Render unavailable';$('updated').textContent=new Date().toLocaleTimeString();$('verify').textContent='Waiting for Render health telemetry. No trading action is performed by this dashboard.'}
+}
 load();setInterval(load,10000);
 </script></body></html>
