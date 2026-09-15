@@ -1,9 +1,8 @@
 """Candice read-only account telemetry bridge.
 
-Prefer the REAL account from the broker's raw balance snapshot (event 55) when
-it is present. Never infer REAL from a stale demo value and never place orders.
-If no real account is exposed by the authenticated session, report that fact
-instead of relabelling the demo balance as real.
+Mirror the account explicitly selected by the authenticated Olymptrade session.
+Support both Demo and Real without guessing from balance size. Never place
+orders and never relabel an unverified account.
 """
 from __future__ import annotations
 
@@ -23,42 +22,113 @@ def _number(v):
 
 
 def _raw_accounts(feed):
-    """Return the latest event-55 account rows when the feed client exposes them."""
     client = getattr(feed, "client", None)
     raw = getattr(client, "current_balance", None) if client is not None else None
     rows = raw.get("d") if isinstance(raw, dict) else None
     return rows if isinstance(rows, list) else []
 
 
-def _pick_real(rows):
-    candidates = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        group = str(row.get("group", "")).strip().lower()
-        if group != "real":
-            continue
-        amount = _number(row.get("amount", row.get("amount_real", row.get("amount_free", row.get("balance")))))
-        if amount is None:
-            continue
-        currency = str(row.get("currency", row.get("currency_code", "")) or "").upper()
-        candidates.append((amount, currency, row.get("account_id")))
-    return max(candidates, key=lambda x: x[0]) if candidates else None
+def _norm_id(v):
+    if v is None:
+        return ""
+    return str(v).strip()
 
 
-def _pick_demo(rows):
-    candidates = []
-    for row in rows:
-        if not isinstance(row, dict):
+def _row_account_id(row):
+    return _norm_id(row.get("account_id", row.get("accountId", row.get("id"))))
+
+
+def _row_mode(row):
+    return str(row.get("group", row.get("mode", row.get("type", ""))) or "").strip().lower()
+
+
+def _explicit_selected(row):
+    """Return True only for an explicit active/selected marker."""
+    for key in ("selected", "is_selected", "active", "is_active", "current", "is_current"):
+        if key in row and isinstance(row.get(key), bool) and row.get(key):
+            return True
+        if key in row and str(row.get(key, "")).strip().lower() in {"1", "true", "yes", "selected", "active", "current"}:
+            return True
+    status = str(row.get("status", "") or "").strip().lower()
+    return status in {"active", "selected", "current"}
+
+
+def _client_selected_id(feed):
+    """Best-effort lookup of an active account id exposed by the WS client."""
+    client = getattr(feed, "client", None)
+    if client is None:
+        return ""
+    for obj in (client, feed, getattr(client, "account", None), getattr(client, "accounts", None)):
+        if obj is None:
             continue
-        if str(row.get("group", "")).strip().lower() != "demo":
-            continue
-        amount = _number(row.get("amount", row.get("amount_real", row.get("amount_free", row.get("balance")))))
-        if amount is None:
-            continue
-        currency = str(row.get("currency", row.get("currency_code", "")) or "").upper()
-        candidates.append((amount, currency, row.get("account_id")))
-    return max(candidates, key=lambda x: x[0]) if candidates else None
+        for key in ("selected_account_id", "active_account_id", "current_account_id", "account_id", "selectedAccountId", "activeAccountId", "currentAccountId"):
+            try:
+                value = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+            except Exception:
+                value = None
+            value = _norm_id(value)
+            if value:
+                return value
+    return ""
+
+
+def _balance(row):
+    return _number(row.get("amount", row.get("amount_real", row.get("amount_free", row.get("balance")))))
+
+
+def _currency(row):
+    return str(row.get("currency", row.get("currency_code", "")) or "").upper()
+
+
+def _find_selected(rows, feed):
+    """Find the account explicitly selected by the platform/session."""
+    selected_id = _client_selected_id(feed)
+    if selected_id:
+        for row in rows:
+            if isinstance(row, dict) and _row_account_id(row) == selected_id and _balance(row) is not None:
+                return row, "client_selected_id"
+
+    marked = [row for row in rows if isinstance(row, dict) and _explicit_selected(row) and _balance(row) is not None]
+    if len(marked) == 1:
+        return marked[0], "event_selected_marker"
+    if len(marked) > 1:
+        # Multiple marked rows are ambiguous; do not guess.
+        return None, "ambiguous_selected_marker"
+    return None, "no_explicit_selection"
+
+
+def _apply(row, source, feed, verified=True):
+    sc = sys.modules.get("sitecustomize")
+    if sc is None:
+        return False
+    mode = _row_mode(row)
+    if mode not in {"real", "demo"}:
+        sc.MODE = "READ_ONLY_UNVERIFIED"
+        sc.BALANCE_TEXT = "ACCOUNT_SELECTION_UNVERIFIED"
+        return False
+
+    balance = _balance(row)
+    currency = _currency(row)
+    account_id = _row_account_id(row)
+    if balance is None:
+        sc.MODE = "READ_ONLY_UNVERIFIED"
+        sc.BALANCE_TEXT = "ACCOUNT_SELECTION_UNVERIFIED"
+        return False
+
+    feed.account_mode = mode.upper()
+    feed.account_balance = balance
+    feed.account_currency = currency
+    feed.account_id = account_id
+    feed.account_selection_source = source
+    feed.account_updated = time.time()
+    sc.MODE = "READ_ONLY_REAL" if mode == "real" else "READ_ONLY_DEMO"
+    label = "REAL" if mode == "real" else "DEMO"
+    sc.BALANCE_TEXT = f"{balance:.2f}{(' ' + currency) if currency else ''} | {label} SELECTED"
+    LOG.info(
+        "ACCOUNT_SELECTED_SNAPSHOT mode=%s balance=%s currency=%s account_id=%s source=%s verified=%s",
+        label, balance, currency or "-", account_id or "-", source, verified,
+    )
+    return bool(verified)
 
 
 def _sync_once() -> bool:
@@ -69,44 +139,27 @@ def _sync_once() -> bool:
     feed = getattr(main, "live_feed", None)
     if feed is None:
         sc.MODE = "READ_ONLY_UNVERIFIED"
-        sc.BALANCE_TEXT = "NOT_VERIFIED"
+        sc.BALANCE_TEXT = "ACCOUNT_SELECTION_UNVERIFIED"
         return False
 
-    # Event 55 is the authoritative live balance snapshot. Prefer REAL if it
-    # exists in that snapshot, even when the upstream client previously chose
-    # the demo account context during startup.
     rows = _raw_accounts(feed)
-    real = _pick_real(rows)
-    if real is not None:
-        balance, currency, account_id = real
-        feed.account_mode = "REAL"
-        feed.account_balance = balance
-        feed.account_currency = currency
-        # The client snapshot was just read; keep a local verification clock.
-        if not getattr(feed, "account_updated", 0.0):
-            feed.account_updated = time.time()
-        age = max(0.0, time.time() - float(getattr(feed, "account_updated", 0.0) or 0.0))
-        sc.MODE = "READ_ONLY_REAL"
-        sc.BALANCE_TEXT = f"{balance:.2f}{(' ' + currency) if currency else ''} | VERIFIED {age:.0f}s ago"
-        LOG.info(
-            "ACCOUNT_REAL_SNAPSHOT mode=REAL balance=%s currency=%s account_id=%s age=%.1fs source=OLYMPTRADE_EVENT_55",
-            balance, currency or "-", account_id or "-", age,
-        )
-        return age <= 90
-
-    demo = _pick_demo(rows)
-    if demo is not None:
-        balance, currency, account_id = demo
-        sc.MODE = "READ_ONLY_DEMO"
-        sc.BALANCE_TEXT = f"{balance:.2f}{(' ' + currency) if currency else ''} | DEMO VERIFIED"
-        LOG.info(
-            "ACCOUNT_REAL_UNAVAILABLE mode=DEMO balance=%s currency=%s account_id=%s reason=no REAL account in latest event 55",
-            balance, currency or "-", account_id or "-",
-        )
+    if not rows:
+        sc.MODE = "READ_ONLY_UNVERIFIED"
+        sc.BALANCE_TEXT = "ACCOUNT_SELECTION_UNVERIFIED (no account snapshot)"
         return False
 
+    row, source = _find_selected(rows, feed)
+    if row is not None:
+        return _apply(row, source, feed, verified=True)
+
+    # Do not silently choose the largest REAL/DEMO balance. That was the old
+    # bug: it could show Real while the user had Demo selected, or vice versa.
     sc.MODE = "READ_ONLY_UNVERIFIED"
-    sc.BALANCE_TEXT = "REAL_NOT_VERIFIED (no real account snapshot)"
+    sc.BALANCE_TEXT = "ACCOUNT_SELECTION_UNVERIFIED"
+    LOG.warning(
+        "ACCOUNT_SELECTION_UNVERIFIED rows=%s reason=%s | waiting for explicit selected-account metadata",
+        len(rows), source,
+    )
     return False
 
 
@@ -121,14 +174,15 @@ def _watch() -> None:
                 getattr(feed, "account_mode", "UNKNOWN"),
                 getattr(feed, "account_balance", None),
                 getattr(feed, "account_currency", ""),
-                getattr(feed, "account_updated", 0.0),
+                getattr(feed, "account_id", ""),
+                getattr(feed, "account_selection_source", ""),
                 ok,
-            ) if feed is not None else ("UNKNOWN", None, "", 0.0, False)
+            ) if feed is not None else ("UNKNOWN", None, "", "", "", False)
             if state != last:
                 last = state
                 LOG.info(
-                    "ACCOUNT_TELEMETRY_STATE mode=%s balance=%s currency=%s updated=%s verified=%s",
-                    state[0], state[1], state[2] or "-", state[3], state[4],
+                    "ACCOUNT_TELEMETRY_STATE mode=%s balance=%s currency=%s account_id=%s source=%s verified=%s",
+                    state[0], state[1], state[2] or "-", state[3] or "-", state[4] or "-", state[5],
                 )
         except Exception:
             LOG.exception("ACCOUNT_TELEMETRY_SYNC failed")
