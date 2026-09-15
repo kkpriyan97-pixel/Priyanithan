@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 import sys
+import threading
 import time
 
 LOG = logging.getLogger("candice.freshness")
@@ -48,4 +49,16 @@ def install():
     LOG.info("CANDICE_FRESHNESS_BRIDGE installed | receipt -> received_at -> candle_timestamp fallback")
     return True
 
-install()
+
+def _late_install():
+    for _ in range(300):
+        try:
+            if install():
+                return
+        except Exception:
+            LOG.exception("Freshness bridge install failed")
+        time.sleep(0.1)
+    LOG.error("CANDICE_FRESHNESS_BRIDGE failed to find sitecustomize")
+
+
+threading.Thread(target=_late_install, name="candice-freshness-bridge", daemon=True).start()
