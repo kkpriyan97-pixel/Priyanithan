@@ -143,7 +143,7 @@ def _trend(data):
 
 
 def _telemetry_brain(data, asset):
-    """Run the real strategy brain while supplying real MTF confirmation."""
+    """Run the real strategy brain while supplying real MTF and indicator telemetry."""
     from strategy_brain import evaluate as brain_evaluate
     bars3 = _aggregate(data, 3)
     bars5 = _aggregate(data, 5)
@@ -152,7 +152,11 @@ def _telemetry_brain(data, asset):
     closes = [_close(x) for x in data]
     rsi = _rsi(closes)
     adx = _adx(data)
+    # Telegram's formatter in app.py consumes these exact uppercase keys.
+    # Keep lowercase aliases too so other telemetry consumers remain compatible.
     indicators = {
+        "RSI": round(rsi, 2) if rsi is not None else None,
+        "ADX": round(adx, 2) if adx is not None else None,
         "rsi": round(rsi, 2) if rsi is not None else None,
         "adx": round(adx, 2) if adx is not None else None,
     }
@@ -190,7 +194,7 @@ def _patch_indicator_runtime():
                         if target is not None:
                             _set_cell(target, "brain_analyze", live_brain)
                             patched = True
-                            LOG.info("CANDICE_INDICATOR_TELEMETRY patched | MTF=1m/3m/5m | RSI=14 | ADX=14")
+                            LOG.info("CANDICE_INDICATOR_TELEMETRY patched | MTF=1m/3m/5m | RSI=14 | ADX=14 | telegram_keys=RSI/ADX")
                         break
                 if patched:
                     return
