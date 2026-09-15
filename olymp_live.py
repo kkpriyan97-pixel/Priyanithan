@@ -106,15 +106,37 @@ def _extract_asset_records(value):
         if isinstance(v,dict):
             ident=str(v.get("id",v.get("pair",v.get("symbol","")))).upper().strip()
             if _ASSET_RE.fullmatch(ident) and any(k in v for k in ("locked","locked_trading","time_open","time_close","time_open_trading","time_close_trading")):
-                records[ident]={"locked":bool(v.get("locked",False)),"locked_trading":bool(v.get("locked_trading",False)),"time_open":_num(v.get("time_open")),"time_close":_num(v.get("time_close")),"time_open_trading":_num(v.get("time_open_trading")),"time_close_trading":_num(v.get("time_close_trading"))}
+                records[ident]={
+                    "locked":bool(v.get("locked",False)),
+                    "locked_trading":bool(v.get("locked_trading",False)),
+                    "time_open":_num(v.get("time_open")),
+                    "time_close":_num(v.get("time_close")),
+                    "time_open_trading":_num(v.get("time_open_trading")),
+                    "time_close_trading":_num(v.get("time_close_trading")),
+                    "group":str(v.get("group","")).lower(),
+                    "group_view":v.get("group_view",[]),
+                }
             for item in v.values(): walk(item)
         elif isinstance(v,list):
             for item in v: walk(item)
     walk(value); return records
 
 
+def _is_otc(asset):
+    return str(asset).upper().endswith("_OTC")
+
+
+def _otc_candidate(base, state):
+    base=str(base).upper().strip()
+    if _is_otc(base): return None
+    group=str((state or {}).get("group","")).lower()
+    if group in {"currency","goods"} or base in {"XAUUSD","XAGUSD"}:
+        return f"{base}_OTC"
+    return None
+
+
 class OlympLiveFeed:
-    """Read-only Olymp market feed with strict market eligibility and 1m candles."""
+    """Read-only Olymp market feed with strict LIVE/OTC eligibility and 1m candles."""
     METADATA_EVENTS=(220,110,700,112,140,1038,1037,1039,141,22,26,111,1054,1076,1301,1097,241,230,231,75,1055,2223,2301,55,150,152,151,126,602,601,2076)
 
     def __init__(self,on_candle:Callable[[str,dict],None],on_history:Callable[[str,dict],None]|None=None):
@@ -144,7 +166,11 @@ class OlympLiveFeed:
             self._stop.wait(wait); backoff=min(60,backoff*2)
 
     def _market_is_tradeable(self,asset):
+        asset=str(asset).upper()
         st=self.market_state.get(asset)
+        if _is_otc(asset):
+            if st and (st.get("locked") or st.get("locked_trading")): return False
+            return True
         if not st: return False
         if st.get("locked") or st.get("locked_trading"): return False
         now=time.time(); op=st.get("time_open_trading"); cl=st.get("time_close_trading")
@@ -170,16 +196,17 @@ class OlympLiveFeed:
     async def _subscribe_asset(self,asset):
         try:
             await self.client.market.subscribe_ticks(asset)
-            try: await self.client.send_request(282,[{"pair":asset,"size":60}],requires_response=False)
-            except Exception: pass
-            log.info("Subscribed to Olymp live ticks/candles: %s",asset); return True
-        except Exception:
-            log.exception("Failed to subscribe to Olymp live ticks: %s",asset); return False
+            log.info("Subscribed to Olymp live ticks: %s market=%s",asset,"OTC" if _is_otc(asset) else "LIVE")
+            return True
+        except Exception as e:
+            log.warning("LIVE_FEED_SUBSCRIBE_REJECT asset=%s market=%s error=%s",asset,"OTC" if _is_otc(asset) else "LIVE",type(e).__name__)
+            return False
 
     async def _seed_and_subscribe(self,asset):
         if not self._market_is_tradeable(asset):
             log.info("MARKET_SKIP asset=%s reason=closed_or_locked",asset); return
-        await self._subscribe_asset(asset)
+        subscribed=await self._subscribe_asset(asset)
+        if not subscribed: return
         history=await self._fetch_history(asset); seeded=await self._history(history,asset)
         if seeded: log.info("HISTORY_SEEDED asset=%s count=%s",asset,seeded)
         else: log.info("LIVE_WARMUP asset=%s; waiting for real ticks",asset)
@@ -188,10 +215,16 @@ class OlympLiveFeed:
         try:
             records=_extract_asset_records(message)
             if records: self.market_state.update(records)
-            found=_extract_assets(message); eligible={a for a in found if self._market_is_tradeable(a)}
-            self.discovered_assets.update(eligible); new=eligible-set(self.assets)
+            found=_extract_assets(message)
+            candidates=set()
+            for asset in found:
+                if self._market_is_tradeable(asset): candidates.add(asset)
+                otc=_otc_candidate(asset,self.market_state.get(asset))
+                if otc: candidates.add(otc)
+            self.discovered_assets.update(candidates)
+            new=candidates-set(self.assets)
             if not new: return
-            self.assets.extend(sorted(new)); log.info("OLYMP_ASSETS_DISCOVERED count=%s assets=%s",len(self.assets),sorted(new))
+            self.assets.extend(sorted(new)); log.info("OLYMP_ASSETS_DISCOVERED count=%s new=%s",len(self.assets),sorted(new))
             for asset in sorted(new): await self._seed_and_subscribe(asset)
         except Exception: log.exception("Olymp asset metadata parsing failed")
 
@@ -261,4 +294,4 @@ class OlympLiveFeed:
                 cur["high"]=max(cur["high"],price); cur["low"]=min(cur["low"],price); cur["close"]=price
 
     def status(self):
-        return {"configured":self.enabled,"connected":self.connected,"assets":self.assets,"configured_assets":self.configured_assets,"discovered_assets":sorted(self.discovered_assets),"market_state_count":len(self.market_state),"tradeable_assets":sorted(a for a in self.assets if self._market_is_tradeable(a)),"asset_discovery":"session_metadata","mode":"READ_ONLY_MARKET_DATA","timeframe":"1m_from_live_ticks","auto_trade":False,"ticks_received":self.tick_count,"candles_completed":self.candle_count,"reconnect_count":self.reconnect_count,"last_tick_age":(time.time()-self.last_tick_time) if self.last_tick_time else None,"last_candle_age":(time.time()-self.last_candle_time) if self.last_candle_time else None}
+        return {"configured":self.enabled,"connected":self.connected,"assets":self.assets,"configured_assets":self.configured_assets,"discovered_assets":sorted(self.discovered_assets),"market_state_count":len(self.market_state),"tradeable_assets":sorted(a for a in self.assets if self._market_is_tradeable(a)),"asset_discovery":"session_metadata_plus_otc_variants","mode":"READ_ONLY_MARKET_DATA","timeframe":"1m_from_live_ticks","auto_trade":False,"ticks_received":self.tick_count,"candles_completed":self.candle_count,"reconnect_count":self.reconnect_count,"last_tick_age":(time.time()-self.last_tick_time) if self.last_tick_time else None,"last_candle_age":(time.time()-self.last_candle_time) if self.last_candle_time else None}
