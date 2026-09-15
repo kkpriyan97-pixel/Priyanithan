@@ -133,7 +133,7 @@ def _install_runtime():
 
             def capture_send(asset,data,tech,expiry=5):
                 if tech.get('decision')=='SIGNAL':
-                    window=int(time.time()//300); b=tech.get('brain') or {}
+                    window=int(time.time()//300)+1; b=tech.get('brain') or {}
                     key=f'{asset}:{window}'
                     with LOCK:
                         CANDIDATES[key]={'asset':asset,'window':window,'created':time.time(),'quality':int(b.get('score',0)),'expiry':int(b.get('expiry',expiry) or 5),'direction':b.get('direction'),'brain':b}
