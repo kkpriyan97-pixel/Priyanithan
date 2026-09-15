@@ -11,6 +11,44 @@ LIVE_CANDLE_MAX_AGE = float(os.getenv("CANDICE_LIVE_CANDLE_MAX_AGE", "90"))
 # Candice supported binary/FLEX signal expiries. 1m and 4m are deliberately excluded.
 EXPIRIES = (2, 3, 5, 15)
 
+
+def _install_freshness_bridge():
+    """Make runtime freshness checks robust when a candle callback path omits received_at.
+
+    The runtime overlay first uses its real callback receipt timestamp. If that receipt
+    record is unavailable, fall back to the normalized candle timestamp (seconds or ms)
+    instead of treating the candle as infinitely stale. This preserves stale-data
+    rejection while preventing false 1e9s ages for otherwise valid live candles.
+    """
+    try:
+        sc = __import__("sitecustomize")
+        old = getattr(sc, "candle_age", None)
+        if not old or getattr(old, "_candice_timestamp_fallback", False):
+            return
+        def candle_age(c, asset=None):
+            try:
+                age = old(c, asset)
+                if age < 1e8:
+                    return age
+            except Exception:
+                pass
+            try:
+                ts = float((c or {}).get("timestamp", 0) or 0)
+                if ts > 10000000000:
+                    ts /= 1000.0
+                if ts <= 0:
+                    return 1e9
+                return max(0.0, time.time() - ts)
+            except Exception:
+                return 1e9
+        candle_age._candice_timestamp_fallback = True
+        sc.candle_age = candle_age
+    except Exception:
+        pass
+
+_install_freshness_bridge()
+
+
 def _f(x):
     try:
         x=float(x); return x if isfinite(x) else None
