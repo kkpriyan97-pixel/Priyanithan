@@ -18,14 +18,31 @@ class Broker:
                     p=str(x.get('pair') or x.get('symbol') or x.get('name') or '').upper()
                     if p in FLEX_ASSETS or p.endswith('_OTC'): self.catalog.add(p)
 
-    async def _account_probe(self,c):
-        """Read-only account metadata probe; never selects or trades an account.
+    @staticmethod
+    def _account_id(row):
+        if not isinstance(row,dict): return None
+        for k in ('account_id','accountId','id'):
+            if row.get(k) is not None:return row.get(k)
+        return None
 
-        The websocket client exposes account-info request 1068 separately from
-        the balance push (event 55). We retain both responses so telemetry can
-        use an explicit selected/current marker if the broker sends one. We do
-        not guess from balance size or from list ordering.
-        """
+    @staticmethod
+    def _mode(row, fallback=None):
+        if not isinstance(row,dict): return fallback
+        for k in ('group','mode','account_group','accountGroup','type'):
+            v=row.get(k)
+            if isinstance(v,str) and v.lower() in {'demo','real'}: return v.lower()
+        return fallback
+
+    @staticmethod
+    def _explicit_selected(row):
+        if not isinstance(row,dict): return False
+        for k in ('selected','is_selected','active','is_active','current','is_current'):
+            if row.get(k) is True:return True
+        status=str(row.get('status','')).lower()
+        return status in {'selected','active','current'}
+
+    async def _account_probe(self,c):
+        """Read-only account discovery. Never selects, logs in, or trades."""
         try:
             metadata={}
             for group in ('demo','real'):
@@ -35,17 +52,20 @@ class Broker:
                 except Exception as e:
                     metadata[group]={'error':type(e).__name__}
             setattr(c,'candice_account_metadata',metadata)
-            log.info('CANDICE ACCOUNT METADATA PROBE groups=%s',','.join(sorted(metadata.keys())))
+            rows=[]
             for group,resp in metadata.items():
                 d=resp.get('d') if isinstance(resp,dict) else None
                 if isinstance(d,list):
-                    safe=[]
                     for row in d:
                         if isinstance(row,dict):
-                            safe.append({k:row.get(k) for k in row.keys() if str(k).lower() in {
-                                'account_id','accountid','id','group','mode','type','selected','is_selected','active','is_active','current','is_current','status','currency'
-                            }})
-                    log.info('CANDICE ACCOUNT METADATA group=%s rows=%s',group,safe)
+                            x=dict(row); x.setdefault('group',group); rows.append(x)
+            setattr(c,'candice_account_rows',rows)
+            selected=[r for r in rows if self._explicit_selected(r) and self._account_id(r) is not None]
+            if len(selected)==1:
+                r=selected[0]; c.candice_selected_account_id=self._account_id(r); c.candice_selected_account_group=self._mode(r)
+                log.info('CANDICE ACCOUNT SELECTED marker id=%s group=%s source=account_info',c.candice_selected_account_id,c.candice_selected_account_group)
+            else:
+                log.warning('CANDICE ACCOUNT SELECTION UNRESOLVED rows=%d explicit_markers=%d',len(rows),len(selected))
         except Exception:
             log.exception('CANDICE ACCOUNT METADATA PROBE failed')
 
