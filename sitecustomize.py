@@ -156,7 +156,7 @@ def _install_runtime():
             mod.on_olymp_candle=wrapped_candle
 
             def scheduler():
-                LOG.info('BRAIN_SCHEDULER started: FLEX Binary only; continuous 1m scan; 5m windows; hard pre-boundary final')
+                LOG.info('BRAIN_SCHEDULER started: FLEX Binary only; continuous 1m scan; 5m windows; boundary final')
                 last_window=None;last_research_minute=None;last_decision_window=None
                 while True:
                     try:
@@ -186,7 +186,7 @@ def _install_runtime():
                             LOG.info('🧠 Rolling-hour candidate memory=%s | current 5M window=%s | final deadline=%s',len(CANDIDATES),window,time.strftime('%H:%M:%S',time.localtime(next_decision)))
                             LOG.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
                         sec=int(now)%300
-                        if AUTHORIZED and window not in SENT_WINDOWS and 240<=sec<300 and last_decision_window!=window:
+                        if AUTHORIZED and window not in SENT_WINDOWS and 0<=sec<60 and last_decision_window!=window:
                             last_decision_window=window;allowed=flex_assets()
                             with LOCK:pool=[v for v in CANDIDATES.values() if v.get('window')==window and v.get('asset') in allowed]
                             ranked=[]
