@@ -4,12 +4,19 @@ import json, logging, os, sys, threading, time, requests
 LOG=logging.getLogger('candice.runtime')
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); CONFIGURED_CHAT=os.getenv('TELEGRAM_CHAT_ID','').strip(); ACCESS_CODE=os.getenv('CANDICE_ACCESS_CODE','').strip()
 LOCK=threading.RLock(); ACTIVE_CHAT=CONFIGURED_CHAT; AUTHORIZED=bool(CONFIGURED_CHAT); POLL_STARTED=False; INSTALLED=False
-CANDIDATES={}; SENT_WINDOWS=set(); EXPIRIES={1,2,3,4,5,10,15}; LIVE_RECEIPTS={}; SESSION=requests.Session()
+CANDIDATES={}; SENT_WINDOWS=set(); EXPIRIES={2,3,5,15}; LIVE_RECEIPTS={}; SESSION=requests.Session()
 
 def send(chat,text):
-    if not TOKEN or not chat:return
-    try:SESSION.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':chat,'text':text,'disable_web_page_preview':True},timeout=15)
-    except Exception:LOG.exception('Telegram send failed')
+    if not TOKEN or not chat:return False
+    try:
+        r=SESSION.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':chat,'text':text,'disable_web_page_preview':True},timeout=15)
+        if r.ok:return True
+        try: desc=r.json().get('description','unknown')
+        except Exception: desc='unknown'
+        LOG.warning('Telegram control-message failed: HTTP %s | %s',r.status_code,desc)
+        return False
+    except Exception as e:
+        LOG.warning('Telegram control-message failed: %s',type(e).__name__);return False
 
 def handle(u):
     global ACTIVE_CHAT,AUTHORIZED
@@ -85,7 +92,7 @@ def _install_runtime():
         try:
             from strategy_brain import evaluate as brain_evaluate
             from outcome_engine import on_candle as outcome_on_candle, register as outcome_register
-            original_candle=mod.on_olymp_candle; original_send=mod.send_signal
+            original_candle=mod.on_olymp_candle; original_send=mod.send_signal; original_telegram=getattr(mod,'telegram',None)
 
             def brain_analyze(data):
                 asset=getattr(threading.current_thread(),'candice_asset',None) or 'UNKNOWN'
@@ -102,11 +109,30 @@ def _install_runtime():
                     return set(feed.status().get('tradeable_assets') or [])
                 except Exception:return set()
 
+            def runtime_telegram(text):
+                """Route signal delivery to the authorized runtime chat, not a stale fixed chat id."""
+                with LOCK:
+                    target=ACTIVE_CHAT if AUTHORIZED and ACTIVE_CHAT else CONFIGURED_CHAT
+                if not target:
+                    LOG.warning('Telegram signal blocked: no authorized chat configured')
+                    return False
+                try:
+                    r=SESSION.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':target,'text':text,'disable_web_page_preview':True},timeout=15)
+                    if r.ok:
+                        LOG.info('TELEGRAM_SIGNAL_DELIVERED chat=%s',target)
+                        return True
+                    try: desc=r.json().get('description','unknown')
+                    except Exception: desc='unknown'
+                    LOG.error('TELEGRAM_SIGNAL_FAILED chat=%s HTTP=%s | %s',target,r.status_code,desc)
+                    if r.status_code==403:
+                        LOG.error('TELEGRAM_403_ACTION_REQUIRED chat=%s | unblock/start bot or grant send permission in target chat',target)
+                    return False
+                except Exception as e:
+                    LOG.error('TELEGRAM_SIGNAL_FAILED chat=%s | %s',target,type(e).__name__)
+                    return False
+
             def capture_send(asset,data,tech,expiry=5):
                 if tech.get('decision')=='SIGNAL':
-                    # Window ownership is based on NOW, not the timestamp of the last
-                    # completed candle. This prevents a fresh candidate at 09:14 from
-                    # being stranded in the previous 5-minute window.
                     window=int(time.time()//300); b=tech.get('brain') or {}
                     key=f'{asset}:{window}'
                     with LOCK:
@@ -115,6 +141,7 @@ def _install_runtime():
                 return {'ok':True,'status':'DEFERRED'}
 
             mod.analyze=brain_analyze;mod.send_signal=capture_send
+            if original_telegram: mod.telegram=runtime_telegram
 
             def wrapped_candle(asset,candle):
                 c=dict(candle);received=time.time();c.setdefault('received_at',received)
@@ -136,11 +163,8 @@ def _install_runtime():
                         now=time.time();window=int(now//300);minute=int(now//60)
                         if window!=last_window:
                             last_window=window;LOG.info('BRAIN_WINDOW_OPEN window=%s | FLEX_BINARY_ONLY',window)
-                        # Visible research once per minute. Scan the live account-available
-                        # tradeable list, not a hard-coded Forex universe.
                         if minute!=last_research_minute and int(now)%60>=8:
-                            last_research_minute=minute
-                            allowed=flex_assets()
+                            last_research_minute=minute;allowed=flex_assets()
                             with LOCK:snapshot={a:list(v) for a,v in mod.candles.items() if a in allowed}
                             assets_available=len(allowed);scanned=0;fresh=0;qualified=0;rejected=0;top=[]
                             for asset,data in snapshot.items():
@@ -150,8 +174,7 @@ def _install_runtime():
                                     fresh+=1
                                     try:
                                         threading.current_thread().candice_asset=asset;tech=brain_analyze(data)
-                                        if tech.get('decision')=='SIGNAL':
-                                            qualified+=1;top.append((int(tech.get('confidence',0)),asset,tech.get('direction') or '?',age))
+                                        if tech.get('decision')=='SIGNAL':qualified+=1;top.append((int(tech.get('confidence',0)),asset,tech.get('direction') or '?',age))
                                         else:rejected+=1
                                     except Exception:rejected+=1
                             top.sort(reverse=True);ranking=' | '.join(f'#{i+1} {a} {d} {c}% age={age:.1f}s' for i,(c,a,d,age) in enumerate(top[:5])) if top else 'No qualified setup in this minute'
@@ -162,10 +185,6 @@ def _install_runtime():
                             LOG.info('🕯️ REAL 1M CANDLE RESEARCH | completed live data only | freshness cutoff=75s')
                             LOG.info('🧠 Rolling-hour candidate memory=%s | current 5M window=%s | final deadline=%s',len(CANDIDATES),window,time.strftime('%H:%M:%S',time.localtime(next_decision)))
                             LOG.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-                        # Decision phase: 09:14-ish. One signal max per 5m window.
-                        # Candidates can be created at any minute in the current window.
-                        # Final selection happens before the next window and does not
-                        # depend on re-running the strategy into a NO_SIGNAL flip.
                         sec=int(now)%300
                         if AUTHORIZED and window not in SENT_WINDOWS and 240<=sec<300 and last_decision_window!=window:
                             last_decision_window=window;allowed=flex_assets()
@@ -177,13 +196,8 @@ def _install_runtime():
                                 if len(data)<30:continue
                                 age=_age(data[-1],asset)
                                 if age>75:continue
-                                # Re-score, but retain a valid current-window candidate if
-                                # the strategy momentarily flips because of the still-forming
-                                # market. This avoids losing the window after demonstrated
-                                # qualification while still requiring fresh live data.
                                 threading.current_thread().candice_asset=asset;freshtech=brain_analyze(data)
-                                if freshtech.get('decision')=='SIGNAL':
-                                    ranked.append((int(freshtech.get('confidence',0)),asset,data,freshtech,cand,'RESCORED'))
+                                if freshtech.get('decision')=='SIGNAL':ranked.append((int(freshtech.get('confidence',0)),asset,data,freshtech,cand,'RESCORED'))
                                 elif int(cand.get('quality',0))>=58:
                                     fallback={'decision':'SIGNAL','direction':cand.get('direction'),'confidence':cand.get('quality',0),'reasons':['current-window qualified candidate; fresh live candle recheck retained'],'brain':cand.get('brain') or {},'mtf':{},'indicators':{}}
                                     ranked.append((int(cand.get('quality',0)),asset,data,fallback,cand,'RETAINED'))
@@ -210,7 +224,7 @@ def _install_runtime():
                                 if now-rec>180:LIVE_RECEIPTS.pop(a,None)
                         time.sleep(1)
                     except Exception:LOG.exception('BRAIN_SCHEDULER_ERROR');time.sleep(2)
-            threading.Thread(target=scheduler,name='candice-brain-scheduler',daemon=True).start();INSTALLED=True;LOG.info('CANDICE_BRAIN_OVERLAY installed | FLEX_BINARY_ONLY')
+            threading.Thread(target=scheduler,name='candice-brain-scheduler',daemon=True).start();INSTALLED=True;LOG.info('CANDICE_BRAIN_OVERLAY installed | FLEX_BINARY_ONLY | TELEGRAM_RUNTIME_ROUTING=ON')
         except Exception:LOG.exception('Brain overlay install failed');time.sleep(2)
 threading.Thread(target=poller,name='candice-telegram-owner',daemon=True).start()
 threading.Thread(target=_install_runtime,name='candice-runtime-installer',daemon=True).start()
