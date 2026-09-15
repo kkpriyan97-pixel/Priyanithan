@@ -14,10 +14,13 @@ def _db():
 
 def register(signal):
     if not signal or signal.get('status')!='SIGNAL':return
-    row=(str(signal.get('asset','')).upper(),str(signal.get('direction','')),int(signal.get('expiry',5)),float(signal.get('timestamp',time.time())),float(signal.get('entry',0)),int(signal.get('confidence',0)),str(signal.get('strategy','')),str(signal.get('regime','')),str(signal.get('pattern','')),json.dumps(signal.get('features',{}),separators=(',',':')))
+    entry_time=float(signal.get('entry_time', signal.get('timestamp',time.time())))
+    row=(str(signal.get('asset','')).upper(),str(signal.get('direction','')),int(signal.get('expiry',5)),entry_time,float(signal.get('entry',0)),int(signal.get('confidence',0)),str(signal.get('strategy','')),str(signal.get('regime','')),str(signal.get('pattern','')),json.dumps(signal.get('features',{}),separators=(',',':')))
     with LOCK:
         c=_db(); exists=c.execute('SELECT id FROM signals WHERE asset=? AND direction=? AND expiry=? AND entry_time=?',row[:4]).fetchone()
-        if not exists:c.execute('INSERT INTO signals(asset,direction,expiry,entry_time,entry_price,confidence,strategy,regime,pattern,feature_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',row+(time.time(),)); c.commit()
+        if not exists:
+            c.execute('INSERT INTO signals(asset,direction,expiry,entry_time,entry_price,confidence,strategy,regime,pattern,feature_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',row+(time.time(),)); c.commit()
+            log.info('SIGNAL_REGISTERED asset=%s direction=%s expiry=%sm entry_time=%.3f entry=%s confidence=%s',row[0],row[1],row[2],entry_time,row[4],row[5])
         c.close()
 
 def _result(direction,entry,exit_price):
@@ -36,6 +39,21 @@ def _loss_reason(direction,entry,exit_price,features):
         return 'direction_failed_at_expiry'
     return ''
 
+def _update_app_risk(result):
+    """Keep the existing app risk guard synchronized with evaluated DB outcomes."""
+    try:
+        import sys
+        mod=sys.modules.get('__main__')
+        risk=getattr(mod,'risk',None); reset=getattr(mod,'reset_risk',None)
+        if not isinstance(risk,dict): return
+        if callable(reset): reset()
+        if result=='WIN':
+            risk['wins']=int(risk.get('wins',0))+1; risk['streak']=0
+        elif result=='LOSS':
+            risk['losses_total']=int(risk.get('losses_total',0))+1; risk['losses']=int(risk.get('losses',0))+1; risk['streak']=int(risk.get('streak',0))+1
+    except Exception:
+        log.exception('Risk synchronization failed')
+
 def on_candle(asset,candle,telegram=None):
     now=float(candle.get('timestamp',time.time())); close=float(candle.get('close')); completed=[]
     with LOCK:
@@ -43,14 +61,15 @@ def on_candle(asset,candle,telegram=None):
         for sid,direction,expiry,entry_time,entry_price,confidence,strategy,regime,pattern,feature_json in rows:
             if now+0.1<entry_time+expiry*60:continue
             res=_result(direction,entry_price,close); reason=_loss_reason(direction,entry_price,close,feature_json)
-            c.execute('UPDATE signals SET status="EVALUATED",exit_time=?,exit_price=?,result=?,loss_reason=? WHERE id=?',(now,close,res,reason,sid)); completed.append((sid,direction,expiry,entry_price,close,res,confidence,strategy,regime,pattern,reason))
+            c.execute('UPDATE signals SET status="EVALUATED",exit_time=?,exit_price=?,result=?,loss_reason=? WHERE id=?',(now,close,res,reason,sid)); completed.append((sid,direction,expiry,entry_time,entry_price,close,res,confidence,strategy,regime,pattern,reason))
         c.commit();c.close()
     for row in completed:
-        sid,direction,expiry,entry,exit_price,res,confidence,strategy,regime,pattern,reason=row
-        log.info('OUTCOME asset=%s direction=%s expiry=%sm entry=%s exit=%s result=%s strategy=%s regime=%s pattern=%s loss_reason=%s',asset,direction,expiry,entry,exit_price,res,strategy,regime,pattern,reason or '-')
+        sid,direction,expiry,entry_time,entry,exit_price,res,confidence,strategy,regime,pattern,reason=row
+        _update_app_risk(res)
+        log.info('OUTCOME_EVALUATED id=%s asset=%s direction=%s expiry=%sm entry_time=%.3f entry=%s exit=%s result=%s strategy=%s regime=%s pattern=%s loss_reason=%s',sid,asset,direction,expiry,entry_time,entry,exit_price,res,strategy,regime,pattern,reason or '-')
         if telegram:
             icon='🟢🏆' if res=='WIN' else '🔴' if res=='LOSS' else '🟡'
-            telegram(f'━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • TRADE RESULT\n━━━━━━━━━━━━━━━━━━━━\n{icon} {res}\n📈 Asset • {asset}\n➡️ Direction • {direction}\n⏱️ Expiry • {expiry} min\n💰 Entry • {entry:.6f}\n🏁 Exit • {exit_price:.6f}\n🧠 Confidence • {confidence}%\n🧩 Strategy • {strategy or "-"}\n🧬 Pattern • {pattern or "-"}\n🌐 Regime • {regime or "-"}\n🧠 Learning • {reason or "outcome stored"}\n🛡️ READ-ONLY / DEMO / MANUAL ONLY')
+            telegram(f'━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • TRADE RESULT\n━━━━━━━━━━━━━━━━━━━━\n{icon} {res}\n📈 Asset • {asset}\n➡️ Direction • {direction}\n⏱️ Expiry • {expiry} min\n💰 Entry • {entry:.6f}\n🏁 Exit • {exit_price:.6f}\n🧠 Confidence • {confidence}%\n🧩 Strategy • {strategy or "-"}\n🧬 Pattern • {pattern or "-"}\n🌐 Regime • {regime or "-"}\n🧠 Learning • {reason or "outcome stored"}\n📊 Risk • loss streak updated\n🛡️ READ-ONLY / DEMO / MANUAL ONLY')
     return completed
 
 def pattern_stats(asset=None):
