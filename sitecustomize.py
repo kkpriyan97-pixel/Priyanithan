@@ -53,8 +53,17 @@ def poller():
                 except Exception:LOG.exception('Telegram update handling failed')
         except Exception:time.sleep(5)
 def _age(c):
-    try:return max(0,time.time()-float(c.get('received_at',0)))
-    except:return 10**9
+    now=time.time()
+    try:
+        r=float(c.get('received_at',0))
+        if r>0 and r<=now+5:return max(0,now-r)
+    except Exception:pass
+    try:
+        t=float(c.get('timestamp',0))
+        if t>1e10:t/=1000
+        if t>0:return max(0,now-t)
+    except Exception:pass
+    return 10**9
 def _install_runtime():
     global INSTALLED
     while not INSTALLED:
@@ -87,15 +96,12 @@ def _install_runtime():
             mod.on_olymp_candle=wrapped_candle
             def scheduler():
                 LOG.info('BRAIN_SCHEDULER started: continuous 1m scan; 5m decision windows; previous-hour brain memory')
-                last_window=None; last_research_minute=None
+                last_window=None; last_research_minute=None; last_decision_window=None
                 while True:
                     try:
                         now=time.time();window=int(now//300); minute=int(now//60)
                         if window!=last_window:
                             last_window=window;LOG.info('BRAIN_WINDOW_OPEN window=%s',window)
-
-                        # Exactly one visible research report per completed 1-minute interval.
-                        # The report is built from real candle data currently held by the live feed.
                         if minute!=last_research_minute and int(now)%60>=8:
                             last_research_minute=minute
                             with LOCK: snapshot={a:list(v) for a,v in mod.candles.items()}
@@ -103,55 +109,46 @@ def _install_runtime():
                             for asset,data in snapshot.items():
                                 if len(data)<30: continue
                                 scanned+=1; age=_age(data[-1])
-                                if age<=12:
+                                if age<=75:
                                     fresh+=1
                                     try:
                                         threading.current_thread().candice_asset=asset
                                         tech=brain_analyze(data)
                                         if tech.get('decision')=='SIGNAL':
-                                            qualified+=1
-                                            top.append((int(tech.get('confidence',0)),asset,tech.get('direction') or '?',age))
+                                            qualified+=1;top.append((int(tech.get('confidence',0)),asset,tech.get('direction') or '?',age))
                                         else: rejected+=1
-                                    except Exception:
-                                        rejected+=1
-                            top.sort(reverse=True)
-                            top3=top[:3]
-                            if top3:
-                                ranking=' | '.join(f'#{i+1} {a} {d} {c}% age={age:.1f}s' for i,(c,a,d,age) in enumerate(top3))
-                            else:
-                                ranking='No qualified setup in this minute'
+                                    except Exception: rejected+=1
+                            top.sort(reverse=True);top3=top[:3]
+                            ranking=' | '.join(f'#{i+1} {a} {d} {c}% age={age:.1f}s' for i,(c,a,d,age) in enumerate(top3)) if top3 else 'No qualified setup in this minute'
                             next_decision=(window+1)*300
                             LOG.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
                             LOG.info('🧠 CANDICE BRAIN • 1-MIN RESEARCH | minute=%s',minute)
                             LOG.info('📊 Assets available=%s | scanned=%s | fresh verified=%s | rejected/weak=%s | qualified=%s',assets_available,scanned,fresh,rejected,qualified)
                             LOG.info('🏆 TOP RANKING | %s',ranking)
-                            LOG.info('🕯️ REAL 1M CANDLE RESEARCH | live data only | stale cutoff=12s')
+                            LOG.info('🕯️ REAL 1M CANDLE RESEARCH | completed live data only | freshness cutoff=75s')
                             LOG.info('🧠 Previous-hour candidate memory=%s | current 5M window=%s | next 5M decision=%s',len(CANDIDATES),window,time.strftime('%H:%M:%S',time.localtime(next_decision)))
                             LOG.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-
-                        if AUTHORIZED and window not in SENT_WINDOWS and int(now)%300>=285:
+                        if AUTHORIZED and window not in SENT_WINDOWS and int(now)%300>=285 and last_decision_window!=window:
+                            last_decision_window=window
                             with LOCK:pool=list(CANDIDATES.values())
                             ranked=[]
                             for cand in pool:
                                 asset=cand['asset']
                                 with LOCK:data=list(mod.candles.get(asset,[]))
-                                if len(data)<30 or _age(data[-1])>12:continue
-                                threading.current_thread().candice_asset=asset
-                                tech=brain_analyze(data)
+                                if len(data)<30 or _age(data[-1])>75:continue
+                                threading.current_thread().candice_asset=asset;tech=brain_analyze(data)
                                 if tech.get('decision')=='SIGNAL':ranked.append((int(tech.get('confidence',0)),asset,data,tech,cand))
                             if ranked:
                                 ranked.sort(key=lambda x:(x[0],x[4].get('created',0)),reverse=True);_,asset,data,tech,cand=ranked[0]
                                 expiry=int((tech.get('brain') or {}).get('expiry',cand.get('expiry',5)) or 5);expiry=expiry if expiry in EXPIRIES else 5
-                                with LOCK:
-                                    if window in SENT_WINDOWS:continue
-                                    SENT_WINDOWS.add(window)
+                                with LOCK:SENT_WINDOWS.add(window)
                                 result=original_send(asset,data,tech,expiry)
                                 if result.get('status')=='SIGNAL':
                                     b=tech.get('brain') or {}
                                     try: outcome_register({'status':'SIGNAL','asset':asset,'direction':tech.get('direction'),'expiry':expiry,'confidence':tech.get('confidence',0),'timestamp':float(data[-1].get('timestamp',time.time())),'entry':float(data[-1].get('close',0)),'strategy':b.get('strategy','market_brain'),'regime':b.get('regime',''),'pattern':b.get('pattern',''),'features':b})
-                                    except Exception: LOG.exception('Outcome registration failed asset=%s',asset)
+                                    except Exception:LOG.exception('Outcome registration failed asset=%s',asset)
                                 if result.get('status') not in ('SIGNAL','WINDOW_ALREADY_SENT'):
-                                    with LOCK:SENT_WINDOWS.discard(window)
+                                    with LOCK:SENT_WINDOWS.discard(window);last_decision_window=None
                                 else:LOG.info('WINDOW_SIGNAL window=%s asset=%s direction=%s expiry=%s confidence=%s fresh_age=%.1fs',window,asset,tech.get('direction'),expiry,tech.get('confidence'),_age(data[-1]))
                             else:LOG.info('WINDOW_WAIT window=%s no fresh qualified candidate',window)
                         with LOCK:
