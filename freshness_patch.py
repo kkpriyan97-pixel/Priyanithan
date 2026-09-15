@@ -45,20 +45,34 @@ def install():
     sc = sys.modules.get("sitecustomize")
     if sc is None:
         return False
+    # sitecustomize defines its original candle_age late during module import.
+    # Do not assume the first assignment wins: keep the bridge authoritative
+    # through the end of Python startup so the original definition cannot race
+    # and overwrite it.
     sc.candle_age = _age
-    LOG.info("CANDICE_FRESHNESS_BRIDGE installed | receipt -> received_at -> candle_timestamp fallback")
     return True
 
 
 def _late_install():
-    for _ in range(300):
+    found = False
+    # sitecustomize can still be executing when this .pth import starts.
+    # Keep enforcing the replacement for a short startup window.
+    for _ in range(80):
         try:
-            if install():
-                return
+            sc = sys.modules.get("sitecustomize")
+            if sc is not None and getattr(sc, "candle_age", None) is not _age:
+                sc.candle_age = _age
+                found = True
+                LOG.info("CANDICE_FRESHNESS_BRIDGE installed | receipt -> received_at -> candle_timestamp fallback")
+            elif sc is not None:
+                found = True
         except Exception:
             LOG.exception("Freshness bridge install failed")
         time.sleep(0.1)
-    LOG.error("CANDICE_FRESHNESS_BRIDGE failed to find sitecustomize")
+    if not found:
+        LOG.error("CANDICE_FRESHNESS_BRIDGE failed to find sitecustomize")
+    else:
+        LOG.info("CANDICE_FRESHNESS_BRIDGE startup enforcement complete")
 
 
 threading.Thread(target=_late_install, name="candice-freshness-bridge", daemon=True).start()
