@@ -4,7 +4,7 @@ import json, logging, os, sys, threading, time, requests
 LOG=logging.getLogger('candice.runtime')
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); CONFIGURED_CHAT=os.getenv('TELEGRAM_CHAT_ID','').strip(); ACCESS_CODE=os.getenv('CANDICE_ACCESS_CODE','').strip()
 LOCK=threading.RLock(); ACTIVE_CHAT=CONFIGURED_CHAT; AUTHORIZED=bool(CONFIGURED_CHAT); POLL_STARTED=False; INSTALLED=False
-CANDIDATES={}; SENT_WINDOWS=set(); EXPIRIES={1,2,3,4,5,10,15}; SESSION=requests.Session()
+CANDIDATES={}; SENT_WINDOWS=set(); EXPIRIES={1,2,3,4,5,10,15}; LIVE_RECEIPTS={}; SESSION=requests.Session()
 def send(chat,text):
     if not TOKEN or not chat:return
     try:SESSION.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':chat,'text':text,'disable_web_page_preview':True},timeout=15)
@@ -52,8 +52,17 @@ def poller():
                 try:handle(u)
                 except Exception:LOG.exception('Telegram update handling failed')
         except Exception:time.sleep(5)
-def _age(c):
+def _age(c,asset=None):
     now=time.time()
+    # Primary source: receipt time captured directly at the live-candle callback.
+    if asset:
+        try:
+            with LOCK: rec=LIVE_RECEIPTS.get(asset)
+            if rec:
+                candle_ts,received_at=rec
+                if received_at<=now+5 and (not candle_ts or candle_ts<=now+75):
+                    return max(0,now-received_at)
+        except Exception:pass
     try:
         r=float(c.get('received_at',0))
         if r>0 and r<=now+5:return max(0,now-r)
@@ -88,7 +97,16 @@ def _install_runtime():
                 return {'ok':True,'status':'DEFERRED'}
             mod.analyze=brain_analyze;mod.send_signal=capture_send
             def wrapped_candle(asset,candle):
-                c=dict(candle);c.setdefault('received_at',time.time())
+                c=dict(candle); received=time.time(); c.setdefault('received_at',received)
+                # Record only a completed candle that is plausibly current. This survives
+                # any normalization/deque rewrite performed by the original app handler.
+                try:
+                    ts=float(c.get('timestamp',0));
+                    if ts>1e10:ts/=1000
+                    now=received
+                    if ts>0 and ts<=now+2 and now-ts<=75:
+                        with LOCK:LIVE_RECEIPTS[asset]=(ts,received)
+                except Exception:pass
                 try:outcome_on_candle(asset,c,getattr(mod,'telegram',None))
                 except Exception:LOG.exception('Outcome processing failed asset=%s',asset)
                 threading.current_thread().candice_asset=asset
@@ -108,7 +126,7 @@ def _install_runtime():
                             assets_available=len(snapshot); scanned=0; fresh=0; qualified=0; rejected=0; top=[]
                             for asset,data in snapshot.items():
                                 if len(data)<30: continue
-                                scanned+=1; age=_age(data[-1])
+                                scanned+=1; age=_age(data[-1],asset)
                                 if age<=75:
                                     fresh+=1
                                     try:
@@ -135,7 +153,7 @@ def _install_runtime():
                             for cand in pool:
                                 asset=cand['asset']
                                 with LOCK:data=list(mod.candles.get(asset,[]))
-                                if len(data)<30 or _age(data[-1])>75:continue
+                                if len(data)<30 or _age(data[-1],asset)>75:continue
                                 threading.current_thread().candice_asset=asset;tech=brain_analyze(data)
                                 if tech.get('decision')=='SIGNAL':ranked.append((int(tech.get('confidence',0)),asset,data,tech,cand))
                             if ranked:
@@ -149,12 +167,14 @@ def _install_runtime():
                                     except Exception:LOG.exception('Outcome registration failed asset=%s',asset)
                                 if result.get('status') not in ('SIGNAL','WINDOW_ALREADY_SENT'):
                                     with LOCK:SENT_WINDOWS.discard(window);last_decision_window=None
-                                else:LOG.info('WINDOW_SIGNAL window=%s asset=%s direction=%s expiry=%s confidence=%s fresh_age=%.1fs',window,asset,tech.get('direction'),expiry,tech.get('confidence'),_age(data[-1]))
+                                else:LOG.info('WINDOW_SIGNAL window=%s asset=%s direction=%s expiry=%s confidence=%s fresh_age=%.1fs',window,asset,tech.get('direction'),expiry,tech.get('confidence'),_age(data[-1],asset))
                             else:LOG.info('WINDOW_WAIT window=%s no fresh qualified candidate',window)
                         with LOCK:
                             cutoff=window-13
                             for k,v in list(CANDIDATES.items()):
                                 if v.get('window',-999)<cutoff:CANDIDATES.pop(k,None)
+                            for a,(ts,rec) in list(LIVE_RECEIPTS.items()):
+                                if now-rec>180:LIVE_RECEIPTS.pop(a,None)
                         time.sleep(1)
                     except Exception:LOG.exception('BRAIN_SCHEDULER_ERROR');time.sleep(2)
             threading.Thread(target=scheduler,name='candice-brain-scheduler',daemon=True).start();INSTALLED=True;LOG.info('CANDICE_BRAIN_OVERLAY installed')
