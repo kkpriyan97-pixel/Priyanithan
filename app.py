@@ -7,10 +7,10 @@ import requests
 from flask import Flask, jsonify, request
 from olymp_live import OlympLiveFeed
 
-VERSION = "12.1-CANDICE-READONLY-STABLE"
+VERSION = "12.2-CANDICE-READONLY-BUGFIX"
 AUTO_TRADE = False
 MARTINGALE = False
-EXPIRIES = (2, 3, 5, 10, 15)
+EXPIRIES = (2, 3, 5, 15)
 MIN_CONFIDENCE = max(55, min(85, int(os.getenv("MIN_CONFIDENCE", "58"))))
 MAX_DAILY_LOSSES = max(1, int(os.getenv("DAILY_MAX_LOSSES", "5")))
 MAX_CONSECUTIVE_LOSSES = max(1, int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3")))
@@ -52,7 +52,7 @@ def normalize(raw):
 
 def ema(v,p):
     if len(v)<p:return None
-    k,z=2.0/(p+1),sum(v[:p])/p
+    k=2.0/(p+1);z=sum(v[:p])/p
     for x in v[p:]: z=x*k+z*(1-k)
     return z
 
@@ -178,7 +178,7 @@ def send_signal(asset,data,tech,expiry=5):
     expiry=min(EXPIRIES,key=lambda x:abs(x-int(expiry or 5)));ts,entry=data[-1]["timestamp"],data[-1]["close"];key=f"{asset}:{tech['direction']}:{expiry}:{int(ts//60)}"
     if key in sent:return {"ok":True,"status":"DUPLICATE_BLOCKED"}
     sent.add(key);risk["signals"]+=1;mtf,ind=tech.get("mtf",{}),tech.get("indicators",{})
-    text=("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n"f"🟢 SIGNAL • {tech['direction']}\n📈 Asset • {asset}\n💰 Entry • {entry:.6f}\n⏱️ Expiry • {expiry} min\n"f"🧠 Confidence • {tech['confidence']}%\n📊 MTF • 1m {mtf.get('1m','-')} | 3m {mtf.get('3m','-')} | 5m {mtf.get('5m','-')}\n"f"📌 RSI • {ind.get('RSI',0):.1f} | ADX • {ind.get('ADX',0):.1f}\n🧩 {', '.join(tech['reasons'][-5:])}\n""📡 Source • Olymp Trade live market data\n🛡️ READ-ONLY / DEMO / MANUAL ONLY\n🚫 Auto-trade OFF • Martingale OFF")
+    text=("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n"f"🟢 SIGNAL • {tech['direction']}\n📈 Asset • {asset}\n💰 Entry • {entry:.6f}\n⏱️ Expiry • {expiry} min\n"f"🧠 Confidence • {tech['confidence']}%\n📊 MTF • 1m {mtf.get('1m','-')} | 3m {mtf.get('3m','-')} | 5m {mtf.get('5m','-')}\n"f"📌 RSI • {ind.get('RSI',0):.1f} | ADX • {ind.get('ADX',0):.1f}\n🧩 {', '.join(tech['reasons'][-5:])}\n"f"📡 Source • Olymp Trade live market data\n🛡️ READ-ONLY / DEMO / MANUAL ONLY\n🚫 Auto-trade OFF • Martingale OFF")
     telegram(text);return {"ok":True,"status":"SIGNAL","asset":asset,"direction":tech["direction"],"expiry":expiry,"confidence":tech["confidence"]}
 
 
@@ -214,7 +214,6 @@ def main():
     try:
         live_feed=OlympLiveFeed(on_olymp_candle,seed_olymp_history);live_feed.start();log.info("Olymp live feed started")
     except Exception as e:log.exception("Olymp live feed startup failed: %s",type(e).__name__)
-    # Telegram commands are owned by sitecustomize's single poller. Do not start a second getUpdates loop.
     log.info("Telegram command listener delegated to single-owner runtime poller")
     app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")),threaded=True)
 
