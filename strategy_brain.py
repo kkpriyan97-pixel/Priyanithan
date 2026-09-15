@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections import defaultdict
 from math import isfinite
 import os, sqlite3, time
+from brain_training import method_votes, score_setup
 
 STATE = defaultdict(lambda: {"last_setup_key": None, "last_signal_window": None, "last_direction": None, "last_candle_ts": None})
 MIN_REAL_CANDLES = int(os.getenv("CANDICE_MIN_REAL_CANDLES", "30"))
@@ -158,6 +159,7 @@ def evaluate(asset, data, base):
     latest_age = _live_age(data[-1], asset)
     if latest_age > LIVE_CANDLE_MAX_AGE:
         return {'allow': False, 'regime': 'MARKET_CLOSED', 'strategy': 'market_brain', 'score': 0, 'reasons': [f'no fresh live candle ({int(latest_age)}s old)', 'market session not currently active']}
+
     c = [x['close'] for x in data]
     last = c[-1]
     ms, trend, atr, e9, e21, e50, reasons = _structure(data)
@@ -169,6 +171,7 @@ def evaluate(asset, data, base):
         direction = -1
     if direction == 0:
         return {'allow': False, 'regime': 'TRANSITION', 'strategy': 'market_brain', 'score': 0, 'reasons': reasons + ['market/candle structure is not decisive']}
+
     regime = 'TREND_UP' if ms >= 5 else 'TREND_DOWN' if ms <= -5 else 'REVERSAL' if pattern.endswith('rejection') or 'engulfing' in pattern else 'TRANSITION'
     confirmations = 0
     if e9 and e21 and ((e9 > e21) == (direction > 0)):
@@ -179,21 +182,75 @@ def evaluate(asset, data, base):
     mtf = base.get('mtf') or {}
     if float(mtf.get('1m', 0) or 0) * direction > 0:
         confirmations += 1
+
+    # The supplied VIP strategy is now a real consensus layer inside the Brain.
+    vip = method_votes(data, 'UP' if direction > 0 else 'DOWN', mtf)
+    vip_methods = vip.get('methods') or {}
+    vip_consensus = float(vip.get('consensus', 0.0) or 0.0)
+    vip_support = sum(1 for v in vip_methods.values() if v > 0)
+    vip_conflicts = sum(1 for v in vip_methods.values() if v < 0)
+    if vip_consensus > 0.20:
+        confirmations += 2
+        reasons.append(f'VIP indicator consensus supports direction ({vip_support} methods agree)')
+    elif vip_consensus < -0.20:
+        confirmations = max(0, confirmations - 2)
+        reasons.append(f'VIP indicator consensus conflicts ({vip_conflicts} methods oppose)')
+    else:
+        reasons.append(f'VIP indicator consensus mixed/neutral ({vip_support} agree/{vip_conflicts} oppose)')
+
     learn_adj, n, learn_notes = _learn(asset, pattern, regime, 'UP' if direction > 0 else 'DOWN')
+    # Historical strategy ranking is applied only as a small bounded adjustment,
+    # so a sparse database cannot overpower fresh market structure.
     quality = 58 + min(24, abs(ms) * 4) + min(8, confirmations * 3) + learn_adj
+    quality += max(-6.0, min(8.0, vip_consensus * 8.0))
     if pattern != 'momentum_candle':
         quality += 5
     quality = int(max(0, min(95, quality)))
+
+    # Train the current setup against the outcome history once an expiry candidate
+    # is known.  The result is again only a bounded confidence adjustment.
+    preliminary_expiry = _expiry(quality, regime, atr, last)
+    hist_wr, hist_samples = score_setup(asset, 'UP' if direction > 0 else 'DOWN', preliminary_expiry, regime, pattern)
+    if hist_samples >= 4:
+        historical_adj = max(-4.0, min(4.0, (hist_wr - 50.0) * 0.08))
+        quality = int(max(0, min(95, quality + historical_adj)))
+        reasons.append(f'outcome-trained setup={hist_wr:.1f}%/{hist_samples} samples')
+    else:
+        reasons.append(f'outcome-trained setup sparse ({hist_samples} samples)')
+
+    expiry = _expiry(quality, regime, atr, last)
     setup_key = f'{_candle_timestamp(data[-1]):.0f}:{regime}:{pattern}:{direction}'
     window = int(time.time() // 300)
     st = STATE[asset]
     # Re-evaluate every new completed candle. Do not let a prior rejection/signal suppress the next candle.
     if st['last_setup_key'] == setup_key and st['last_signal_window'] == window:
-        return {'allow': False, 'regime': regime, 'strategy': 'market_brain', 'score': quality, 'reasons': ['same setup already considered on this candle/window']}
+        return {'allow': False, 'regime': regime, 'strategy': 'market_brain', 'score': quality, 'pattern': pattern, 'methods': vip_methods, 'method_consensus': vip_consensus, 'reasons': ['same setup already considered on this candle/window']}
     if abs(ms) < 3:
-        return {'allow': False, 'regime': regime, 'strategy': 'market_brain', 'score': quality, 'reasons': reasons + ['waiting: market structure not strong enough']}
+        return {'allow': False, 'regime': regime, 'strategy': 'market_brain', 'score': quality, 'pattern': pattern, 'methods': vip_methods, 'method_consensus': vip_consensus, 'reasons': reasons + ['waiting: market structure not strong enough']}
     if quality < 68:
-        return {'allow': False, 'regime': regime, 'strategy': 'market_brain', 'score': quality, 'reasons': reasons + learn_notes + ['waiting: setup quality below threshold']}
+        return {'allow': False, 'regime': regime, 'strategy': 'market_brain', 'score': quality, 'pattern': pattern, 'methods': vip_methods, 'method_consensus': vip_consensus, 'reasons': reasons + ['waiting: setup quality below threshold']}
+
     st.update(last_setup_key=setup_key, last_signal_window=window, last_direction=direction, last_candle_ts=_candle_timestamp(data[-1]))
-    expiry = _expiry(quality, regime, atr, last)
-    return {'allow': True, 'regime': regime, 'strategy': 'market_brain', 'score': quality, 'direction': 'UP' if direction > 0 else 'DOWN', 'pattern': pattern, 'expiry': expiry, 'reasons': reasons + learn_notes + [f'candle/market brain score={ms}', f'indicator confirmations={confirmations} (confirmation only)', f'brain quality={quality}%', f'live receipt age={latest_age:.1f}s', f'adaptive expiry={expiry}m']}
+    return {
+        'allow': True,
+        'regime': regime,
+        'strategy': 'market_brain',
+        'score': quality,
+        'direction': 'UP' if direction > 0 else 'DOWN',
+        'pattern': pattern,
+        'expiry': expiry,
+        'methods': vip_methods,
+        'method_consensus': vip_consensus,
+        'method_support': vip_support,
+        'method_conflicts': vip_conflicts,
+        'historical_win_rate': hist_wr,
+        'historical_samples': hist_samples,
+        'reasons': reasons + learn_notes + [
+            f'candle/market brain score={ms}',
+            f'indicator confirmations={confirmations} (confirmation only)',
+            f'VIP methods active={vip.get("active", 0)} consensus={vip_consensus:+.2f}',
+            f'brain quality={quality}%',
+            f'live receipt age={latest_age:.1f}s',
+            f'adaptive expiry={expiry}m',
+        ],
+    }
