@@ -7,7 +7,7 @@ def _clear_telegram_webhook():
     token=os.getenv("TELEGRAM_BOT_TOKEN","").strip()
     if not token:return
     try:
-        u=f"https://api.telegram.org/bot{token}/deleteWebhook";d=urllib.parse.urlencode({"drop_pending_updates":"false"}).encode();urllib.request.urlopen(urllib.request.Request(u,data=d,method="POST"),timeout=8).close();log.info("Telegram polling startup: stale webhook cleared")
+        u=f"https://api.telegram.org/bot{token}/deleteWebhook";d=urllib.parse.urlencode({"drop_pending_updates":"false"}).encode();urllib.request.urlopen(urllib.request.Request(u,data=d,method="POST"),timeout=8).close()
     except Exception as e:log.warning("Telegram webhook cleanup failed: %s",type(e).__name__)
 _clear_telegram_webhook()
 def _load():
@@ -98,10 +98,33 @@ class OlympLiveFeed:
         return not(op is not None and cl is not None and cl>op and not(op<=now<=cl))
     async def _subscribe(self,a):
         try:await self.client.market.subscribe_ticks(a);return True
-        except Exception as e:log.debug("subscription rejected asset=%s error=%s",a,type(e).__name__);return False
+        except Exception:return False
     async def _subscribe_batches(self,assets):
-        for i in range(0,len(assets),10):
-            batch=assets[i:i+10];await asyncio.gather(*[self._subscribe(a) for a in batch],return_exceptions=True);await asyncio.sleep(.2)
+        for i in range(0,len(assets),10):await asyncio.gather(*[self._subscribe(a) for a in assets[i:i+10]],return_exceptions=True);await asyncio.sleep(.2)
+    def _normalize_candle(self,x,asset=""):
+        a=str(x.get("p",x.get("pair",x.get("symbol",asset)))).upper();o,h,l,c=_num(x.get("open",x.get("o"))),_num(x.get("high",x.get("h"))),_num(x.get("low",x.get("l"))),_num(x.get("close",x.get("c")));t=_num(x.get("t",x.get("timestamp",x.get("time"))))
+        if None in(o,h,l,c,t) or not a:return None
+        if t>1e10:t/=1000
+        if h<max(o,c) or l>min(o,c) or h<l:return None
+        return a,{"open":o,"high":h,"low":l,"close":c,"timestamp":t}
+    async def _seed_one(self,a):
+        try:
+            result=await self.client.market.get_candles(pair=a,size=60,count=80,end_time=int(time.time()))
+            rows=_rows(result);count=0
+            for x in rows:
+                p=self._normalize_candle(x,a)
+                if not p:continue
+                asset,c=p
+                if asset!=a or not self._tradeable(asset):continue
+                if self.on_history:self.on_history(asset,c)
+                count+=1
+            if count:log.info("HISTORY_SEEDED asset=%s count=%s",a,count)
+            return count
+        except Exception as e:
+            log.debug("history seed unavailable asset=%s error=%s",a,type(e).__name__);return 0
+    async def _seed_batches(self,assets):
+        for i in range(0,len(assets),8):
+            await asyncio.gather(*[self._seed_one(a) for a in assets[i:i+8]],return_exceptions=True);await asyncio.sleep(.2)
     async def _poll_candles(self,assets):
         for i in range(0,len(assets),12):
             b=assets[i:i+12]
@@ -112,14 +135,14 @@ class OlympLiveFeed:
         try:
             now=time.time();completed=(int(now)//60)*60-60
             for x in _rows(msg):
-                a=str(x.get("p",x.get("pair",x.get("symbol","")))).upper();o,h,l,c=_num(x.get("open",x.get("o"))),_num(x.get("high",x.get("h"))),_num(x.get("low",x.get("l"))),_num(x.get("close",x.get("c")));t=_num(x.get("t",x.get("timestamp",x.get("time"))))
-                if not a or None in(o,h,l,c,t) or not self._tradeable(a):continue
-                if t>1e10:t/=1000
-                if h<max(o,c) or l>min(o,c) or h<l:continue
-                candle={"open":o,"high":h,"low":l,"close":c,"timestamp":t}
-                if self.on_history:self.on_history(a,candle)
+                p=self._normalize_candle(x)
+                if not p:continue
+                a,c=p
+                if not self._tradeable(a):continue
+                if self.on_history:self.on_history(a,c)
+                t=c["timestamp"]
                 if t>completed or t<=self.last_emitted.get(a,0):continue
-                self.last_emitted[a]=t;self.candle_count+=1;self.last_candle_time=time.time();self.on_candle(a,candle);log.info("REAL_1M_CANDLE asset=%s ts=%s close=%s",a,int(t),c)
+                self.last_emitted[a]=t;self.candle_count+=1;self.last_candle_time=time.time();self.on_candle(a,c);log.info("REAL_1M_CANDLE asset=%s ts=%s close=%s",a,int(t),c["close"])
         except Exception:log.exception("Olymp candle response parsing failed")
     async def _tick(self,msg):
         rows=msg.get("d",[]) if isinstance(msg,dict) else []
@@ -153,7 +176,8 @@ class OlympLiveFeed:
         try:await self.client.initialize_session();log.info("Olymp session initialization completed; market metadata requested")
         except Exception:log.exception("Olymp session initialization failed; continuing")
         await asyncio.sleep(5)
-        tradeable=[a for a in self.assets if self._tradeable(a)];await self._subscribe_batches(tradeable);await self._poll_candles(tradeable);log.info("CANDLE_POLL assets=%s tradeable=%s",len(self.assets),len(tradeable))
+        tradeable=[a for a in self.assets if self._tradeable(a)]
+        await self._subscribe_batches(tradeable);await self._seed_batches(tradeable);await self._poll_candles(tradeable);log.info("CANDLE_POLL assets=%s tradeable=%s",len(self.assets),len(tradeable))
         last_poll=time.time()
         while not self._stop.is_set():
             if time.time()-last_poll>=60:
