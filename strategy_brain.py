@@ -8,7 +8,8 @@ STATE = defaultdict(lambda: {"last_setup_key": None, "last_signal_window": None,
 MIN_REAL_CANDLES = int(os.getenv("CANDICE_MIN_REAL_CANDLES", "30"))
 DB_PATH = os.getenv("CANDICE_OUTCOME_DB", "/tmp/candice_outcomes.sqlite3")
 LIVE_CANDLE_MAX_AGE = float(os.getenv("CANDICE_LIVE_CANDLE_MAX_AGE", "90"))
-EXPIRIES = (1, 2, 3, 4, 5, 10, 15)
+# Candice supported binary/FLEX signal expiries. 1m and 4m are deliberately excluded.
+EXPIRIES = (2, 3, 5, 15)
 
 def _f(x):
     try:
@@ -75,14 +76,14 @@ def _learn(asset, pattern, regime, direction):
     except Exception:return 0.0,0,[]
 
 def _expiry(quality, regime, atr, price):
-    """Select an independent expiry from the supported set; never increases stake after a loss."""
+    """Choose only a supported expiry; never return 1m/4m."""
     rel=(atr/max(abs(price),1e-12))*100000.0
     if quality>=88 and regime in ('TREND_UP','TREND_DOWN'):
         return 3 if rel>4 else 5
     if quality>=80:
-        return 2 if rel>7 else 4
+        return 2 if rel>7 else 5
     if quality>=72:
-        return 1 if rel>10 else 3
+        return 2 if rel>10 else 3
     return 2
 
 def evaluate(asset,data,base):
