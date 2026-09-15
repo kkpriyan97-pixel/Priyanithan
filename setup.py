@@ -10,7 +10,7 @@ site_packages = os.path.relpath(sysconfig.get_path("purelib"), sys.prefix)
 
 setup(
     name="candice-runtime-hooks",
-    version="1.0.5",
+    version="1.0.6",
     py_modules=["usercustomize", "freshness_patch", "telegram_token_only", "outcome_recovery_guard", "account_telemetry"],
     data_files=[(site_packages, ["candice_boot.pth"])],
 )
