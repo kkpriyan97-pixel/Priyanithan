@@ -13,13 +13,17 @@ def _db():
         if name not in cols:c.execute(f'ALTER TABLE signals ADD COLUMN {name} {typ}')
     c.commit(); return c
 
+def _existing_signal(c,asset,direction,entry_time):
+    return c.execute('SELECT id,expiry,status FROM signals WHERE asset=? AND direction=? AND entry_time=? ORDER BY id LIMIT 1',(str(asset).upper(),str(direction),float(entry_time))).fetchone()
+
 def register(signal):
     if not signal or signal.get('status')!='SIGNAL':return False
     entry_time=float(signal.get('entry_time', signal.get('timestamp',time.time())))
     row=(str(signal.get('asset','')).upper(),str(signal.get('direction','')),int(signal.get('expiry',5)),entry_time,float(signal.get('entry',0)),int(signal.get('confidence',0)),str(signal.get('strategy','')),str(signal.get('regime','')),str(signal.get('pattern','')),json.dumps(signal.get('features',{}),separators=(',',':')))
     with LOCK:
-        c=_db(); exists=c.execute('SELECT id FROM signals WHERE asset=? AND direction=? AND expiry=? AND entry_time=?',row[:4]).fetchone()
+        c=_db(); exists=_existing_signal(c,row[0],row[1],entry_time)
         if exists:
+            log.info('SIGNAL_DEDUP_BLOCKED asset=%s direction=%s entry_time=%.3f requested_expiry=%sm existing_id=%s existing_expiry=%sm existing_status=%s',row[0],row[1],entry_time,row[0] if False else exists[0],exists[1],exists[2])
             c.close(); return True
         c.execute('INSERT INTO signals(asset,direction,expiry,entry_time,entry_price,confidence,strategy,regime,pattern,feature_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',row+(time.time(),)); c.commit(); c.close()
         log.info('SIGNAL_REGISTERED asset=%s direction=%s expiry=%sm entry_time=%.3f entry=%s confidence=%s',row[0],row[1],row[2],entry_time,row[4],row[5])
@@ -55,21 +59,22 @@ def on_candle(asset,candle,telegram=None):
     with LOCK:
         c=_db(); rows=c.execute('SELECT id,direction,expiry,entry_time,entry_price,confidence,strategy,regime,pattern,feature_json FROM signals WHERE asset=? AND status="PENDING" ORDER BY entry_time',(str(asset).upper(),)).fetchall()
         for sid,direction,expiry,entry_time,entry_price,confidence,strategy,regime,pattern,feature_json in rows:
-            if now+0.1<entry_time+expiry*60:continue
+            target=entry_time+expiry*60
+            if now+0.1<target:continue
             res=_result(direction,entry_price,close); reason=_loss_reason(direction,entry_price,close,feature_json)
-            c.execute('UPDATE signals SET status="EVALUATED",exit_time=?,exit_price=?,result=?,loss_reason=? WHERE id=?',(now,close,res,reason,sid)); completed.append((sid,direction,expiry,entry_time,entry_price,close,res,confidence,strategy,regime,pattern,reason))
+            c.execute('UPDATE signals SET status="EVALUATED",exit_time=?,exit_price=?,result=?,loss_reason=? WHERE id=?',(now,close,res,reason,sid)); completed.append((sid,direction,expiry,entry_time,entry_price,close,res,confidence,strategy,regime,pattern,reason,target,now-target))
         c.commit();c.close()
     for row in completed:
-        sid,direction,expiry,entry_time,entry,exit_price,res,confidence,strategy,regime,pattern,reason=row
+        sid,direction,expiry,entry_time,entry,exit_price,res,confidence,strategy,regime,pattern,reason,target,evaluation_lag=row
         _update_app_risk(res)
-        log.info('OUTCOME_EVALUATED id=%s asset=%s direction=%s expiry=%sm entry_time=%.3f entry=%s exit=%s result=%s strategy=%s regime=%s pattern=%s loss_reason=%s',sid,asset,direction,expiry,entry_time,entry,exit_price,res,strategy,regime,pattern,reason or '-')
+        log.info('OUTCOME_EVALUATED id=%s asset=%s direction=%s expiry=%sm entry_time=%.3f target=%.3f evaluated_at=%.3f eval_lag=%.1fs entry=%s exit=%s result=%s strategy=%s regime=%s pattern=%s loss_reason=%s',sid,asset,direction,expiry,entry_time,target,now,evaluation_lag,entry,exit_price,res,strategy,regime,pattern,reason or '-')
         if telegram:
             icon='🟢🏆' if res=='WIN' else '🔴' if res=='LOSS' else '🟡'
             telegram(f'━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • TRADE RESULT\n━━━━━━━━━━━━━━━━━━━━\n{icon} {res}\n📈 Asset • {asset}\n➡️ Direction • {direction}\n⏱️ Expiry • {expiry} min\n💰 Entry • {entry:.6f}\n🏁 Exit • {exit_price:.6f}\n🧠 Confidence • {confidence}%\n🧩 Strategy • {strategy or "-"}\n🧬 Pattern • {pattern or "-"}\n🌐 Regime • {regime or "-"}\n🧠 Learning • {reason or "outcome stored"}\n📊 Risk • loss streak updated\n🛡️ READ-ONLY / DEMO / MANUAL ONLY')
     return completed
 
 def _recover_sent_signals():
-    """Recover signals delivered by the runtime overlay if its deferred send path did not register them."""
+    """Recover delivered signals without creating a second expiry for the same asset/direction/candle."""
     try:
         sc=sys.modules.get('sitecustomize'); mod=sys.modules.get('__main__')
         if sc is None:return
@@ -81,11 +86,17 @@ def _recover_sent_signals():
             if not matches:continue
             cand=max(matches,key=lambda x:float(x.get('created',0)))
             b=cand.get('brain') or {}; expiry=int(cand.get('expiry',5) or 5); expiry=expiry if expiry in (2,3,5,15) else 5
-            register({'status':'SIGNAL','asset':asset,'direction':cand.get('direction'),'expiry':expiry,'timestamp':float(sig.get('timestamp',time.time())),'entry':float(sig.get('close',0)),'confidence':int(cand.get('quality',0)),'strategy':b.get('strategy','market_brain'),'regime':b.get('regime',''),'pattern':b.get('pattern',''),'features':b})
+            direction=str(cand.get('direction') or b.get('direction') or sig.get('direction') or '')
+            entry_time=float(sig.get('timestamp',time.time())); entry=float(sig.get('close',0))
+            with LOCK:
+                c=_db(); exists=_existing_signal(c,str(asset).upper(),direction,entry_time); c.close()
+            if exists:
+                log.info('SIGNAL_RECOVERY_SKIP_DUP asset=%s direction=%s entry_time=%.3f existing_id=%s existing_expiry=%sm',str(asset).upper(),direction,entry_time,exists[0],exists[1]);continue
+            register({'status':'SIGNAL','asset':asset,'direction':direction,'expiry':expiry,'timestamp':entry_time,'entry':entry,'confidence':int(cand.get('quality',0)),'strategy':b.get('strategy','market_brain'),'regime':b.get('regime',''),'pattern':b.get('pattern',''),'features':b})
     except Exception:log.exception('Sent-signal recovery failed')
 
 def _watchdog():
-    log.info('OUTCOME_WATCHDOG started | independent expiry/result processing ON')
+    log.info('OUTCOME_WATCHDOG started | independent expiry/result processing ON | 1s polling')
     while True:
         try:
             _recover_sent_signals()
@@ -96,10 +107,9 @@ def _watchdog():
             for (asset,) in pending:
                 data=list(candles.get(asset,[])) if hasattr(candles,'get') else []
                 if not data:continue
-                # Feed the newest completed candle into the normal evaluator. It is idempotent because DB status changes to EVALUATED.
                 on_candle(asset,data[-1],tg)
-            time.sleep(2)
-        except Exception:log.exception('Outcome watchdog iteration failed');time.sleep(5)
+            time.sleep(1)
+        except Exception:log.exception('Outcome watchdog iteration failed');time.sleep(3)
 
 def start_watchdog():
     global WATCHDOG_STARTED
@@ -107,7 +117,6 @@ def start_watchdog():
         if WATCHDOG_STARTED:return
         WATCHDOG_STARTED=True
     threading.Thread(target=_watchdog,name='candice-outcome-watchdog',daemon=True).start()
-
 
 def pattern_stats(asset=None):
     with LOCK:
