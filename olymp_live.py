@@ -74,10 +74,36 @@ def _otc(a,state):
     if a.endswith("_OTC"):return None
     g=str((state or {}).get("group","")).lower()
     return a+"_OTC" if g in{"currency","goods"} or a in{"XAUUSD","XAGUSD"} else None
+
+def _account_snapshot(msg):
+    """Parse event 55 without guessing from the first account record.
+    A non-zero DEMO balance with zero REAL balances means DEMO. A non-zero
+    REAL balance with zero DEMO means REAL. If both have funds, report AMBIGUOUS.
+    """
+    if not isinstance(msg,dict) or msg.get("e")!=55:return None
+    rows=msg.get("d")
+    if not isinstance(rows,list):return None
+    demo=[];real=[]
+    for x in rows:
+        if not isinstance(x,dict):continue
+        group=str(x.get("group","")).strip().lower()
+        bal=_num(x.get("amount",x.get("amount_real",x.get("amount_free"))))
+        if bal is None:continue
+        cur=str(x.get("currency",x.get("currency_code","") )).upper()
+        if group=="demo":demo.append((bal,cur))
+        elif group=="real":real.append((bal,cur))
+    db=max(demo,key=lambda x:x[0]) if demo else None
+    rb=max(real,key=lambda x:x[0]) if real else None
+    d=db[0] if db else 0.0;r=rb[0] if rb else 0.0
+    if d>0 and r<=0:return {"mode":"DEMO","balance":d,"currency":(db[1] if db else "")}
+    if r>0 and d<=0:return {"mode":"REAL","balance":r,"currency":(rb[1] if rb else "")}
+    if d>0 and r>0:return {"mode":"AMBIGUOUS","balance":None,"currency":""}
+    return {"mode":"UNKNOWN","balance":None,"currency":""}
+
 class OlympLiveFeed:
     METADATA_EVENTS=(220,110,700,112,140,1038,1037,1039,141,22,26,111,1054,1076,1301,1097,241,230,231,75,1055,2223,2301,55,150,152,151,126,602,601,2076)
     def __init__(self,on_candle:Callable[[str,dict],None],on_history:Callable[[str,dict],None]|None=None):
-        self.on_candle=on_candle;self.on_history=on_history;self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip();self.assets=list(dict.fromkeys(x.strip().upper() for x in os.getenv("OLYMPTRADE_ASSETS","ASIA_X").split(",") if x.strip()));self.configured_assets=list(self.assets);self.discovered_assets=set();self.market_state={};self.enabled=bool(self.token);self.connected=False;self.thread=None;self.client=None;self.forming={};self.last_emitted={};self.tick_count=0;self.candle_count=0;self.reconnect_count=0;self.last_tick_time=0.0;self.last_candle_time=0.0;self._stop=threading.Event()
+        self.on_candle=on_candle;self.on_history=on_history;self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip();self.assets=list(dict.fromkeys(x.strip().upper() for x in os.getenv("OLYMPTRADE_ASSETS","ASIA_X").split(",") if x.strip()));self.configured_assets=list(self.assets);self.discovered_assets=set();self.market_state={};self.enabled=bool(self.token);self.connected=False;self.thread=None;self.client=None;self.forming={};self.last_emitted={};self.tick_count=0;self.candle_count=0;self.reconnect_count=0;self.last_tick_time=0.0;self.last_candle_time=0.0;self._stop=threading.Event();self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.account_updated=0.0
     def start(self):
         if not self.enabled:log.warning("Olymp live feed disabled: token not configured");return
         if self.thread and self.thread.is_alive():return
@@ -154,11 +180,19 @@ class OlympLiveFeed:
             if t>1e10:t/=1000
             self.tick_count+=1;self.last_tick_time=time.time();bucket=int(t//60)*60;cur=self.forming.get(a)
             if cur is None or cur["timestamp"]!=bucket:
-                if cur is not None and cur["timestamp"]>self.last_emitted.get(a,0):self.last_emitted[a]=cur["timestamp"];self.candle_count+=1;self.last_candle_time=time.time();self.on_candle(a,cur)
+                if cur is not None and cur["timestamp"]>self.last_emitted.get(a,0):self.last_emitted[a[0] if False else a]=cur["timestamp"];self.candle_count+=1;self.last_candle_time=time.time();self.on_candle(a,cur)
                 cur={"open":price,"high":price,"low":price,"close":price,"timestamp":float(bucket)};self.forming[a]=cur
             else:cur["high"]=max(cur["high"],price);cur["low"]=min(cur["low"],price);cur["close"]=price
     async def _metadata(self,msg):
         try:
+            account=_account_snapshot(msg)
+            if account:
+                self.account_mode=account["mode"];self.account_balance=account["balance"];self.account_currency=account["currency"];self.account_updated=time.time()
+                log.info("ACCOUNT_BALANCE_UPDATE mode=%s balance=%s currency=%s",self.account_mode,self.account_balance if self.account_balance is not None else "-",self.account_currency or "-")
+                sc=sys.modules.get("sitecustomize")
+                if sc is not None:
+                    sc.MODE="READ_ONLY_"+self.account_mode if self.account_mode in ("DEMO","REAL") else "READ_ONLY_"+self.account_mode
+                    sc.BALANCE_TEXT=(f"{self.account_balance:.2f} {self.account_currency}".strip() if self.account_balance is not None else "NOT_AVAILABLE")
             rec=_extract_records(msg)
             if rec:self.market_state.update(rec)
             found=_extract_assets(msg);new=set()
@@ -186,4 +220,4 @@ class OlympLiveFeed:
         try:await self.client.stop()
         except Exception:pass
     def status(self):
-        return {"configured":self.enabled,"connected":self.connected,"assets":self.assets,"configured_assets":self.configured_assets,"discovered_assets":sorted(self.discovered_assets),"tradeable_assets":sorted(a for a in self.assets if self._tradeable(a)),"market_state_count":len(self.market_state),"asset_discovery":"session_metadata_plus_otc_variants","mode":"READ_ONLY_MARKET_DATA","timeframe":"1m_real_candles","auto_trade":False,"ticks_received":self.tick_count,"candles_completed":self.candle_count,"reconnect_count":self.reconnect_count,"last_tick_age":time.time()-self.last_tick_time if self.last_tick_time else None,"last_candle_age":time.time()-self.last_candle_time if self.last_candle_time else None}
+        return {"configured":self.enabled,"connected":self.connected,"assets":self.assets,"configured_assets":self.configured_assets,"discovered_assets":sorted(self.discovered_assets),"tradeable_assets":sorted(a for a in self.assets if self._tradeable(a)),"market_state_count":len(self.market_state),"asset_discovery":"session_metadata_plus_otc_variants","mode":"READ_ONLY_MARKET_DATA","timeframe":"1m_real_candles","auto_trade":False,"ticks_received":self.tick_count,"candles_completed":self.candle_count,"reconnect_count":self.reconnect_count,"last_tick_age":time.time()-self.last_tick_time if self.last_tick_time else None,"last_candle_age":time.time()-self.last_candle_time if self.last_candle_time else None,"account_mode":self.account_mode,"account_balance":self.account_balance,"account_currency":self.account_currency,"account_age":time.time()-self.account_updated if self.account_updated else None}
