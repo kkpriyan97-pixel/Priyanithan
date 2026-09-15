@@ -87,12 +87,48 @@ def _install_runtime():
             mod.on_olymp_candle=wrapped_candle
             def scheduler():
                 LOG.info('BRAIN_SCHEDULER started: continuous 1m scan; 5m decision windows; previous-hour brain memory')
-                last_window=None
+                last_window=None; last_research_minute=None
                 while True:
                     try:
-                        now=time.time();window=int(now//300)
+                        now=time.time();window=int(now//300); minute=int(now//60)
                         if window!=last_window:
                             last_window=window;LOG.info('BRAIN_WINDOW_OPEN window=%s',window)
+
+                        # Exactly one visible research report per completed 1-minute interval.
+                        # The report is built from real candle data currently held by the live feed.
+                        if minute!=last_research_minute and int(now)%60>=8:
+                            last_research_minute=minute
+                            with LOCK: snapshot={a:list(v) for a,v in mod.candles.items()}
+                            assets_available=len(snapshot); scanned=0; fresh=0; qualified=0; rejected=0; top=[]
+                            for asset,data in snapshot.items():
+                                if len(data)<30: continue
+                                scanned+=1; age=_age(data[-1])
+                                if age<=12:
+                                    fresh+=1
+                                    try:
+                                        threading.current_thread().candice_asset=asset
+                                        tech=brain_analyze(data)
+                                        if tech.get('decision')=='SIGNAL':
+                                            qualified+=1
+                                            top.append((int(tech.get('confidence',0)),asset,tech.get('direction') or '?',age))
+                                        else: rejected+=1
+                                    except Exception:
+                                        rejected+=1
+                            top.sort(reverse=True)
+                            top3=top[:3]
+                            if top3:
+                                ranking=' | '.join(f'#{i+1} {a} {d} {c}% age={age:.1f}s' for i,(c,a,d,age) in enumerate(top3))
+                            else:
+                                ranking='No qualified setup in this minute'
+                            next_decision=(window+1)*300
+                            LOG.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+                            LOG.info('🧠 CANDICE BRAIN • 1-MIN RESEARCH | minute=%s',minute)
+                            LOG.info('📊 Assets available=%s | scanned=%s | fresh verified=%s | rejected/weak=%s | qualified=%s',assets_available,scanned,fresh,rejected,qualified)
+                            LOG.info('🏆 TOP RANKING | %s',ranking)
+                            LOG.info('🕯️ REAL 1M CANDLE RESEARCH | live data only | stale cutoff=12s')
+                            LOG.info('🧠 Previous-hour candidate memory=%s | current 5M window=%s | next 5M decision=%s',len(CANDIDATES),window,time.strftime('%H:%M:%S',time.localtime(next_decision)))
+                            LOG.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+
                         if AUTHORIZED and window not in SENT_WINDOWS and int(now)%300>=285:
                             with LOCK:pool=list(CANDIDATES.values())
                             ranked=[]
