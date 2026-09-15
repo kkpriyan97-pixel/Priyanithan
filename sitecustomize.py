@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, logging, os, sys, threading, time, requests
 LOG=logging.getLogger('candice.runtime')
 TOKEN=os.getenv('TELEGRAM_BOT_TOKEN','').strip(); CONFIGURED_CHAT=os.getenv('TELEGRAM_CHAT_ID','').strip(); ACCESS_CODE=os.getenv('CANDICE_ACCESS_CODE','').strip()
-LOCK=threading.RLock(); ACTIVE_CHAT=CONFIGURED_CHAT; AUTHORIZED=bool(CONFIGURED_CHAT); POLL_STARTED=False; INSTALLED=False
+LOCK=threading.RLock(); ACTIVE_CHAT=''; AUTHORIZED=False; BOT_ID=''; POLL_STARTED=False; INSTALLED=False
 CANDIDATES={}; SENT_WINDOWS=set(); EXPIRIES={2,3,5,15}; LIVE_RECEIPTS={}; SESSION=requests.Session()
 
 def send(chat,text):
@@ -18,18 +18,42 @@ def send(chat,text):
     except Exception as e:
         LOG.warning('Telegram control-message failed: %s',type(e).__name__);return False
 
+def verify_bot():
+    global BOT_ID
+    if not TOKEN:return False
+    try:
+        r=SESSION.get(f'https://api.telegram.org/bot{TOKEN}/getMe',timeout=15)
+        r.raise_for_status();u=r.json().get('result') or {};BOT_ID=str(u.get('id','')).strip()
+        LOG.info('TELEGRAM_BOT_ID verified=%s username=%s',BOT_ID,u.get('username',''))
+        if CONFIGURED_CHAT and CONFIGURED_CHAT==BOT_ID:
+            LOG.error('TELEGRAM_CHAT_CONFIG_INVALID configured chat is the bot itself; waiting for human /start')
+        return bool(BOT_ID)
+    except Exception as e:
+        LOG.error('Telegram getMe failed: %s',type(e).__name__);return False
+
+def human_update(u):
+    m=u.get('message') or {};chat=m.get('chat') or {};sender=m.get('from') or {}
+    cid=str(chat.get('id','')).strip();ctype=str(chat.get('type','')).strip().lower()
+    if not cid or ctype not in ('private','group','supergroup'):return False
+    if bool(sender.get('is_bot')):return False
+    if BOT_ID and cid==BOT_ID:return False
+    return True
+
 def handle(u):
     global ACTIVE_CHAT,AUTHORIZED
     m=u.get('message') or {}; cid=str((m.get('chat') or {}).get('id','')).strip(); text=str(m.get('text','')).strip(); low=text.lower()
     if not cid or not text:return
+    if not human_update(u):
+        LOG.warning('TELEGRAM_UPDATE_IGNORED chat=%s reason=bot_or_invalid_chat',cid);return
     if low.startswith('/start'):
-        with LOCK:
-            if not CONFIGURED_CHAT or cid==CONFIGURED_CHAT:ACTIVE_CHAT,AUTHORIZED=cid,True
-        send(cid,'🎯 CANDICE AI\n\n'+('✅ ONLINE\n🔐 ACCESS • AUTHORIZED\n📡 MARKET • READ-ONLY\n🚫 AUTO-TRADE • OFF\n🚫 MARTINGALE • OFF\n\n/status • connection\n/performance • session' if AUTHORIZED and cid==ACTIVE_CHAT else '🔐 ACCESS REQUIRED\n\nSend /access YOUR_ACCESS_CODE'));return
+        with LOCK:ACTIVE_CHAT,AUTHORIZED=cid,True
+        LOG.info('TELEGRAM_OWNER_AUTHORIZED chat=%s source=/start',cid)
+        send(cid,'🎯 CANDICE AI\n\n✅ ONLINE\n🔐 ACCESS • AUTHORIZED\n📡 MARKET • READ-ONLY\n🚫 AUTO-TRADE • OFF\n🚫 MARTINGALE • OFF\n\n/status • connection\n/performance • session');return
     if low.startswith('/access '):
         ok=bool(ACCESS_CODE) and text.split(' ',1)[1].strip().casefold()==ACCESS_CODE.casefold()
         with LOCK:
             if ok:ACTIVE_CHAT,AUTHORIZED=cid,True
+        LOG.info('TELEGRAM_ACCESS_RESULT chat=%s authorized=%s',cid,ok)
         send(cid,'🎯 CANDICE AI\n\n✅ ONLINE\n🔐 ACCESS • AUTHORIZED\n📡 MARKET • READ-ONLY\n🚫 AUTO-TRADE • OFF\n🚫 MARTINGALE • OFF' if ok else '❌ ACCESS • DENIED');return
     with LOCK:allowed=AUTHORIZED and cid==ACTIVE_CHAT
     if not allowed:return
@@ -50,7 +74,7 @@ def poller():
         if POLL_STARTED:return
         POLL_STARTED=True
     if not TOKEN:LOG.warning('Telegram poller disabled: token missing');return
-    offset=0;LOG.info('TELEGRAM_OWNER_POLLER started')
+    verify_bot();offset=0;LOG.info('TELEGRAM_OWNER_POLLER started | configured_chat=%s',CONFIGURED_CHAT or '<none>')
     while True:
         try:
             r=SESSION.get(f'https://api.telegram.org/bot{TOKEN}/getUpdates',params={'timeout':25,'offset':offset+1,'allowed_updates':json.dumps(['message'])},timeout=35)
@@ -110,12 +134,13 @@ def _install_runtime():
                 except Exception:return set()
 
             def runtime_telegram(text):
-                """Route signal delivery to the authorized runtime chat, not a stale fixed chat id."""
-                with LOCK:
-                    target=ACTIVE_CHAT if AUTHORIZED and ACTIVE_CHAT else CONFIGURED_CHAT
+                """Route signal delivery to the authorized human runtime chat."""
+                with LOCK:target=ACTIVE_CHAT if AUTHORIZED else ''
                 if not target:
-                    LOG.warning('Telegram signal blocked: no authorized chat configured')
+                    LOG.warning('Telegram signal blocked: no authorized human chat; send /start to Candice bot')
                     return False
+                if BOT_ID and target==BOT_ID:
+                    LOG.error('Telegram signal blocked: target is bot id=%s',BOT_ID);return False
                 try:
                     r=SESSION.post(f'https://api.telegram.org/bot{TOKEN}/sendMessage',json={'chat_id':target,'text':text,'disable_web_page_preview':True},timeout=15)
                     if r.ok:
@@ -124,19 +149,15 @@ def _install_runtime():
                     try: desc=r.json().get('description','unknown')
                     except Exception: desc='unknown'
                     LOG.error('TELEGRAM_SIGNAL_FAILED chat=%s HTTP=%s | %s',target,r.status_code,desc)
-                    if r.status_code==403:
-                        LOG.error('TELEGRAM_403_ACTION_REQUIRED chat=%s | unblock/start bot or grant send permission in target chat',target)
+                    if r.status_code==403:LOG.error('TELEGRAM_403_ACTION_REQUIRED chat=%s | %s',target,desc)
                     return False
                 except Exception as e:
-                    LOG.error('TELEGRAM_SIGNAL_FAILED chat=%s | %s',target,type(e).__name__)
-                    return False
+                    LOG.error('TELEGRAM_SIGNAL_FAILED chat=%s | %s',target,type(e).__name__);return False
 
             def capture_send(asset,data,tech,expiry=5):
                 if tech.get('decision')=='SIGNAL':
-                    window=int(time.time()//300)+1; b=tech.get('brain') or {}
-                    key=f'{asset}:{window}'
-                    with LOCK:
-                        CANDIDATES[key]={'asset':asset,'window':window,'created':time.time(),'quality':int(b.get('score',0)),'expiry':int(b.get('expiry',expiry) or 5),'direction':b.get('direction'),'brain':b}
+                    window=int(time.time()//300)+1; b=tech.get('brain') or {};key=f'{asset}:{window}'
+                    with LOCK:CANDIDATES[key]={'asset':asset,'window':window,'created':time.time(),'quality':int(b.get('score',0)),'expiry':int(b.get('expiry',expiry) or 5),'direction':b.get('direction'),'brain':b}
                     LOG.info('BRAIN_CANDIDATE asset=%s window=%s quality=%s direction=%s',asset,window,b.get('score'),b.get('direction'))
                 return {'ok':True,'status':'DEFERRED'}
 
@@ -200,21 +221,18 @@ def _install_runtime():
                                 if freshtech.get('decision')=='SIGNAL':ranked.append((int(freshtech.get('confidence',0)),asset,data,freshtech,cand,'RESCORED'))
                                 elif int(cand.get('quality',0))>=58:
                                     fallback={'decision':'SIGNAL','direction':cand.get('direction'),'confidence':cand.get('quality',0),'reasons':['current-window qualified candidate; fresh live candle recheck retained'],'brain':cand.get('brain') or {},'mtf':{},'indicators':{}}
-                                    ranked.append((int(cand.get('quality',0)),asset,data,fallback,cand,'RETAINED'))
-                                    LOG.info('WINDOW_CANDIDATE_RETAINED asset=%s quality=%s fresh_age=%.1fs',asset,cand.get('quality'),age)
+                                    ranked.append((int(cand.get('quality',0)),asset,data,fallback,cand,'RETAINED'));LOG.info('WINDOW_CANDIDATE_RETAINED asset=%s quality=%s fresh_age=%.1fs',asset,cand.get('quality'),age)
                             if ranked:
                                 ranked.sort(key=lambda x:(x[0],x[4].get('created',0)),reverse=True);_,asset,data,tech,cand,mode=ranked[0]
                                 expiry=int((tech.get('brain') or {}).get('expiry',cand.get('expiry',5)) or 5);expiry=expiry if expiry in EXPIRIES else 5
-                                with LOCK:SENT_WINDOWS.add(window)
                                 result=original_send(asset,data,tech,expiry)
                                 if result.get('status')=='SIGNAL':
+                                    with LOCK:SENT_WINDOWS.add(window)
                                     b=tech.get('brain') or {}
                                     try:outcome_register({'status':'SIGNAL','asset':asset,'direction':tech.get('direction'),'expiry':expiry,'confidence':tech.get('confidence',0),'timestamp':float(data[-1].get('timestamp',time.time())),'entry':float(data[-1].get('close',0)),'strategy':b.get('strategy','market_brain'),'regime':b.get('regime',''),'pattern':b.get('pattern',''),'features':b})
                                     except Exception:LOG.exception('Outcome registration failed asset=%s',asset)
                                     LOG.info('WINDOW_SIGNAL window=%s asset=%s direction=%s expiry=%s confidence=%s mode=%s fresh_age=%.1fs',window,asset,tech.get('direction'),expiry,tech.get('confidence'),mode,_age(data[-1],asset))
-                                else:
-                                    with LOCK:SENT_WINDOWS.discard(window);last_decision_window=None
-                                    LOG.warning('WINDOW_SIGNAL_FAILED window=%s status=%s asset=%s',window,result.get('status'),asset)
+                                else:LOG.warning('WINDOW_SIGNAL_FAILED window=%s status=%s asset=%s',window,result.get('status'),asset)
                             else:LOG.info('WINDOW_NO_VALID_FLEX_SIGNAL window=%s deadline_in=%ss',window,300-sec)
                         with LOCK:
                             cutoff=window-13
@@ -224,7 +242,7 @@ def _install_runtime():
                                 if now-rec>180:LIVE_RECEIPTS.pop(a,None)
                         time.sleep(1)
                     except Exception:LOG.exception('BRAIN_SCHEDULER_ERROR');time.sleep(2)
-            threading.Thread(target=scheduler,name='candice-brain-scheduler',daemon=True).start();INSTALLED=True;LOG.info('CANDICE_BRAIN_OVERLAY installed | FLEX_BINARY_ONLY | TELEGRAM_RUNTIME_ROUTING=ON')
+            threading.Thread(target=scheduler,name='candice-brain-scheduler',daemon=True).start();INSTALLED=True;LOG.info('CANDICE_BRAIN_OVERLAY installed | FLEX_BINARY_ONLY | TELEGRAM_HUMAN_ROUTING=ON')
         except Exception:LOG.exception('Brain overlay install failed');time.sleep(2)
 threading.Thread(target=poller,name='candice-telegram-owner',daemon=True).start()
 threading.Thread(target=_install_runtime,name='candice-runtime-installer',daemon=True).start()
