@@ -17,16 +17,55 @@ class Broker:
                 if isinstance(x,dict):
                     p=str(x.get('pair') or x.get('symbol') or x.get('name') or '').upper()
                     if p in FLEX_ASSETS or p.endswith('_OTC'): self.catalog.add(p)
+
+    async def _account_probe(self,c):
+        """Read-only account metadata probe; never selects or trades an account.
+
+        The websocket client exposes account-info request 1068 separately from
+        the balance push (event 55). We retain both responses so telemetry can
+        use an explicit selected/current marker if the broker sends one. We do
+        not guess from balance size or from list ordering.
+        """
+        try:
+            metadata={}
+            for group in ('demo','real'):
+                try:
+                    resp=await c.send_request(1068,[{'group':group}],requires_response=True,timeout=8)
+                    metadata[group]=resp if isinstance(resp,dict) else {}
+                except Exception as e:
+                    metadata[group]={'error':type(e).__name__}
+            setattr(c,'candice_account_metadata',metadata)
+            log.info('CANDICE ACCOUNT METADATA PROBE groups=%s',','.join(sorted(metadata.keys())))
+            for group,resp in metadata.items():
+                d=resp.get('d') if isinstance(resp,dict) else None
+                if isinstance(d,list):
+                    safe=[]
+                    for row in d:
+                        if isinstance(row,dict):
+                            safe.append({k:row.get(k) for k in row.keys() if str(k).lower() in {
+                                'account_id','accountid','id','group','mode','type','selected','is_selected','active','is_active','current','is_current','status','currency'
+                            }})
+                    log.info('CANDICE ACCOUNT METADATA group=%s rows=%s',group,safe)
+        except Exception:
+            log.exception('CANDICE ACCOUNT METADATA PROBE failed')
+
     async def connect_forever(self):
         if not self.token: raise RuntimeError('OLYMPIATRADE_ACCESS_TOKEN is missing')
         backoff=5
         while True:
             try:
-                c=OlympTradeClient(access_token=self.token,log_raw_messages=False); c.register_callback(1054,self._instruments); await c.start(); self.client=c; backoff=5; log.warning('CANDICE BROKER: LIVE CONNECTED (FLEX market data only)')
+                c=OlympTradeClient(access_token=self.token,log_raw_messages=False)
+                c.register_callback(1054,self._instruments)
+                await c.start()
+                self.client=c
+                asyncio.create_task(self._account_probe(c),name='candice-account-probe')
+                backoff=5
+                log.warning('CANDICE BROKER: LIVE CONNECTED (FLEX market data only)')
                 while c.connection.is_connected: await asyncio.sleep(5)
             except asyncio.CancelledError: raise
             except Exception as e:
                 self.client=None; log.warning('CANDICE BROKER: reconnect after %s',e); await asyncio.sleep(backoff); backoff=min(backoff*2,60)
+
     async def candles(self,pair,size=60,count=120,max_age=360):
         c=self.client
         if c is None or not c.connection.is_connected:return None,'broker disconnected'
@@ -51,8 +90,6 @@ class Broker:
                 oldest=min(batch_times); next_cursor=int(oldest-size)-1
                 if next_cursor>=cursor: break
                 cursor=next_cursor
-                # Some market endpoints cap each response at 60 candles. Do not
-                # stop merely because raw is shorter than the requested batch.
         except Exception as e:
             return None,f'candle request failed: {e}'
         rows=sorted(set(rows),key=lambda x:x[0])
