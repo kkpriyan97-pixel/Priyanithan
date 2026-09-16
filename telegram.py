@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import time
-
 import requests
 
 log = logging.getLogger("candice.telegram")
@@ -12,7 +10,15 @@ log = logging.getLogger("candice.telegram")
 
 class Telegram:
     def __init__(self):
-        self.token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        raw_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        # Accept the normal BotFather token, a token prefixed with `bot`, or an
+        # accidentally pasted Bot API URL without exposing the secret in logs.
+        token = raw_token
+        if token.startswith("https://api.telegram.org/bot"):
+            token = token[len("https://api.telegram.org/bot"):]
+        if token.lower().startswith("bot"):
+            token = token[3:]
+        self.token = token.strip()
         self.chat = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self.access_code = os.getenv("CANDICE_ACCESS_CODE", "").strip()
         self.api = f"https://api.telegram.org/bot{self.token}" if self.token else ""
@@ -38,11 +44,7 @@ class Telegram:
             return None
 
     def _send_to(self, chat_id: str, text: str):
-        return self._post(
-            "sendMessage",
-            {"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-            timeout=15,
-        )
+        return self._post("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}, 15)
 
     def _handle_message(self, message: dict):
         chat = message.get("chat") or {}
@@ -72,15 +74,10 @@ class Telegram:
                 log.warning("TELEGRAM_ACCESS_DENIED")
                 self._send_to(chat_id, "❌ Invalid access code.")
                 return
-
             self.chat = chat_id
             self.authorized = True
             log.info("TELEGRAM_ACCESS_GRANTED")
-            self._send_to(
-                chat_id,
-                "✅ CANDICE AI ACCESS GRANTED\n\n📡 Live market feed: ON\n🧠 Brain: ON\n🔒 Read-only: ON\n🚫 Auto-trade: OFF\n🚫 Martingale: OFF\n\nWaiting for a qualified signal...",
-            )
-            return
+            self._send_to(chat_id, "✅ CANDICE AI ACCESS GRANTED\n\n📡 Live market feed: ON\n🧠 Brain: ON\n🔒 Read-only: ON\n🚫 Auto-trade: OFF\n🚫 Martingale: OFF\n\nWaiting for a qualified signal...")
 
     def _poll_loop(self):
         log.info("TELEGRAM_COMMAND_POLL_STARTED interval=2s")
@@ -105,8 +102,7 @@ class Telegram:
                     continue
                 for item in data.get("result", []):
                     self._offset = max(self._offset, int(item.get("update_id", 0)) + 1)
-                    message = item.get("message") or item.get("channel_post") or {}
-                    self._handle_message(message)
+                    self._handle_message(item.get("message") or item.get("channel_post") or {})
             except Exception as e:
                 log.warning("TELEGRAM_POLL_ERROR type=%s", type(e).__name__)
                 self._stop.wait(2)
@@ -139,9 +135,4 @@ class Telegram:
     def edit(self, message_id, text):
         if not self.token or not self.chat or not message_id:
             return False
-        data = self._post(
-            "editMessageText",
-            {"chat_id": self.chat, "message_id": message_id, "text": text, "disable_web_page_preview": True},
-            timeout=10,
-        )
-        return bool(data)
+        return bool(self._post("editMessageText", {"chat_id": self.chat, "message_id": message_id, "text": text, "disable_web_page_preview": True}, 10))
