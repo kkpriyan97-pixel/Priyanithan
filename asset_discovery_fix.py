@@ -1,121 +1,205 @@
 from __future__ import annotations
+
 import asyncio
 import logging
 import os
 import re
 
 log = logging.getLogger("candice.assets")
-ASSET_EVENTS = tuple(int(x.strip()) for x in os.getenv("OLYMPTRADE_ASSET_EVENTS", "72,75,126,141,2076,2223,2301").split(",") if x.strip().isdigit())
+ASSET_EVENTS = tuple(
+    int(x.strip())
+    for x in os.getenv("OLYMPTRADE_ASSET_EVENTS", "72,75,126,141,2076,2223,2301").split(",")
+    if x.strip().isdigit()
+)
 FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
 _PAIR_RE = re.compile(r"^[A-Z0-9][A-Z0-9_./-]{2,29}$")
-_ASSET_KEYS = {"pair", "symbol", "asset", "instrument", "code", "ticker", "short_name", "display_name", "symbol_name", "pair_name"}
-_PROFIT_KEYS = {"profitability", "profitability_percent", "profitability_percentage", "max_profitability", "max_profitability_percent", "payout", "payout_percent", "profit", "profit_percent", "winperc", "win_percent", "win_percentage"}
+_ASSET_KEYS = {
+    "pair", "symbol", "asset", "instrument", "code", "ticker",
+    "short_name", "display_name", "symbol_name", "pair_name",
+}
+_PROFIT_KEYS = {
+    "profitability", "profitability_percent", "profitability_percentage",
+    "max_profitability", "max_profitability_percent", "payout", "payout_percent",
+    "profit", "profit_percent", "winperc", "win_percent", "win_percentage",
+}
 
 
 def _candidate(value):
-    if not isinstance(value, str): return None
+    if not isinstance(value, str):
+        return None
     s = value.strip().upper()
-    if s in {"FLEX", "FLEX TIME", "FLEX_TIME", "FIXED TIME", "FOREX", "STOCKS"}: return None
-    if _PAIR_RE.fullmatch(s) and any(ch.isalpha() for ch in s): return s
+    if s in {"FLEX", "FLEX TIME", "FLEX_TIME", "FIXED TIME", "FOREX", "STOCKS"}:
+        return None
+    if _PAIR_RE.fullmatch(s) and any(ch.isalpha() for ch in s):
+        return s
     return None
 
 
 def _is_flex_mode(value):
-    if not isinstance(value, str): return False
+    if not isinstance(value, str):
+        return False
     normalized = re.sub(r"[\s_-]+", "", value.strip().lower())
     return normalized in {"flex", "flextime"}
 
 
 def _has_profitability(node):
-    if not isinstance(node, dict): return False
+    if not isinstance(node, dict):
+        return False
     for key, value in node.items():
-        if str(key).lower() not in _PROFIT_KEYS: continue
+        if str(key).lower() not in _PROFIT_KEYS:
+            continue
         try:
             number = float(str(value).replace("%", "").strip())
-            if 0 < number <= 100: return True
+            if 0 < number <= 100:
+                return True
         except (TypeError, ValueError):
             continue
     return False
 
 
 def _has_flex_marker(node):
-    if not isinstance(node, dict): return False
+    if not isinstance(node, dict):
+        return False
     for key, value in node.items():
         k = str(key).lower()
-        if k in {"mode", "trading_mode", "trade_mode", "type", "market_type", "market", "name"} and _is_flex_mode(value): return True
+        if k in {"mode", "trading_mode", "trade_mode", "type", "market_type", "market", "name"} and _is_flex_mode(value):
+            return True
         if k in {"modes", "trading_modes", "trade_modes", "available_modes", "markets", "market_modes", "types"}:
             vals = value if isinstance(value, list) else [value]
             for item in vals:
-                if isinstance(item, str) and _is_flex_mode(item): return True
-                if isinstance(item, dict) and _has_flex_marker(item): return True
+                if isinstance(item, str) and _is_flex_mode(item):
+                    return True
+                if isinstance(item, dict) and _has_flex_marker(item):
+                    return True
         if k in {"flex", "is_flex", "flex_enabled", "flex_available", "available_flex", "flex_time", "is_flex_time", "flextime"}:
-            if value is True: return True
-            if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "enabled", "available", "flex", "flex time", "flex_time", "flextime"}: return True
+            if value is True:
+                return True
+            if isinstance(value, str) and value.strip().lower() in {
+                "true", "1", "yes", "enabled", "available", "flex", "flex time", "flex_time", "flextime"
+            }:
+                return True
     return _has_profitability(node)
 
 
-def _extract(node, found, flex_context=False, stats=None):
-    if stats is None: stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
+def _extract(node, found, stats=None):
+    """Extract only symbols qualified by their OWN asset record.
+
+    Important: a Flex/profitability marker in a parent object must never
+    qualify unrelated nested symbols. The previous implementation propagated
+    flex_context down the entire tree, which could turn unrelated/closed
+    symbols into valid Flex candidates.
+    """
+    if stats is None:
+        stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
+
     if isinstance(node, dict):
         stats["dicts"] += 1
-        local_flex = flex_context or _has_flex_marker(node)
-        if local_flex: stats["qualified_nodes"] += 1
+        node_flex = _has_flex_marker(node)
+        if node_flex:
+            stats["qualified_nodes"] += 1
+
+        # A dict keyed directly by a symbol must qualify that symbol using
+        # its own value/record, not a marker inherited from an ancestor.
         for raw_key, value in node.items():
             key_candidate = _candidate(raw_key)
-            if key_candidate and isinstance(value, dict) and (_has_flex_marker(value) or local_flex):
-                found.add(key_candidate); stats["candidates"] += 1
+            if key_candidate and isinstance(value, dict) and _has_flex_marker(value):
+                if key_candidate not in found:
+                    found.add(key_candidate)
+                    stats["candidates"] += 1
+
+        # Explicit asset fields are accepted only when the containing record
+        # itself is Flex-qualified, or when the individual item is qualified.
+        for raw_key, value in node.items():
             k = str(raw_key).lower()
-            if k in _ASSET_KEYS and local_flex:
+            if k in _ASSET_KEYS:
                 values = value if isinstance(value, list) else [value]
                 for item in values:
                     if isinstance(item, dict):
-                        for subkey in ("id", "pair", "symbol", "asset", "instrument", "p", "code", "ticker", "short_name", "display_name", "symbol_name", "pair_name"):
-                            c = _candidate(item.get(subkey))
-                            if c: found.add(c); stats["candidates"] += 1
-                    else:
+                        item_flex = _has_flex_marker(item)
+                        if node_flex or item_flex:
+                            for subkey in (
+                                "id", "pair", "symbol", "asset", "instrument", "p", "code",
+                                "ticker", "short_name", "display_name", "symbol_name", "pair_name",
+                            ):
+                                c = _candidate(item.get(subkey))
+                                if c:
+                                    if c not in found:
+                                        found.add(c)
+                                        stats["candidates"] += 1
+                                    break
+                    elif node_flex:
                         c = _candidate(item)
-                        if c: found.add(c); stats["candidates"] += 1
-            _extract(value, found, local_flex, stats)
+                        if c:
+                            if c not in found:
+                                found.add(c)
+                                stats["candidates"] += 1
+
+        # Recurse WITHOUT inheriting Flex qualification from this node.
+        for value in node.values():
+            _extract(value, found, stats)
+
     elif isinstance(node, list):
         stats["lists"] += 1
-        for item in node: _extract(item, found, flex_context, stats)
+        for item in node:
+            _extract(item, found, stats)
+
     return stats
 
 
 def apply():
     from market_feed import LiveMarketFeed
-    if getattr(LiveMarketFeed, "_asset_discovery_hardened", False): return
+
+    if getattr(LiveMarketFeed, "_asset_discovery_hardened", False):
+        return
+
     original_start = LiveMarketFeed.start
     original_stop = LiveMarketFeed.stop
 
     async def hardened_start(self):
         async def enhanced_assets(msg):
-            found = set(); stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
+            found = set()
+            stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
             payload = msg.get("d") if isinstance(msg, dict) else msg
-            _extract(payload, found, False, stats)
+            _extract(payload, found, stats)
+
             if found:
                 new = found - self.assets
                 if new:
                     self.assets.update(new)
-                    log.info("FLEX_TIME_ASSET_DISCOVERY found=%s new=%s total=%s", len(found), len(new), len(self.assets))
+                    log.info(
+                        "FLEX_TIME_ASSET_DISCOVERY_STRICT found=%s new=%s total=%s",
+                        len(found), len(new), len(self.assets)
+                    )
                     for asset in sorted(new):
-                        if asset not in self.subscribed: self.schedule_asset(asset)
+                        if asset not in self.subscribed:
+                            self.schedule_asset(asset)
             elif FLEX_ONLY and isinstance(msg, dict) and msg.get("e") in ASSET_EVENTS:
                 samples = []
-                if isinstance(payload, dict): samples = [str(k) for k in list(payload.keys())[:25]]
-                log.info("FLEX_TIME_ASSET_SCAN event=%s dicts=%s lists=%s qualified_nodes=%s candidates=%s key_samples=%s", msg.get("e"), stats["dicts"], stats["lists"], stats["qualified_nodes"], stats["candidates"], samples)
+                if isinstance(payload, dict):
+                    samples = [str(k) for k in list(payload.keys())[:25]]
+                log.info(
+                    "FLEX_TIME_ASSET_SCAN event=%s dicts=%s lists=%s qualified_nodes=%s candidates=%s key_samples=%s",
+                    msg.get("e"), stats["dicts"], stats["lists"], stats["qualified_nodes"], stats["candidates"], samples
+                )
 
-        if FLEX_ONLY: self.assets.clear()
+        if FLEX_ONLY:
+            self.assets.clear()
         self.client.on("*", enhanced_assets)
         await original_start(self)
 
         async def request_discovery_events():
-            if not self.client.running: return
+            if not self.client.running:
+                return
             events = list(dict.fromkeys((220,) + ASSET_EVENTS))
             log.info("FLEX_TIME_ASSET_EVENT_REQUESTS events=%s", events)
             for event_id in events:
-                try: await self.client.send(98, [event_id], False)
-                except Exception as exc: log.debug("FLEX_TIME_ASSET_EVENT_REQUEST_FAILED event=%s error=%s", event_id, type(exc).__name__)
+                try:
+                    await self.client.send(98, [event_id], False)
+                except Exception as exc:
+                    log.debug(
+                        "FLEX_TIME_ASSET_EVENT_REQUEST_FAILED event=%s error=%s",
+                        event_id, type(exc).__name__
+                    )
 
         self._asset_discovery_request_task = asyncio.create_task(request_discovery_events())
 
@@ -123,21 +207,28 @@ def apply():
             while self.connected:
                 try:
                     await asyncio.sleep(30)
-                    if self.connected: await request_discovery_events()
-                except asyncio.CancelledError: return
+                    if self.connected:
+                        await request_discovery_events()
+                except asyncio.CancelledError:
+                    return
                 except Exception as exc:
                     log.debug("ASSET_DISCOVERY_REFRESH_FAILED error=%s", type(exc).__name__)
                     await asyncio.sleep(30)
+
         self._asset_discovery_task = asyncio.create_task(discovery_watch())
-        log.info("FLEX_TIME_ASSET_DISCOVERY_WATCH_STARTED events=%s flex_only=%s", ASSET_EVENTS, FLEX_ONLY)
+        log.info(
+            "FLEX_TIME_ASSET_DISCOVERY_WATCH_STARTED events=%s flex_only=%s",
+            ASSET_EVENTS, FLEX_ONLY
+        )
 
     async def hardened_stop(self):
         for name in ("_asset_discovery_task", "_asset_discovery_request_task"):
             task = getattr(self, name, None)
-            if task and not task.done(): task.cancel()
+            if task and not task.done():
+                task.cancel()
         await original_stop(self)
 
     LiveMarketFeed.start = hardened_start
     LiveMarketFeed.stop = hardened_stop
     LiveMarketFeed._asset_discovery_hardened = True
-    log.info("FLEX_TIME_ASSET_DISCOVERY_HARDENED flex_only=%s", FLEX_ONLY)
+    log.info("FLEX_TIME_ASSET_DISCOVERY_HARDENED strict_record_scope=%s", FLEX_ONLY)
