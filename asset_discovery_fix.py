@@ -37,25 +37,21 @@ def apply():
     if getattr(LiveMarketFeed,"_asset_discovery_hardened",False): return
     original_start=LiveMarketFeed.start
     original_stop=LiveMarketFeed.stop
-    original_assets=LiveMarketFeed._assets
 
     async def enhanced_assets(self,msg):
         found=set()
         _extract(msg.get("d") if isinstance(msg,dict) else msg,found)
-        try: await original_assets(self,msg)
-        except Exception: log.exception("ASSET_DISCOVERY_LEGACY_HANDLER_FAILED")
         new=found-self.assets
         if new:
+            self.assets.update(new)
+            log.info("ASSET_DISCOVERY found=%s new=%s total=%s assets=%s",len(found),len(new),len(self.assets),sorted(found))
             for asset in sorted(new):
                 if asset not in self.subscribed:
                     asyncio.create_task(self._subscribe_asset(asset))
-            self.assets.update(new)
-            log.info("ASSET_DISCOVERY found=%s new=%s total=%s assets=%s",len(found),len(new),len(self.assets),sorted(found))
 
     async def hardened_start(self):
-        # Wildcard sees metadata responses from any event family. Subscriptions
-        # are scheduled as independent tasks so the dispatcher never deadlocks
-        # while waiting for the candle-history response of a newly found asset.
+        # Listen broadly for metadata-bearing responses. Discovery never waits
+        # inside the WebSocket dispatcher; each new subscription is a task.
         self.client.on("*", enhanced_assets)
         for event in ASSET_EVENTS:
             self.client.on(event, enhanced_assets)
