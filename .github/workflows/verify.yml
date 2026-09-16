@@ -27,8 +27,8 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           files = {p.name: p.read_text(encoding='utf-8') for p in map(Path, ['app.py','brain.py','brain_fix.py','market_feed.py','olymp_client.py','telegram.py','asset_discovery_fix.py','sitecustomize.py'])}
-          assert 'Auto-trade • OFF' in files['app.py']
-          assert 'Martingale • OFF' in files['app.py']
+          assert '"auto_trade":False' in files['app.py']
+          assert '"martingale":False' in files['app.py']
           assert 'READ_ONLY' in files['olymp_client.py']
           assert 'event_183_only=true' in files['sitecustomize.py']
           assert 'authenticated_flex_event_183' in files['asset_discovery_fix.py']
