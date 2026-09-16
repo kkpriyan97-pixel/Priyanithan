@@ -92,4 +92,5 @@ class OlympReadOnlyClient:
     async def subscribe_ticks(self,asset):
         await self.send(12,[{"pair":asset}],False);await self.send(280,[{"pair":asset}],False)
     async def request_candles(self,asset,count=80):
-        return await self.send(10,[{"pair":asset,"size":60,"to":int(time.time()),"solid":True}],True,12)
+        count=max(60,min(int(count),360))
+        return await self.send(10,[{"pair":asset,"size":count,"to":int(time.time()),"solid":True}],True,12)
