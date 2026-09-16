@@ -8,11 +8,8 @@ URI="wss://ws.olymptrade.com/otp?cid_ver=1&cid_app=web%40OlympTrade%402025.2.261
 ORIGIN="https://olymptrade.com"
 UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
-
 def uid():
-    chars=string.ascii_letters+string.digits
-    return ''.join(random.choice(chars) for _ in range(16))
-
+    return ''.join(random.choice(string.ascii_letters+string.digits) for _ in range(16))
 
 def message(event,data,request_id=None):
     x={"t":2,"e":event,"d":data}
@@ -26,7 +23,11 @@ class OlympReadOnlyClient:
         self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.assets=set()
     def on(self,event,callback):self.callbacks[event].append(callback)
     async def connect(self):
-        self.ws=await websockets.connect(URI,additional_headers={"Origin":ORIGIN,"User-Agent":UA,"Cookie":f"access_token={self.token}"},ping_interval=None,open_timeout=10)
+        headers={"Origin":ORIGIN,"User-Agent":UA,"Cookie":f"access_token={self.token}"}
+        try:
+            self.ws=await websockets.connect(URI,extra_headers=headers,ping_interval=None,open_timeout=10)
+        except TypeError:
+            self.ws=await websockets.connect(URI,additional_headers=headers,ping_interval=None,open_timeout=10)
         self.running=True;asyncio.create_task(self._reader());asyncio.create_task(self._dispatcher());log.info("OLYMP_CONNECTED")
     async def close(self):
         self.running=False
@@ -36,8 +37,7 @@ class OlympReadOnlyClient:
             self.ws=None
     async def send(self,event,data,wait=False,timeout=10):
         if not self.ws or not self.running:raise ConnectionError("OlympTrade WebSocket is not connected")
-        rid=uid() if wait else None
-        fut=None
+        rid=uid() if wait else None;fut=None
         if rid:
             fut=asyncio.get_running_loop().create_future();self.pending[rid]=fut
         await self.ws.send(message(event,data,rid))
@@ -79,7 +79,6 @@ class OlympReadOnlyClient:
                 r=await self.send(1068,[{"group":group}],True,8)
                 rows=(r or {}).get("d") or []
                 if rows:
-                    # Metadata only; never place an order or select an account for trading.
                     bal=None
                     for x in rows:
                         if isinstance(x,dict):
@@ -91,7 +90,6 @@ class OlympReadOnlyClient:
                     break
             except Exception:pass
     async def subscribe_ticks(self,asset):
-        await self.send(12,[{"pair":asset}],False)
-        await self.send(280,[{"pair":asset}],False)
+        await self.send(12,[{"pair":asset}],False);await self.send(280,[{"pair":asset}],False)
     async def request_candles(self,asset,count=80):
         return await self.send(10,[{"pair":asset,"size":60,"to":int(time.time()),"solid":True}],True,12)
