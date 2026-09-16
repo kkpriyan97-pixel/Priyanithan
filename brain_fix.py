@@ -1,30 +1,51 @@
 from __future__ import annotations
 
 import logging
+import math
 from brain import CandiceBrain
 
 log = logging.getLogger("candice.brain_fix")
-
 _ORIGINAL_ANALYZE = CandiceBrain.analyze
+
+
+def _finite(v):
+    try:
+        return v is not None and math.isfinite(float(v))
+    except (TypeError, ValueError):
+        return False
 
 
 def analyze(self, asset, completed, live_price):
     try:
-        if getattr(self.feed, "client", None) is None:
+        client = getattr(self.feed, "client", None)
+        if client is None or getattr(client, "account_mode", "UNKNOWN") != "DEMO":
             return None
-        if getattr(self.feed.client, "account_mode", "UNKNOWN") != "DEMO":
+        authoritative = set(getattr(self.feed, "_authoritative_flex_assets", set()))
+        if asset not in authoritative:
             return None
-        status = self.feed.status()
-        assets = set(status.get("assets", []))
-        if asset not in assets:
+        if len(completed) < 60 or not _finite(live_price):
             return None
-        if len(completed) < 60 or live_price is None:
+
+        # Verify the indicator inputs independently so brain.py cannot turn
+        # missing RSI/ADX values into numeric zero and still qualify a signal.
+        rsi = self._rsi(completed)
+        adx = self._adx(completed)
+        atr = self._atr(completed)
+        macd = self._macd(completed)
+        if not all((_finite(rsi), _finite(adx), _finite(atr))):
+            log.warning("BRAIN_INDICATORS_NOT_READY asset=%s rsi=%s adx=%s atr=%s", asset, rsi, adx, atr)
             return None
+        if not isinstance(macd, (tuple, list)) or len(macd) < 2 or not all(_finite(x) for x in macd[:2]):
+            log.warning("BRAIN_MACD_NOT_READY asset=%s", asset)
+            return None
+
         result = _ORIGINAL_ANALYZE(self, asset, completed, live_price)
         if not isinstance(result, dict):
             return None
         required = ("asset", "direction", "confidence", "entry", "expiry", "rsi", "adx")
-        if any(k not in result or result[k] is None for k in required):
+        if any(k not in result or not _finite(result[k]) if k in {"confidence", "entry", "rsi", "adx"} else k not in result or result[k] is None for k in required):
+            return None
+        if result.get("direction") not in {"UP", "DOWN"}:
             return None
         return result
     except Exception:
@@ -34,4 +55,4 @@ def analyze(self, asset, completed, live_price):
 
 def apply():
     CandiceBrain.analyze = analyze
-    log.info("BRAIN_FIX_APPLIED safe_demogate=true")
+    log.info("BRAIN_FIX_APPLIED safe_demogate=true indicator_gate=true")
