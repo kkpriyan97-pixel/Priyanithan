@@ -14,9 +14,10 @@ def message(event,data,request_id=None):
 class OlympReadOnlyClient:
  """Minimal read-only WebSocket client. No order/trade methods exist."""
  def __init__(self,token):
-  self.token=token;self.ws=None;self.running=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.assets=set();self._reader_task=None;self._dispatcher_task=None
+  self.token=token;self.ws=None;self.running=False;self.auth_invalid=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.assets=set();self._reader_task=None;self._dispatcher_task=None
  def on(self,event,callback):self.callbacks[event].append(callback)
  async def connect(self):
+  if self.auth_invalid:raise ConnectionError("OlympTrade access token rejected")
   if self.running and self.ws:return
   headers={"Origin":ORIGIN,"User-Agent":UA,"Cookie":f"access_token={self.token}"}
   try:self.ws=await websockets.connect(URI,extra_headers=headers,ping_interval=15,ping_timeout=10,open_timeout=10,close_timeout=5)
@@ -50,7 +51,9 @@ class OlympReadOnlyClient:
   except asyncio.CancelledError:return
   except Exception as e:
    if self.running:
-    ws=self.ws;log.warning("OLYMP_SOCKET_STOPPED type=%s code=%s reason=%s",type(e).__name__,getattr(ws,"close_code",None),getattr(ws,"close_reason",None))
+    ws=self.ws;code=getattr(ws,"close_code",None);reason=getattr(ws,"close_reason",None)
+    log.warning("OLYMP_SOCKET_STOPPED type=%s code=%s reason=%s",type(e).__name__,code,reason)
+    if code==1008 and str(reason).lower()=="invalid_token":self.auth_invalid=True;log.error("OLYMP_AUTH_INVALID token_rejected_by_server")
   finally:
    if self.running:
     self.running=False
