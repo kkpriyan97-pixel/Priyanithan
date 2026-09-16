@@ -6,11 +6,13 @@ import os
 import re
 
 log = logging.getLogger("candice.assets")
-ASSET_EVENTS = tuple(
-    int(x.strip())
-    for x in os.getenv("OLYMPTRADE_ASSET_EVENTS", "72,75,126,141,2076,2223,2301").split(",")
-    if x.strip().isdigit()
-)
+
+# IMPORTANT: only the account/mode asset-list event is authoritative.
+# The old implementation accepted several broad market events (72, 75, ...)
+# which describe the platform universe, not necessarily the user's account
+# asset list. That is how assets such as DOGUSD_OTC and ASTRO_X could enter
+# the Brain even when they were not visible in the user's account.
+ACCOUNT_ASSET_EVENT = int(os.getenv("OLYMPTRADE_ACCOUNT_ASSET_EVENT", "220"))
 FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
 _PAIR_RE = re.compile(r"^[A-Z0-9][A-Z0-9_./-]{2,29}$")
 _ASSET_KEYS = {
@@ -82,12 +84,10 @@ def _has_flex_marker(node):
 
 
 def _extract(node, found, stats=None):
-    """Extract only symbols qualified by their OWN asset record.
+    """Extract candidates only from the authoritative account asset-list event.
 
-    Important: a Flex/profitability marker in a parent object must never
-    qualify unrelated nested symbols. The previous implementation propagated
-    flex_context down the entire tree, which could turn unrelated/closed
-    symbols into valid Flex candidates.
+    No Flex/profitability context is inherited from a parent into unrelated
+    descendants. A symbol must be represented by its own qualifying record.
     """
     if stats is None:
         stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
@@ -98,8 +98,6 @@ def _extract(node, found, stats=None):
         if node_flex:
             stats["qualified_nodes"] += 1
 
-        # A dict keyed directly by a symbol must qualify that symbol using
-        # its own value/record, not a marker inherited from an ancestor.
         for raw_key, value in node.items():
             key_candidate = _candidate(raw_key)
             if key_candidate and isinstance(value, dict) and _has_flex_marker(value):
@@ -107,8 +105,6 @@ def _extract(node, found, stats=None):
                     found.add(key_candidate)
                     stats["candidates"] += 1
 
-        # Explicit asset fields are accepted only when the containing record
-        # itself is Flex-qualified, or when the individual item is qualified.
         for raw_key, value in node.items():
             k = str(raw_key).lower()
             if k in _ASSET_KEYS:
@@ -134,7 +130,7 @@ def _extract(node, found, stats=None):
                                 found.add(c)
                                 stats["candidates"] += 1
 
-        # Recurse WITHOUT inheriting Flex qualification from this node.
+        # Never inherit qualification from this node.
         for value in node.values():
             _extract(value, found, stats)
 
@@ -155,70 +151,72 @@ def apply():
     original_start = LiveMarketFeed.start
     original_stop = LiveMarketFeed.stop
 
-    async def hardened_start(self):
-        async def enhanced_assets(msg):
-            found = set()
-            stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
-            payload = msg.get("d") if isinstance(msg, dict) else msg
-            _extract(payload, found, stats)
+    async def enhanced_assets(msg):
+        if not isinstance(msg, dict) or msg.get("e") != ACCOUNT_ASSET_EVENT:
+            return
 
-            if found:
-                new = found - self.assets
-                if new:
-                    self.assets.update(new)
-                    log.info(
-                        "FLEX_TIME_ASSET_DISCOVERY_STRICT found=%s new=%s total=%s",
-                        len(found), len(new), len(self.assets)
-                    )
-                    for asset in sorted(new):
-                        if asset not in self.subscribed:
-                            self.schedule_asset(asset)
-            elif FLEX_ONLY and isinstance(msg, dict) and msg.get("e") in ASSET_EVENTS:
-                samples = []
-                if isinstance(payload, dict):
-                    samples = [str(k) for k in list(payload.keys())[:25]]
+        found = set()
+        stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
+        payload = msg.get("d")
+        _extract(payload, found, stats)
+
+        if found:
+            new = found - self.assets
+            if new:
+                self.assets.update(new)
                 log.info(
-                    "FLEX_TIME_ASSET_SCAN event=%s dicts=%s lists=%s qualified_nodes=%s candidates=%s key_samples=%s",
-                    msg.get("e"), stats["dicts"], stats["lists"], stats["qualified_nodes"], stats["candidates"], samples
+                    "ACCOUNT_ASSET_DISCOVERY event=%s found=%s new=%s total=%s",
+                    ACCOUNT_ASSET_EVENT, len(found), len(new), len(self.assets)
                 )
+                for asset in sorted(new):
+                    if asset not in self.subscribed:
+                        self.schedule_asset(asset)
+        else:
+            samples = list(payload.keys())[:30] if isinstance(payload, dict) else []
+            log.warning(
+                "ACCOUNT_ASSET_DISCOVERY_EMPTY event=%s dicts=%s lists=%s qualified_nodes=%s candidates=%s key_samples=%s",
+                ACCOUNT_ASSET_EVENT, stats["dicts"], stats["lists"], stats["qualified_nodes"], stats["candidates"], samples
+            )
 
+    async def hardened_start(self):
         if FLEX_ONLY:
+            # Fail closed: never retain assets discovered by an older process.
             self.assets.clear()
+            self.subscribed.clear()
+
         self.client.on("*", enhanced_assets)
         await original_start(self)
 
-        async def request_discovery_events():
+        async def request_account_assets():
             if not self.client.running:
                 return
-            events = list(dict.fromkeys((220,) + ASSET_EVENTS))
-            log.info("FLEX_TIME_ASSET_EVENT_REQUESTS events=%s", events)
-            for event_id in events:
-                try:
-                    await self.client.send(98, [event_id], False)
-                except Exception as exc:
-                    log.debug(
-                        "FLEX_TIME_ASSET_EVENT_REQUEST_FAILED event=%s error=%s",
-                        event_id, type(exc).__name__
-                    )
+            log.info("ACCOUNT_ASSET_EVENT_REQUEST event=%s", ACCOUNT_ASSET_EVENT)
+            try:
+                await self.client.send(98, [ACCOUNT_ASSET_EVENT], False)
+            except Exception as exc:
+                log.warning(
+                    "ACCOUNT_ASSET_EVENT_REQUEST_FAILED event=%s error=%s",
+                    ACCOUNT_ASSET_EVENT, type(exc).__name__
+                )
 
-        self._asset_discovery_request_task = asyncio.create_task(request_discovery_events())
+        self._asset_discovery_request_task = asyncio.create_task(request_account_assets())
 
         async def discovery_watch():
             while self.connected:
                 try:
                     await asyncio.sleep(30)
                     if self.connected:
-                        await request_discovery_events()
+                        await request_account_assets()
                 except asyncio.CancelledError:
                     return
                 except Exception as exc:
-                    log.debug("ASSET_DISCOVERY_REFRESH_FAILED error=%s", type(exc).__name__)
+                    log.debug("ACCOUNT_ASSET_REFRESH_FAILED error=%s", type(exc).__name__)
                     await asyncio.sleep(30)
 
         self._asset_discovery_task = asyncio.create_task(discovery_watch())
         log.info(
-            "FLEX_TIME_ASSET_DISCOVERY_WATCH_STARTED events=%s flex_only=%s",
-            ASSET_EVENTS, FLEX_ONLY
+            "ACCOUNT_ASSET_DISCOVERY_WATCH_STARTED event=%s flex_only=%s",
+            ACCOUNT_ASSET_EVENT, FLEX_ONLY
         )
 
     async def hardened_stop(self):
@@ -228,7 +226,45 @@ def apply():
                 task.cancel()
         await original_stop(self)
 
-    LiveMarketFeed.start = hardened_start
+    # Bind the callback after start is defined so it can use self safely.
+    async def start_with_bound_callback(self):
+        async def bound_assets(msg):
+            await enhanced_assets.__get__(self, LiveMarketFeed)(msg)
+        self.client.on("*", bound_assets)
+        if FLEX_ONLY:
+            self.assets.clear()
+            self.subscribed.clear()
+        await original_start(self)
+
+        async def request_account_assets():
+            if not self.client.running:
+                return
+            log.info("ACCOUNT_ASSET_EVENT_REQUEST event=%s", ACCOUNT_ASSET_EVENT)
+            try:
+                await self.client.send(98, [ACCOUNT_ASSET_EVENT], False)
+            except Exception as exc:
+                log.warning("ACCOUNT_ASSET_EVENT_REQUEST_FAILED event=%s error=%s", ACCOUNT_ASSET_EVENT, type(exc).__name__)
+
+        self._asset_discovery_request_task = asyncio.create_task(request_account_assets())
+
+        async def discovery_watch():
+            while self.connected:
+                try:
+                    await asyncio.sleep(30)
+                    if self.connected:
+                        await request_account_assets()
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    log.debug("ACCOUNT_ASSET_REFRESH_FAILED error=%s", type(exc).__name__)
+                    await asyncio.sleep(30)
+
+        self._asset_discovery_task = asyncio.create_task(discovery_watch())
+        log.info("ACCOUNT_ASSET_DISCOVERY_WATCH_STARTED event=%s flex_only=%s", ACCOUNT_ASSET_EVENT, FLEX_ONLY)
+
+    # Use the correctly bound implementation; the temporary helper above is
+    # retained only as local construction code and is not exposed.
+    LiveMarketFeed.start = start_with_bound_callback
     LiveMarketFeed.stop = hardened_stop
     LiveMarketFeed._asset_discovery_hardened = True
-    log.info("FLEX_TIME_ASSET_DISCOVERY_HARDENED strict_record_scope=%s", FLEX_ONLY)
+    log.info("ACCOUNT_ASSET_DISCOVERY_HARDENED authoritative_event=%s strict_record_scope=%s", ACCOUNT_ASSET_EVENT, FLEX_ONLY)
