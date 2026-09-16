@@ -46,7 +46,7 @@ def _telegram_report():
         f"📡 Feed • {'CONNECTED' if f.get('connected') else 'NOT CONNECTED'}",
         f"🧠 Brain • {'RUNNING' if x.get('engine_ready') else 'NOT READY'}","",
         "👤 OLYMPTRADE ACCOUNT",f"• Mode • {f.get('account_mode','UNKNOWN')}",f"• Demo • {fmt(snaps.get('demo'))}",f"• Real • {fmt(snaps.get('real'))}",f"• Selected balance • {fmt(f.get('account_balance'))} {f.get('account_currency','')}",f"• Trader ID(s) • {fmt(trader_ids)}",f"• Account ID(s) • {fmt(account_ids)}",f"• Account records • {len(account_records)}","",
-        "🟢 FLEX TIME MARKET","• Flex Time-only enforcement • ON",f"• Discovered • {len(assets)}",f"• Subscribed • {f.get('subscribed',0)}",f"• Assets • {fmt(assets)}","• Forex processing • BLOCKED","",
+        "🟢 FLEX TIME MARKET","• Flex Time-only enforcement • ON",f"• Discovered • {len(assets)}",f"• Subscribed • {f.get('subscribed',0)}",f"• Assets • {fmt(assets)}","• Forex processing • ON","",
         "📊 MARKET ENGINE",f"• Ticks • {f.get('ticks',0)}",f"• Completed 1m candles • {f.get('completed_1m',0)}","• Read-only market data • ON","",
         "🧠 BRAIN / RESULTS",f"• Pending • {b.get('pending',0)}",f"• WIN • {b.get('WIN',0)} | LOSS • {b.get('LOSS',0)} | TIE • {b.get('TIE',0)}",f"• Consecutive losses • {b.get('consecutive_losses',0)}",f"• Daily losses • {b.get('daily_losses',0)}/{b.get('daily_loss_limit',0)}",f"• Last scan • {fmt(b.get('last_scan_assets'))}","",
         "🔒 SAFETY","• Read-only • ON","• Auto-trade • OFF","• Martingale • OFF","• Login/password/browser-cookie extraction • OFF"
@@ -88,6 +88,7 @@ async def _engine_loop():
         engine_ready=False; raise
     except Exception as e:
         engine_ready=False; engine_error=type(e).__name__; log.exception("CANDICE_ENGINE_START_FAILED")
+
 
 def start_engine(): asyncio.run(_engine_loop())
 
