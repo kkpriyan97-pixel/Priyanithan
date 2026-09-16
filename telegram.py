@@ -11,8 +11,6 @@ log = logging.getLogger("candice.telegram")
 class Telegram:
     def __init__(self):
         raw_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        # Accept the normal BotFather token, a token prefixed with `bot`, or an
-        # accidentally pasted Bot API URL without exposing the secret in logs.
         token = raw_token
         if token.startswith("https://api.telegram.org/bot"):
             token = token[len("https://api.telegram.org/bot"):]
@@ -55,14 +53,12 @@ class Telegram:
         text = (message.get("text") or "").strip()
         if not text:
             return
-
         if text.startswith("/start"):
             if self.authorized and self.chat == chat_id:
                 self._send_to(chat_id, "✅ CANDICE AI is connected.\n📡 Live market engine: ON\n🔒 Read-only mode: ON")
             else:
                 self._send_to(chat_id, "👋 CANDICE AI\n\n🔐 Access required.\nUse: /access <your access code>")
             return
-
         if text.startswith("/access"):
             parts = text.split(maxsplit=1)
             supplied = parts[1].strip() if len(parts) == 2 else ""
@@ -79,8 +75,20 @@ class Telegram:
             log.info("TELEGRAM_ACCESS_GRANTED")
             self._send_to(chat_id, "✅ CANDICE AI ACCESS GRANTED\n\n📡 Live market feed: ON\n🧠 Brain: ON\n🔒 Read-only: ON\n🚫 Auto-trade: OFF\n🚫 Martingale: OFF\n\nWaiting for a qualified signal...")
 
+    def _prepare_updates(self):
+        # getUpdates conflicts with an active webhook. Clear the webhook while
+        # preserving pending updates so command polling is deterministic.
+        try:
+            data = self._post("deleteWebhook", {"drop_pending_updates": False}, 10)
+            if data and data.get("ok"):
+                log.info("TELEGRAM_WEBHOOK_CLEARED")
+        except Exception as e:
+            log.warning("TELEGRAM_WEBHOOK_CLEAR_FAILED type=%s", type(e).__name__)
+
     def _poll_loop(self):
         log.info("TELEGRAM_COMMAND_POLL_STARTED interval=2s")
+        self._prepare_updates()
+        conflict_wait = 2
         while not self._stop.is_set():
             if not self.api:
                 self._stop.wait(2)
@@ -91,6 +99,12 @@ class Telegram:
                     params["offset"] = self._offset
                 with self._send_lock:
                     r = requests.get(f"{self.api}/getUpdates", params=params, timeout=5)
+                if r.status_code == 409:
+                    log.warning("TELEGRAM_UPDATES_CONFLICT waiting=%ss", conflict_wait)
+                    self._stop.wait(conflict_wait)
+                    conflict_wait = min(conflict_wait * 2, 30)
+                    continue
+                conflict_wait = 2
                 if not r.ok:
                     log.warning("TELEGRAM_UPDATES_FAILED status=%s", r.status_code)
                     self._stop.wait(2)
