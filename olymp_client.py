@@ -77,23 +77,36 @@ class OlympReadOnlyClient:
        if asyncio.iscoroutine(r):await r
       except Exception:log.exception("callback failed event=%s",e)
   except asyncio.CancelledError:return
- def _capture_accounts(self,rows):
-  records=[];ids=set();traders=set()
-  if isinstance(rows,list):
-   for x in rows:
-    if not isinstance(x,dict):continue
-    group=str(x.get("group","") or "").lower()
-    if group not in {"demo","real"}:continue
-    safe={}
-    for key in ("id","account_id","accountId","uid","uuid","group","currency","amount","amount_real","amount_free","type","name","trader_id","traderId","traderID"):
-     if key in x and x.get(key) is not None and key not in {"amount_real","amount_free"}: safe[key]=x.get(key)
-    for key in ("id","account_id","accountId","uid","uuid"):
-     value=x.get(key)
-     if value is not None and str(value).strip():ids.add(str(value).strip())
-    for key in ("trader_id","traderId","traderID"):
-     value=x.get(key)
-     if value is not None and str(value).strip():traders.add(str(value).strip())
-    records.append(safe)
+ def _rows_from_response(self,response):
+  """Flatten account endpoint response without assuming a fixed wrapper shape."""
+  if isinstance(response,list):return [x for x in response if isinstance(x,dict)]
+  if not isinstance(response,dict):return []
+  for key in ("d","data","items","result","accounts"):
+   value=response.get(key)
+   if isinstance(value,list):return [x for x in value if isinstance(x,dict)]
+   if isinstance(value,dict):
+    rows=self._rows_from_response(value)
+    if rows:return rows
+  return []
+ def _capture_accounts(self,rows,default_group=None):
+  records=list(self.account_records);ids=set(self.account_ids);traders=set(self.trader_ids)
+  existing={(str(r.get("group","")),str(r.get("id",r.get("account_id",r.get("accountId",""))))) for r in records if isinstance(r,dict)}
+  for x in rows if isinstance(rows,list) else []:
+   if not isinstance(x,dict):continue
+   group=str(x.get("group",default_group) or default_group or "").lower()
+   safe={}
+   for key in ("id","account_id","accountId","uid","uuid","group","currency","amount","type","name","trader_id","traderId","traderID"):
+    if key in x and x.get(key) is not None:safe[key]=x.get(key)
+   if group and "group" not in safe:safe["group"]=group
+   rid=str(x.get("id",x.get("account_id",x.get("accountId",x.get("uid",x.get("uuid",""))))) or "").strip()
+   marker=(group,rid)
+   if safe and marker not in existing:records.append(safe);existing.add(marker)
+   for key in ("id","account_id","accountId","uid","uuid"):
+    value=x.get(key)
+    if value is not None and str(value).strip():ids.add(str(value).strip())
+   for key in ("trader_id","traderId","traderID"):
+    value=x.get(key)
+    if value is not None and str(value).strip():traders.add(str(value).strip())
   self.account_records=records;self.account_ids=sorted(ids);self.trader_ids=sorted(traders)
  async def initialize_read_only(self):
   subscriptions=[[220],[110,700,112,140,1038,1037,1039,141,22,26,111],[1054,1076,1301,1097],[141,241],[230,231],[75],[1055],[2223,2301,55,150,152,151,126,602,601],[2076],[126]]
@@ -103,29 +116,30 @@ class OlympReadOnlyClient:
   for _ in range(2):
    try:await self.send(90,{},True,5)
    except Exception as e:log.debug("SESSION_INIT_FAILED error=%s",type(e).__name__)
-  snapshots={}
-  all_rows=[]
+  snapshots={"demo":self.account_snapshots.get("demo"),"real":self.account_snapshots.get("real")}
+  any_success=False
   for group in ("demo","real"):
    try:
-    r=await self.send(1068,[{"group":group}],True,8);rows=(r or {}).get("d") or []
-    if isinstance(rows,list):all_rows.extend(rows)
+    r=await self.send(1068,[{"group":group}],True,8);rows=self._rows_from_response(r);any_success=True
+    self._capture_accounts(rows,group)
     values=[]
     for x in rows:
-     if isinstance(x,dict):
-      try:bal=float(x.get("amount",x.get("amount_real",x.get("amount_free"))))
-      except Exception:bal=None
-      if bal is not None:values.append((bal,str(x.get("currency","") or "")))
-    snapshots[group]=max(values) if values else None
+     try:bal=float(x.get("amount",x.get("amount_real",x.get("amount_free"))))
+     except Exception:bal=None
+     if bal is not None:values.append((bal,str(x.get("currency","") or "")))
+    if values:snapshots[group]=max(values)
    except Exception as e:
-    snapshots[group]=None;log.debug("ACCOUNT_INIT_FAILED group=%s error=%s",group,type(e).__name__)
-  self._capture_accounts(all_rows);self.account_snapshots=snapshots
+    log.debug("ACCOUNT_INIT_FAILED group=%s error=%s",group,type(e).__name__)
+  self.account_snapshots=snapshots
   if snapshots.get("demo") is not None and snapshots.get("real") is not None:self.account_mode="BOTH"
   elif snapshots.get("demo") is not None:self.account_mode="DEMO"
   elif snapshots.get("real") is not None:self.account_mode="REAL"
   else:self.account_mode="UNKNOWN"
-  available=[v for v in snapshots.values() if v is not None]
+  available=[]
+  if snapshots.get("demo") is not None:available.append(snapshots["demo"])
+  if snapshots.get("real") is not None:available.append(snapshots["real"])
   if available:self.account_balance,self.account_currency=available[0]
-  log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s account_ids=%s trader_ids=%s",snapshots.get("demo"),snapshots.get("real"),self.account_mode,len(self.account_ids),len(self.trader_ids))
+  log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s account_ids=%s trader_ids=%s records=%s request_ok=%s",snapshots.get("demo"),snapshots.get("real"),self.account_mode,len(self.account_ids),len(self.trader_ids),len(self.account_records),any_success)
  async def subscribe_ticks(self,asset):await self.send(12,[{"pair":asset}],False);await self.send(280,[{"pair":asset}],False)
  async def request_candles(self,asset,count=80):
   count=max(60,min(int(count),360));return await self.send(10,[{"pair":asset,"size":count,"to":int(time.time()),"solid":True}],True,12)
