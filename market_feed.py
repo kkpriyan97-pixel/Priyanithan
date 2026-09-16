@@ -122,9 +122,16 @@ class LiveMarketFeed:
    if not self.client.running:
     await asyncio.sleep(2);continue
    for asset in list(self.subscribed):
-    try:self._consume_history(asset,await self.client.request_candles(asset,360))
+    try:
+     before=self.last_completed[asset]
+     self._consume_history(asset,await self.client.request_candles(asset,360))
+     history=self.history.get(asset)
+     if history:
+      latest=float(history[-1]["timestamp"])
+      if latest>before:
+       self.last_completed[asset]=latest;self.candles+=1;log.info("CANDLE_COMPLETED asset=%s timestamp=%s source=history_poll",asset,int(latest));self.on_candle(asset,dict(history[-1]))
     except Exception as e:log.debug("HISTORY_REFRESH_FAILED asset=%s error=%s",asset,type(e).__name__)
-   await asyncio.sleep(60)
+   await asyncio.sleep(2)
  def snapshot(self,asset):return list(self.history.get(asset,()))
  def live_price(self,asset):
   cur=self.forming.get(asset)
