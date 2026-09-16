@@ -1,6 +1,15 @@
 """Candice verification overlay: account/candle telemetry and active 15->19 fallback."""
 from __future__ import annotations
-import logging, sys, threading, time
+import logging, os, sys, threading, time
+
+# Candice application clock: Dubai/UAE (UTC+04:00), year-round.
+# Keep broker/API timestamps in UTC internally; use localtime only for user-facing
+# cycle/deadline calculations and logs that rely on Python's local clock.
+os.environ["TZ"] = "Asia/Dubai"
+try:
+    time.tzset()
+except AttributeError:
+    pass
 
 LOG = logging.getLogger("candice.verify")
 LOCK = threading.RLock()
@@ -93,7 +102,7 @@ def _patch_candle_age(mod):
         return min(ages) if ages else 10**9
     mod.candle_age=candle_age
     FRESHNESS_PATCHED=True
-    LOG.info("CANDICE_DELIVERY_FRESHNESS patched at verified startup | receipt + received_at + candle timestamp")
+    LOG.info("CANDICE_TIMEZONE configured=Asia/Dubai UTC+04:00 | CANDICE_DELIVERY_FRESHNESS patched at verified startup | receipt + received_at + candle timestamp")
 
 
 def _install_hooks(mod):
@@ -157,7 +166,7 @@ def _send_fallback(mod,asset,data,tech,slot):
 
 
 def _deadline_loop():
-    LOG.info("15_TO_19_FALLBACK started | preferred=minute15 | hard_scan_end=minute19 | read_only=ON")
+    LOG.info("15_TO_19_FALLBACK started | preferred=minute15 | hard_scan_end=minute19 | read_only=ON | timezone=Asia/Dubai")
     last_minute=None
     while True:
         try:
