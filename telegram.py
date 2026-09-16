@@ -15,7 +15,12 @@ class Telegram:
    try:data=r.json()
    except Exception:data={}
    if not r.ok or not data.get("ok"):
-    log.warning("TELEGRAM_API_FAILED method=%s status=%s error=%s",method,r.status_code,str(data.get("description","")).strip()[:180] or "unknown"); return None
+    desc=str(data.get("description","")).strip()
+    # Telegram returns 400 when an edit produces exactly the same message.
+    # That is an idempotent success for Candice countdown/status updates.
+    if method=="editMessageText" and "message is not modified" in desc.lower():
+     log.info("TELEGRAM_EDIT_NOOP message_id=%s",(payload or {}).get("message_id")); return {"ok":True,"result":{}}
+    log.warning("TELEGRAM_API_FAILED method=%s status=%s error=%s",method,r.status_code,desc[:180] or "unknown"); return None
    return data
   except Exception as e: log.warning("TELEGRAM_API_ERROR method=%s type=%s",method,type(e).__name__); return None
  def verify(self):
