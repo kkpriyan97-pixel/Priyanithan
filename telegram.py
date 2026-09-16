@@ -16,14 +16,49 @@ class Telegram:
         self.api=f"https://api.telegram.org/bot{self.token}" if self.token else ""
         self.webhook_url=(os.getenv("TELEGRAM_WEBHOOK_URL","").strip() or (os.getenv("RENDER_EXTERNAL_URL","").strip().rstrip("/")+"/telegram/webhook" if os.getenv("RENDER_EXTERNAL_URL") else ""))
         self.authorized=bool(self.chat); self._send_lock=threading.Lock(); self._poll_thread=None; self._stop=threading.Event(); self._offset=0
+        self.ready=False
 
-    def _post(self,method,payload,timeout=15):
+    def _post(self,method,payload=None,timeout=15):
         if not self.api:return None
         try:
-            with self._send_lock:r=requests.post(f"{self.api}/{method}",json=payload,timeout=timeout)
-            if not r.ok:log.warning("TELEGRAM_API_FAILED method=%s status=%s",method,r.status_code);return None
-            data=r.json();return data if data.get("ok") else None
-        except Exception as e:log.warning("TELEGRAM_API_ERROR method=%s type=%s",method,type(e).__name__);return None
+            with self._send_lock:r=requests.post(f"{self.api}/{method}",json=payload or {},timeout=timeout)
+            try:data=r.json()
+            except Exception:data={}
+            if not r.ok or not data.get("ok"):
+                desc=str(data.get("description","")).strip()[:180]
+                log.warning("TELEGRAM_API_FAILED method=%s status=%s error=%s",method,r.status_code,desc or "unknown")
+                return None
+            return data
+        except Exception as e:
+            log.warning("TELEGRAM_API_ERROR method=%s type=%s",method,type(e).__name__)
+            return None
+
+    def verify(self):
+        if not self.token:
+            log.warning("TELEGRAM_DISABLED_NO_TOKEN")
+            self.ready=False
+            return False
+        me=self._post("getMe",{},10)
+        if not me:
+            self.ready=False
+            return False
+        result=me.get("result") or {}
+        log.info("TELEGRAM_TOKEN_OK bot_id=%s username=%s",result.get("id"),result.get("username",""))
+        if self.chat:
+            probe=self._post("getChat",{"chat_id":self.chat},10)
+            if probe:
+                log.info("TELEGRAM_CHAT_OK chat_type=%s",(probe.get("result") or {}).get("type",""))
+                self.authorized=True
+            else:
+                log.warning("TELEGRAM_CHAT_NOT_VERIFIED configured_chat_present=true")
+        else:
+            log.warning("TELEGRAM_CHAT_NOT_CONFIGURED use=/access or TELEGRAM_CHAT_ID")
+        info=self._post("getWebhookInfo",{},10)
+        if info:
+            w=info.get("result") or {}
+            log.info("TELEGRAM_WEBHOOK_STATUS url_set=%s pending=%s last_error=%s",bool(w.get("url")),w.get("pending_update_count",0),str(w.get("last_error_message","") or "")[:160])
+        self.ready=True
+        return True
 
     def _send_to(self,chat_id,text):return self._post("sendMessage",{"chat_id":chat_id,"text":text,"disable_web_page_preview":True},15)
 
@@ -55,12 +90,10 @@ class Telegram:
         return True
 
     def start(self):
-        if not self.token:log.warning("TELEGRAM_DISABLED_NO_TOKEN");return
+        if not self.verify():return
         if self.webhook_url and self.configure_webhook():
             log.info("TELEGRAM_COMMAND_WEBHOOK_STARTED")
             return
-        # Local/non-Render fallback. A successful webhook never starts polling,
-        # avoiding Telegram 409 conflicts between consumers.
         if self._poll_thread and self._poll_thread.is_alive():return
         self._stop.clear();self._poll_thread=threading.Thread(target=self._poll_loop,daemon=True,name="telegram-command-poll");self._poll_thread.start()
 
@@ -75,7 +108,8 @@ class Telegram:
                 if r.status_code==409:log.warning("TELEGRAM_UPDATES_CONFLICT waiting=10s");self._stop.wait(10);continue
                 if not r.ok:log.warning("TELEGRAM_UPDATES_FAILED status=%s",r.status_code);self._stop.wait(2);continue
                 data=r.json()
-                if not data.get("ok"):self._stop.wait(2);continue
+                if not data.get("ok"):
+                    log.warning("TELEGRAM_UPDATES_API_FAILED error=%s",str(data.get("description","")).strip()[:180]);self._stop.wait(2);continue
                 for item in data.get("result",[]):
                     self._offset=max(self._offset,int(item.get("update_id",0))+1);self._handle_message(item.get("message") or item.get("channel_post") or {})
             except Exception as e:log.warning("TELEGRAM_POLL_ERROR type=%s",type(e).__name__);self._stop.wait(2)
@@ -83,9 +117,12 @@ class Telegram:
 
     def stop(self):self._stop.set()
     def send(self,text):
-        if not self.token or not self.authorized or not self.chat:return False
+        if not self.token:
+            log.warning("TELEGRAM_SEND_BLOCKED reason=no_token");return False
+        if not self.authorized or not self.chat:
+            log.warning("TELEGRAM_SEND_BLOCKED reason=chat_not_authorized");return False
         data=self._send_to(self.chat,text)
-        if not data:log.warning("TELEGRAM_SEND_FAILED");return False
+        if not data:log.warning("TELEGRAM_SEND_FAILED chat_configured=true");return False
         result=data.get("result") or {};log.info("TELEGRAM_SENT message_id=%s",result.get("message_id"));return {"message_id":result.get("message_id"),"chat_id":result.get("chat",{}).get("id")}
     def edit(self,message_id,text):
         if not self.token or not self.chat or not message_id:return False
