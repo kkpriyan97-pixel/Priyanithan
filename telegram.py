@@ -6,7 +6,7 @@ class Telegram:
   raw=os.getenv("TELEGRAM_BOT_TOKEN","").strip(); token=raw
   if token.startswith("https://api.telegram.org/bot"): token=token[len("https://api.telegram.org/bot"):]
   if token.lower().startswith("bot"): token=token[3:]
-  self.token=token.strip(); self.chat=os.getenv("TELEGRAM_CHAT_ID","").strip(); self.access_code=os.getenv("CANDICE_ACCESS_CODE","").strip(); self.api=f"https://api.telegram.org/bot{self.token}" if self.token else ""; self.webhook_url=(os.getenv("TELEGRAM_WEBHOOK_URL","").strip() or (os.getenv("RENDER_EXTERNAL_URL","").strip().rstrip("/")+"/telegram/webhook" if os.getenv("RENDER_EXTERNAL_URL") else "")); self.authorized=bool(self.chat); self._send_lock=threading.Lock(); self._poll_thread=None; self._stop=threading.Event(); self._offset=0; self.ready=False; self._status_provider=None
+  self.token=token.strip(); self.chat=""; self.access_code=os.getenv("CANDICE_ACCESS_CODE","").strip(); self.api=f"https://api.telegram.org/bot{self.token}" if self.token else ""; self.webhook_url=(os.getenv("TELEGRAM_WEBHOOK_URL","").strip() or (os.getenv("RENDER_EXTERNAL_URL","").strip().rstrip("/")+"/telegram/webhook" if os.getenv("RENDER_EXTERNAL_URL") else "")); self.authorized=False; self._send_lock=threading.Lock(); self._poll_thread=None; self._stop=threading.Event(); self._offset=0; self.ready=False; self._status_provider=None
  def configure_status_provider(self,provider): self._status_provider=provider
  def _post(self,method,payload=None,timeout=15):
   if not self.api:return None
@@ -16,8 +16,6 @@ class Telegram:
    except Exception:data={}
    if not r.ok or not data.get("ok"):
     desc=str(data.get("description","")).strip()
-    # Telegram returns 400 when an edit produces exactly the same message.
-    # That is an idempotent success for Candice countdown/status updates.
     if method=="editMessageText" and "message is not modified" in desc.lower():
      log.info("TELEGRAM_EDIT_NOOP message_id=%s",(payload or {}).get("message_id")); return {"ok":True,"result":{}}
     log.warning("TELEGRAM_API_FAILED method=%s status=%s error=%s",method,r.status_code,desc[:180] or "unknown"); return None
@@ -28,9 +26,6 @@ class Telegram:
   me=self._post("getMe",{},10)
   if not me:self.ready=False;return False
   r=me.get("result") or {}; log.info("TELEGRAM_TOKEN_OK bot_id=%s username=%s",r.get("id"),r.get("username",""))
-  if self.chat:
-   probe=self._post("getChat",{"chat_id":self.chat},10); self.authorized=bool(probe) or self.authorized
-  else: log.warning("TELEGRAM_CHAT_NOT_CONFIGURED use=/access or TELEGRAM_CHAT_ID")
   self.ready=True; return True
  def _send_to(self,chat_id,text): return self._post("sendMessage",{"chat_id":chat_id,"text":text,"disable_web_page_preview":True},15)
  def _report(self):
@@ -52,8 +47,8 @@ class Telegram:
   if cmd=="/access":
    parts=text.split(maxsplit=1); supplied=parts[1].strip() if len(parts)==2 else ""
    if not self.access_code:self._send_to(cid,"⚠️ Access is not configured on the server yet.");return
-   if supplied!=self.access_code:log.warning("TELEGRAM_ACCESS_DENIED chat_id=%s",cid);self._send_to(cid,"❌ Invalid access code.");return
-   self.chat=cid;self.authorized=True;log.info("TELEGRAM_ACCESS_GRANTED chat_id=%s",cid);self._send_to(cid,"✅ ACCESS GRANTED\n\n"+self._report());return
+   if supplied!=self.access_code:log.warning("TELEGRAM_ACCESS_DENIED");self._send_to(cid,"❌ Invalid access code.");return
+   self.chat=cid;self.authorized=True;log.info("TELEGRAM_ACCESS_GRANTED");self._send_to(cid,"✅ ACCESS GRANTED\n\n"+self._report());return
   if cmd in {"/report","/status","/account","/assets"}:
    self._send_to(cid,self._report() if self.authorized and self.chat==cid else "🔐 Access required. Use: /access <your access code>")
  def configure_webhook(self):
@@ -79,20 +74,16 @@ class Telegram:
     data=r.json()
     if data.get("ok"):
      for item in data.get("result",[]):self._offset=max(self._offset,int(item.get("update_id",0))+1);self._handle_message(item.get("message") or item.get("channel_post") or {})
-   except Exception as e:log.warning("TELEGRAM_POLL_ERROR type=%s",type(e).__name__);self._stop.wait(2)
+   except Exception as e: log.warning("TELEGRAM_POLL_ERROR type=%s",type(e).__name__);self._stop.wait(2)
  def stop(self):self._stop.set()
  def send(self,text):
-  if not self.token:
-   log.warning("TELEGRAM_SEND_BLOCKED reason=no_token"); return False
-  if not self.authorized or not self.chat:
-   log.warning("TELEGRAM_SEND_BLOCKED reason=chat_not_authorized"); return False
+  if not self.token: log.warning("TELEGRAM_SEND_BLOCKED reason=no_token"); return False
+  if not self.authorized or not self.chat: log.warning("TELEGRAM_SEND_BLOCKED reason=chat_not_authorized"); return False
   data=self._send_to(self.chat,text)
-  if not data:
-   log.warning("TELEGRAM_SEND_FAILED reason=api_error chat_configured=True"); return False
+  if not data: log.warning("TELEGRAM_SEND_FAILED reason=api_error"); return False
   result=data.get("result") or {}; mid=result.get("message_id")
-  if not mid:
-   log.warning("TELEGRAM_SEND_FAILED reason=no_message_id"); return False
-  log.info("TELEGRAM_SENT message_id=%s chat_id=%s",mid,result.get("chat",{}).get("id"));return {"message_id":mid,"chat_id":result.get("chat",{}).get("id")}
+  if not mid: log.warning("TELEGRAM_SEND_FAILED reason=no_message_id"); return False
+  log.info("TELEGRAM_SENT message_id=%s",mid);return {"message_id":mid,"chat_id":result.get("chat",{}).get("id")}
  def edit(self,message_id,text):
   if not self.token or not self.chat or not message_id:return False
   return bool(self._post("editMessageText",{"chat_id":self.chat,"message_id":message_id,"text":text,"disable_web_page_preview":True},10))
