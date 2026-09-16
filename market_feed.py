@@ -4,19 +4,15 @@ from collections import defaultdict, deque
 from olymp_client import OlympReadOnlyClient
 
 log = logging.getLogger("candice.feed")
-
 def num(v):
     try:return float(v)
     except (TypeError,ValueError):return None
-
 def normalize(x,asset=""):
     if not isinstance(x,dict):return None
-    a=str(x.get("p",x.get("pair",x.get("symbol",asset)))).upper().strip()
-    o=num(x.get("open",x.get("o")));h=num(x.get("high",x.get("h")));l=num(x.get("low",x.get("l")));c=num(x.get("close",x.get("c")));t=num(x.get("t",x.get("timestamp",x.get("time"))))
+    a=str(x.get("p",x.get("pair",x.get("symbol",asset)))).upper().strip();o=num(x.get("open",x.get("o")));h=num(x.get("high",x.get("h")));l=num(x.get("low",x.get("l")));c=num(x.get("close",x.get("c")));t=num(x.get("t",x.get("timestamp",x.get("time"))))
     if None in (o,h,l,c,t) or not a:return None
     if t>1e10:t/=1000
     return a,{"open":o,"high":h,"low":l,"close":c,"timestamp":t}
-
 def walk_candles(x):
     if isinstance(x,list):
         out=[]
@@ -29,50 +25,38 @@ def walk_candles(x):
             r=walk_candles(x[k])
             if r:return r
     return [x]
-
 class LiveMarketFeed:
     def __init__(self,on_candle):
-        self.on_candle=on_candle;self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip();self.client=OlympReadOnlyClient(self.token)
-        self.assets={a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()};self.subscribed=set();self.forming={};self.history=defaultdict(lambda:deque(maxlen=360));self.last_completed=defaultdict(float);self.ticks=0;self.candles=0;self.connected=False;self._reconnect_task=None
+        self.on_candle=on_candle;self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip();self.client=OlympReadOnlyClient(self.token);self.assets={a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()};self.subscribed=set();self.forming={};self.history=defaultdict(lambda:deque(maxlen=360));self.last_completed=defaultdict(float);self.ticks=0;self.candles=0;self.connected=False;self._reconnect_task=None;self._poll_task=None
     async def start(self):
         if not self.token:raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is required")
         self.client.on(1,self._tick);self.client.on(1003,self._candle_response);self.client.on(55,self._account);self.client.on(72,self._assets)
-        await self._connect_and_seed()
-        self._reconnect_task=asyncio.create_task(self._connection_watch())
-        log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY")
+        await self._connect_and_seed();self._reconnect_task=asyncio.create_task(self._connection_watch());self._poll_task=asyncio.create_task(self._poll_loop());log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY")
     async def stop(self):
         self.connected=False
-        if self._reconnect_task and not self._reconnect_task.done():self._reconnect_task.cancel()
+        for task in (self._reconnect_task,self._poll_task):
+            if task and not task.done():task.cancel()
         await self.client.close()
     async def _connect_and_seed(self):
-        await self.client.connect();self.connected=True
-        await self.client.initialize_read_only()
-        self.subscribed.clear()
-        await self._discover_and_seed()
+        await self.client.connect();self.connected=True;await self.client.initialize_read_only();self.subscribed.clear();await self._discover_and_seed()
     async def _connection_watch(self):
         delay=2
         while self.connected:
             if not self.client.running:
-                log.warning("OLYMP_RECONNECT_START delay=%ss",delay)
-                self.subscribed.clear()
+                log.warning("OLYMP_RECONNECT_START delay=%ss",delay);self.subscribed.clear()
                 try:
                     await asyncio.sleep(delay)
                     if not self.connected:break
-                    await self._connect_and_seed()
-                    log.info("OLYMP_RECONNECTED assets=%s subscribed=%s",len(self.assets),len(self.subscribed))
-                    delay=2
+                    await self._connect_and_seed();log.info("OLYMP_RECONNECTED assets=%s subscribed=%s",len(self.assets),len(self.subscribed));delay=2
                 except asyncio.CancelledError:return
                 except Exception as e:
-                    log.warning("OLYMP_RECONNECT_FAILED error=%s",type(e).__name__)
-                    delay=min(delay*2,30)
-            else:
-                delay=2
+                    log.warning("OLYMP_RECONNECT_FAILED error=%s",type(e).__name__);delay=min(delay*2,30)
+            else:delay=2
             await asyncio.sleep(1)
     async def _subscribe_asset(self,asset):
         if asset in self.subscribed:return
         try:
-            await self.client.subscribe_ticks(asset);response=await self.client.request_candles(asset,360);self._consume_history(asset,response);self.subscribed.add(asset);self.assets.add(asset)
-            log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
+            await self.client.subscribe_ticks(asset);response=await self.client.request_candles(asset,360);self._consume_history(asset,response);self.subscribed.add(asset);self.assets.add(asset);log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
         except Exception as e:log.warning("ASSET_SUBSCRIBE_FAILED asset=%s error=%s",asset,type(e).__name__)
     async def _discover_and_seed(self):
         if not self.assets:self.assets.add("ASIA_X")
@@ -105,8 +89,7 @@ class LiveMarketFeed:
                     else:visit(v)
             elif isinstance(x,list):
                 for z in x:visit(z)
-        visit(msg.get("d") if isinstance(msg,dict) else None)
-        new=found-self.assets
+        visit(msg.get("d") if isinstance(msg,dict) else None);new=found-self.assets
         for asset in new:await self._subscribe_asset(asset)
         if found:self.assets.update(found);log.info("ASSET_DISCOVERY found=%s total=%s",len(found),len(self.assets))
     def _put_candle(self,asset,candle,notify=False):
@@ -135,8 +118,7 @@ class LiveMarketFeed:
             if cur is None or cur["timestamp"]!=bucket:
                 if cur and cur["timestamp"]>self.last_completed[asset]:self._put_candle(asset,cur,notify=True)
                 self.forming[asset]={"open":price,"high":price,"low":price,"close":price,"timestamp":float(bucket)}
-            else:
-                cur["high"]=max(cur["high"],price);cur["low"]=min(cur["low"],price);cur["close"]=price
+            else:cur["high"]=max(cur["high"],price);cur["low"]=min(cur["low"],price);cur["close"]=price
     async def _poll_loop(self):
         while self.connected:
             if not self.client.running:
@@ -151,5 +133,4 @@ class LiveMarketFeed:
         if cur:return float(cur["close"])
         history=self.history.get(asset)
         return float(history[-1]["close"]) if history else None
-    def status(self):
-        return {"connected":self.connected and self.client.running,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency}
+    def status(self):return {"connected":self.connected and self.client.running,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency}
