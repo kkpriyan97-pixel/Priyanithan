@@ -41,25 +41,18 @@ def _has_flex_marker(node):
     if not isinstance(node, dict): return False
     for key, value in node.items():
         k = str(key).lower()
-        if k in {"mode", "trading_mode", "trade_mode", "type", "market_type", "market", "name"} and _is_flex_mode(value):
-            return True
+        if k in {"mode", "trading_mode", "trade_mode", "type", "market_type", "market", "name"} and _is_flex_mode(value): return True
         if k in {"modes", "trading_modes", "trade_modes", "available_modes", "markets", "market_modes", "types"}:
             vals = value if isinstance(value, list) else [value]
             for item in vals:
                 if isinstance(item, str) and _is_flex_mode(item): return True
                 if isinstance(item, dict) and _has_flex_marker(item): return True
         if k in {"flex", "is_flex", "flex_enabled", "flex_available", "available_flex", "flex_time", "is_flex_time", "flextime"}:
-            if value is True or (isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "enabled", "available", "flex", "flex time", "flex_time", "flextime"}):
-                return True
+            if value is True or (isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "enabled", "available", "flex", "flex time", "flex_time", "flextime"}): return True
     return _has_profitability(node)
 
 
 def _extract(node, found, stats=None):
-    """Extract symbols from one authoritative account asset-list payload.
-
-    Qualification is record-scoped. No Flex/profitability marker is inherited
-    from an ancestor into unrelated nested records.
-    """
     if stats is None: stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
     if isinstance(node, dict):
         stats["dicts"] += 1
@@ -84,14 +77,17 @@ def _extract(node, found, stats=None):
                             break
                 elif node_flex:
                     c = _candidate(item)
-                    if c:
-                        if c not in found:
-                            found.add(c); stats["candidates"] += 1
+                    if c: found.add(c)
         for value in node.values(): _extract(value, found, stats)
     elif isinstance(node, list):
         stats["lists"] += 1
         for item in node: _extract(item, found, stats)
     return stats
+
+
+def _payload(response):
+    if not isinstance(response, dict): return None
+    return response.get("d", response.get("data", response.get("result", response)))
 
 
 def apply():
@@ -102,33 +98,47 @@ def apply():
 
     async def hardened_start(self):
         if FLEX_ONLY:
-            # Fail closed: do not retain assets from a previous process.
             self.assets.clear(); self.subscribed.clear()
 
-        async def account_assets(msg):
+        async def accept_account_asset_message(msg):
             if not isinstance(msg, dict) or msg.get("e") != ACCOUNT_ASSET_EVENT: return
+            await apply_authoritative_payload(msg.get("d"), "push")
+
+        async def apply_authoritative_payload(payload, source):
             found = set(); stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
-            payload = msg.get("d")
             _extract(payload, found, stats)
             if not found:
                 samples = list(payload.keys())[:30] if isinstance(payload, dict) else []
-                log.warning("ACCOUNT_ASSET_DISCOVERY_EMPTY event=%s dicts=%s lists=%s qualified_nodes=%s candidates=%s key_samples=%s", ACCOUNT_ASSET_EVENT, stats["dicts"], stats["lists"], stats["qualified_nodes"], stats["candidates"], samples)
-                return
-            new = found - self.assets
-            if new:
-                self.assets.update(new)
-                log.info("ACCOUNT_ASSET_DISCOVERY event=%s found=%s new=%s total=%s", ACCOUNT_ASSET_EVENT, len(found), len(new), len(self.assets))
-                for asset in sorted(new):
-                    if asset not in self.subscribed: self.schedule_asset(asset)
+                log.warning("ACCOUNT_ASSET_DISCOVERY_EMPTY event=%s source=%s dicts=%s lists=%s qualified_nodes=%s candidates=%s key_samples=%s", ACCOUNT_ASSET_EVENT, source, stats["dicts"], stats["lists"], stats["qualified_nodes"], stats["candidates"], samples)
+                return False
+            old = set(self.assets)
+            # Replace, never merge. This prevents stale/non-account symbols surviving a refresh.
+            self.assets.intersection_update(found)
+            self.assets.update(found)
+            removed = old - found
+            if removed:
+                self.subscribed.difference_update(removed)
+                for asset in removed:
+                    task = self._asset_tasks.pop(asset, None)
+                    if task and not task.done(): task.cancel()
+            new = found - old
+            log.info("ACCOUNT_ASSET_DISCOVERY event=%s source=%s found=%s new=%s removed=%s total=%s", ACCOUNT_ASSET_EVENT, source, len(found), len(new), len(removed), len(self.assets))
+            for asset in sorted(new):
+                if asset not in self.subscribed: self.schedule_asset(asset)
+            return True
 
-        self.client.on("*", account_assets)
+        self.client.on("*", accept_account_asset_message)
         await original_start(self)
 
         async def request_account_assets():
             if not self.client.running: return
-            log.info("ACCOUNT_ASSET_EVENT_REQUEST event=%s", ACCOUNT_ASSET_EVENT)
+            log.info("ACCOUNT_ASSET_EVENT_REQUEST event=%s wait_response=true", ACCOUNT_ASSET_EVENT)
             try:
-                await self.client.send(98, [ACCOUNT_ASSET_EVENT], False)
+                response = await self.client.send(98, [ACCOUNT_ASSET_EVENT], True, 10)
+                payload = _payload(response)
+                ok = await apply_authoritative_payload(payload, "request_response")
+                if not ok:
+                    log.warning("ACCOUNT_ASSET_REQUEST_NO_QUALIFIED_LIST event=%s", ACCOUNT_ASSET_EVENT)
             except Exception as exc:
                 log.warning("ACCOUNT_ASSET_EVENT_REQUEST_FAILED event=%s error=%s", ACCOUNT_ASSET_EVENT, type(exc).__name__)
 
@@ -156,4 +166,4 @@ def apply():
     LiveMarketFeed.start = hardened_start
     LiveMarketFeed.stop = hardened_stop
     LiveMarketFeed._asset_discovery_hardened = True
-    log.info("ACCOUNT_ASSET_DISCOVERY_HARDENED authoritative_event=%s strict_record_scope=%s", ACCOUNT_ASSET_EVENT, FLEX_ONLY)
+    log.info("ACCOUNT_ASSET_DISCOVERY_HARDENED authoritative_event=%s strict_record_scope=%s request_response=true", ACCOUNT_ASSET_EVENT, FLEX_ONLY)
