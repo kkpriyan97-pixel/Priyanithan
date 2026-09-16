@@ -10,6 +10,7 @@ from flask import Flask, jsonify
 
 from brain import CandiceBrain
 import brain_fix
+import asset_discovery_fix
 from market_feed import LiveMarketFeed
 from telegram import Telegram
 
@@ -28,8 +29,9 @@ brain = None
 engine_ready = False
 engine_error = None
 
-# Apply the final runtime fixes before the Brain instance is created.
+# Apply runtime fixes before the engine is created.
 brain_fix.apply()
+asset_discovery_fix.apply()
 
 
 async def _engine_loop():
