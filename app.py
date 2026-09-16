@@ -9,6 +9,7 @@ import time
 from flask import Flask, jsonify
 
 from brain import CandiceBrain
+import brain_fix
 from market_feed import LiveMarketFeed
 from telegram import Telegram
 
@@ -26,6 +27,9 @@ feed = None
 brain = None
 engine_ready = False
 engine_error = None
+
+# Apply the final runtime fixes before the Brain instance is created.
+brain_fix.apply()
 
 
 async def _engine_loop():
@@ -45,8 +49,6 @@ async def _engine_loop():
         log.info("CANDICE_ENGINE_STARTED | Dubai UTC+04:00 | READ_ONLY | AUTO_TRADE=OFF | MARTINGALE=OFF")
         threading.Thread(target=brain.run, daemon=True, name="candice-brain").start()
         log.info("CANDICE_BRAIN_STARTED")
-
-        # Keep the asyncio loop alive because the live feed owns tasks on this loop.
         await asyncio.Event().wait()
     except asyncio.CancelledError:
         engine_ready = False
