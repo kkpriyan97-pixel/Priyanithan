@@ -38,6 +38,7 @@ async def _engine_loop():
         brain = brain_ref
 
         log.info("CANDICE_STARTING | timezone=Asia/Dubai | READ_ONLY")
+        telegram.start()
         await feed.start()
         engine_ready = True
         engine_error = None
@@ -45,10 +46,7 @@ async def _engine_loop():
         threading.Thread(target=brain.run, daemon=True, name="candice-brain").start()
         log.info("CANDICE_BRAIN_STARTED")
 
-        # CRITICAL: feed.start() creates WebSocket reader/dispatcher, reconnect,
-        # and history-poll tasks on this asyncio loop.  Keep this loop alive;
-        # asyncio.run() would otherwise cancel every task as soon as runner
-        # returns, which silently stopped live candles after startup.
+        # Keep the asyncio loop alive because the live feed owns tasks on this loop.
         await asyncio.Event().wait()
     except asyncio.CancelledError:
         engine_ready = False
