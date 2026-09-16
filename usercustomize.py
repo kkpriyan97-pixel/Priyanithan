@@ -7,6 +7,7 @@ LOCK = threading.RLock()
 ACCOUNT = {"mode":"UNKNOWN","balance":None,"currency":"","updated":0.0}
 HOOKED = False
 WRAPPED = False
+FRESHNESS_PATCHED = False
 
 try:
     import freshness_patch
@@ -68,10 +69,39 @@ def _candle_text(asset,data):
             f"   O {_fmt(c.get('open'))}  H {_fmt(c.get('high'))}  L {_fmt(c.get('low'))}  C {_fmt(c.get('close'))}")
 
 
+def _patch_candle_age(mod):
+    global FRESHNESS_PATCHED
+    if FRESHNESS_PATCHED: return
+    def normalize_ts(value):
+        try: ts=float(value)
+        except Exception: return None
+        if ts>1e11: ts/=1000.0
+        return ts if 0<ts<=time.time()+5 else None
+    def candle_age(c,asset=None):
+        now=time.time(); ages=[]
+        if asset:
+            try:
+                with mod.LOCK: rec=mod.LIVE_RECEIPTS.get(asset)
+                if rec:
+                    ts=normalize_ts(rec[1])
+                    if ts is not None: ages.append(max(0.0,now-ts))
+            except Exception: pass
+        if isinstance(c,dict):
+            for key in ("received_at","timestamp","t","time"):
+                ts=normalize_ts(c.get(key))
+                if ts is not None: ages.append(max(0.0,now-ts))
+        return min(ages) if ages else 10**9
+    mod.candle_age=candle_age
+    FRESHNESS_PATCHED=True
+    LOG.info("CANDICE_DELIVERY_FRESHNESS patched at verified startup | receipt + received_at + candle timestamp")
+
+
 def _install_hooks(mod):
     global HOOKED, WRAPPED
     feed=getattr(mod,"live_feed",None)
     if not feed: return False
+    sc=sys.modules.get("sitecustomize")
+    if sc is not None: _patch_candle_age(sc)
     client=getattr(feed,"client",None)
     if client is not None and not HOOKED:
         client.register_callback(55,_balance_cb)
