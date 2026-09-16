@@ -36,7 +36,7 @@ class Telegram:
    if isinstance(v,(list,tuple)) and len(v)>=2:return f"{v[0]} {v[1]}"
    return str(v) if v is not None else "NOT AVAILABLE"
   tid=f.get("trader_id") or f.get("traders_id") or "NOT AVAILABLE"
-  return ("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • FULL STATUS\n━━━━━━━━━━━━━━━━━━━━\n" f"⚙️ ENGINE • {str(x.get('candice','unknown')).upper()}\n" f"👤 ACCOUNT MODE • {f.get('account_mode','UNKNOWN')}\n" f"🆔 TRADER ID • {tid}\n" f"💰 DEMO • {money(a.get('demo'))}\n" f"💰 REAL • {money(a.get('real'))}\n\n" f"🟢 FLEX ONLY • {f.get('flex_only',False)}\n" f"📊 FLEX ASSETS DISCOVERED • {len(assets)}\n" f"📡 SUBSCRIBED • {f.get('subscribed',0)}\n" f"📈 TICKS • {f.get('ticks',0)}\n" f"🕐 COMPLETED 1M • {f.get('completed_1m',0)}\n" f"🧠 BRAIN • {'ON' if x.get('engine_ready') else 'STARTING'}\n" f"⏳ PENDING • {b.get('pending',0)}\n" f"🏆 WIN • {b.get('WIN',0)}\n❌ LOSS • {b.get('LOSS',0)}\n➖ TIE • {b.get('TIE',0)}\n" f"🔴 LOSS STREAK • {b.get('consecutive_losses',0)}\n📉 DAILY LOSSES • {b.get('daily_losses',0)}/{b.get('daily_loss_limit',0)}\n" f"🔎 LAST SCAN • {', '.join(scan[:30]) if scan else 'NONE'}\n\n🔒 READ-ONLY • ON\n🚫 AUTO-TRADE • OFF\n🚫 MARTINGALE • OFF\n🚫 LOGIN/CREDENTIAL EXTRACTION • OFF\n━━━━━━━━━━━━━━━━━━━━")
+  return ("━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • FULL STATUS\n━━━━━━━━━━━━━━━━━━━━\n" f"⚙️ ENGINE • {str(x.get('candice','unknown')).upper()}\n" f"👤 ACCOUNT MODE • {f.get('account_mode','UNKNOWN')}\n" f"🆔 TRADER ID • {tid}\n" f"💰 DEMO • {money(a.get('demo'))}\n" f"💰 REAL • {money(a.get('real'))}\n\n" f"🟢 FLEX ONLY • {f.get('flex_only',False)}\n" f"📊 FLEX ASSETS DISCOVERED • {len(assets)}\n" f"📡 SUBSCRIBED • {f.get('subscribed',0)}\n" f"📈 TICKS • {f.get('ticks',0)}\n" f"🕐 COMPLETED 1M • {f.get('completed_1m',0)}\n" f"🧠 BRAIN • {'ON' if x.get('engine_ready') else 'STARTING'}\n" f"⏳ PENDING • {b.get('pending',0)}\n" f"🏆 WIN • {b.get('WIN',0)}\n❌ LOSS • {b.get('LOSS',0)}\n➖ TIE • {b.get('TIE',0)}\n" f"🔴 LOSS STREAK • {b.get('consecutive_losses',0)}\n📉 DAILY LOSSES • {b.get('daily_losses',0)}/{b.get('daily_loss_limit',0)}\n" f"🔎 LAST SCAN • {', '.join(scan[:30]) if scan else 'NONE'}\n\n🔒 READ-ONLY • ON\n🚫 AUTO-TRADE • OFF\n🚫 MARTINGALE • OFF\n━━━━━━━━━━━━━━━━━━━━")
  def _handle_message(self,message):
   chat=message.get("chat") or {}; cid=chat.get("id")
   if cid is None:return
@@ -47,8 +47,8 @@ class Telegram:
   if cmd=="/access":
    parts=text.split(maxsplit=1); supplied=parts[1].strip() if len(parts)==2 else ""
    if not self.access_code:self._send_to(cid,"⚠️ Access is not configured on the server yet.");return
-   if supplied!=self.access_code:log.warning("TELEGRAM_ACCESS_DENIED");self._send_to(cid,"❌ Invalid access code.");return
-   self.chat=cid;self.authorized=True;log.info("TELEGRAM_ACCESS_GRANTED");self._send_to(cid,"✅ ACCESS GRANTED\n\n"+self._report());return
+   if supplied!=self.access_code:log.warning("TELEGRAM_ACCESS_DENIED chat_id=%s",cid);self._send_to(cid,"❌ Invalid access code.");return
+   self.chat=cid;self.authorized=True;log.info("TELEGRAM_ACCESS_GRANTED chat_id=%s",cid);self._send_to(cid,"✅ ACCESS GRANTED\n\n"+self._report());return
   if cmd in {"/report","/status","/account","/assets"}:
    self._send_to(cid,self._report() if self.authorized and self.chat==cid else "🔐 Access required. Use: /access <your access code>")
  def configure_webhook(self):
@@ -77,10 +77,17 @@ class Telegram:
    except Exception as e:log.warning("TELEGRAM_POLL_ERROR type=%s",type(e).__name__);self._stop.wait(2)
  def stop(self):self._stop.set()
  def send(self,text):
-  if not self.token or not self.authorized or not self.chat:return False
+  if not self.token:
+   log.warning("TELEGRAM_SEND_BLOCKED reason=no_token"); return False
+  if not self.authorized or not self.chat:
+   log.warning("TELEGRAM_SEND_BLOCKED reason=chat_not_authorized"); return False
   data=self._send_to(self.chat,text)
-  if not data:return False
-  result=data.get("result") or {};log.info("TELEGRAM_SENT message_id=%s",result.get("message_id"));return {"message_id":result.get("message_id"),"chat_id":result.get("chat",{}).get("id")}
+  if not data:
+   log.warning("TELEGRAM_SEND_FAILED reason=api_error chat_configured=True"); return False
+  result=data.get("result") or {}; mid=result.get("message_id")
+  if not mid:
+   log.warning("TELEGRAM_SEND_FAILED reason=no_message_id"); return False
+  log.info("TELEGRAM_SENT message_id=%s chat_id=%s",mid,result.get("chat",{}).get("id"));return {"message_id":mid,"chat_id":result.get("chat",{}).get("id")}
  def edit(self,message_id,text):
   if not self.token or not self.chat or not message_id:return False
   return bool(self._post("editMessageText",{"chat_id":self.chat,"message_id":message_id,"text":text,"disable_web_page_preview":True},10))
