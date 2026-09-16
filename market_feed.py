@@ -65,7 +65,7 @@ class LiveMarketFeed:
                     if not self.connected or self.client.auth_invalid: break
                     await self._connect_and_seed(); log.info("OLYMP_RECONNECTED assets=%s subscribed=%s",len(self.assets),len(self.subscribed)); delay=2
                 except asyncio.CancelledError:return
-                except Exception as e: log.warning("OLYMP_RECONNECT_FAILED error=%s",type(e).__name__); delay=min(delay*2,30)
+                except Exception as e:log.warning("OLYMP_RECONNECT_FAILED error=%s",type(e).__name__); delay=min(delay*2,30)
             else: delay=2
             await asyncio.sleep(1)
     async def _subscribe_asset(self,asset):
@@ -93,9 +93,15 @@ class LiveMarketFeed:
             item=(balance,str(x.get("currency","") or ""))
             if group=="demo":demos.append(item)
             elif group=="real":reals.append(item)
-        if demos and reals:self.client.account_mode="AMBIGUOUS";self.client.account_balance=None;self.client.account_currency=""
-        elif demos:self.client.account_mode="DEMO";self.client.account_balance,self.client.account_currency=max(demos)
-        elif reals:self.client.account_mode="REAL";self.client.account_balance,self.client.account_currency=max(reals)
+        self.client.account_snapshots={"demo":max(demos) if demos else None,"real":max(reals) if reals else None}
+        if demos and reals:self.client.account_mode="BOTH"
+        elif demos:self.client.account_mode="DEMO"
+        elif reals:self.client.account_mode="REAL"
+        else:self.client.account_mode="UNKNOWN"
+        selected=(reals or demos)
+        if selected:
+            self.client.account_balance,self.client.account_currency=max(selected)
+        log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s",self.client.account_snapshots.get("demo"),self.client.account_snapshots.get("real"),self.client.account_mode)
     def _put_candle(self,asset,candle,notify=False):
         bucket=int(float(candle["timestamp"])//60)*60; candle=dict(candle); candle["timestamp"]=float(bucket); old={x["timestamp"]:x for x in self.history[asset]}; old[bucket]=candle; self.history[asset]=deque(sorted(old.values(),key=lambda z:z["timestamp"])[-360:],maxlen=360)
         if notify and bucket>self.last_completed[asset]:
@@ -151,7 +157,7 @@ class LiveMarketFeed:
                     except Exception as e:log.warning("HISTORY_REFRESH_FAILED asset=%s error=%s",asset,type(e).__name__)
                 now=time.time()
                 if now-self._last_poll_log>=30:
-                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s",self.connected,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed))
+                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s account_mode=%s",self.connected,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed),self.client.account_mode)
                 await asyncio.sleep(2)
             except asyncio.CancelledError:return
             except Exception as e:log.exception("POLL_LOOP_ERROR error=%s",type(e).__name__);await asyncio.sleep(2)
@@ -162,4 +168,4 @@ class LiveMarketFeed:
         history=self.history.get(asset)
         return float(history[-1]["close"]) if history else None
     def status(self):
-        return {"connected":self.connected and self.client.running,"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency}
+        return {"connected":self.connected and self.client.running,"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency,"account_snapshots":getattr(self.client,"account_snapshots",{"demo":None,"real":None})}
