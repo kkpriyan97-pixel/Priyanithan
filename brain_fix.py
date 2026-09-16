@@ -2,7 +2,6 @@ from __future__ import annotations
 import math
 import time
 from datetime import datetime, timezone, timedelta
-import threading
 from brain import CandiceBrain
 
 UAE = timezone(timedelta(hours=4))
@@ -57,7 +56,8 @@ def analyze(self, asset, completed, live_price):
         return None
     dname = 'UP' if direction > 0 else 'DOWN'
     ranked = []
-    for strategy in self.STRATEGIES if hasattr(self, 'STRATEGIES') else ('Trend Following','Breakout','Pullback','Support / Resistance','Candlestick','Momentum','Mean Reversion','Reversal','Multi-Timeframe','Volatility','Market Structure','Price Action'):
+    strategies = getattr(self, 'STRATEGIES', ('Trend Following','Breakout','Pullback','Support / Resistance','Candlestick','Momentum','Mean Reversion','Reversal','Multi-Timeframe','Volatility','Market Structure','Price Action'))
+    for strategy in strategies:
         fit = 3 if any(v.startswith(strategy + ' ' + dname) for v in votes) else 0
         for expiry in (1,2,3,4,5,10,15):
             key = f'{asset}|{dname}|{pat}|{strategy}|{t15}|{expiry}'
@@ -103,6 +103,7 @@ def countdown(self, s, target):
 
 def result(self, s):
     if s.get('result') or time.time() < s['expiry_start']: return True
+    # Keep checking briefly for the first usable live exit price.
     deadline = s['expiry_start'] + 30
     price = None
     while time.time() <= deadline:
@@ -111,7 +112,8 @@ def result(self, s):
         if price is not None: break
         time.sleep(1)
     if price is None:
-        self.send(f"🎯 CANDICE AI RESULT\n📊 ASSET: {s['asset']}\n⚠️ RESULT DELAYED: LIVE EXIT PRICE UNAVAILABLE\n🔄 RETRYING")
+        try: self.send(f"🎯 CANDICE AI RESULT\n📊 ASSET: {s['asset']}\n⚠️ RESULT DELAYED: LIVE EXIT PRICE UNAVAILABLE\n🔄 SYSTEM WILL RETRY")
+        except Exception: pass
         return False
     diff = float(price) - float(s['entry'])
     tol = max(abs(float(s['entry']))*1e-8, 1e-10)
@@ -126,12 +128,31 @@ def result(self, s):
            f"⏱️ EXPIRY: {s['expiry']} MIN\n{icon} RESULT: {outcome}\n\n🕒 SIGNAL: {st.strftime('%H:%M:%S')} UAE\n🏁 RESULT TIME: {rt.strftime('%H:%M:%S')} UAE\n"
            f"🧠 STRATEGY: {s['strategy']}\n📈 15M TREND: {s['trend_15']}\n📚 DAILY LOSSES: {self.daily_losses}/{self.max_daily_losses}\n📚 CONSECUTIVE LOSSES: {self.consecutive_losses}/3\n"
            '🔐 DEMO / READ-ONLY\n━━━━━━━━━━━━━━━━━━━━')
+    delivered = False
     for attempt in range(5):
         try:
-            if self.send(msg): break
+            if self.send(msg): delivered = True; break
         except Exception: pass
         time.sleep(2)
+    if not delivered:
+        return False
     return True
+
+
+def result_worker(self, s):
+    # Never abandon a result because the feed is temporarily unavailable.
+    wait = max(0, float(s['expiry_start']) - time.time())
+    if wait: time.sleep(wait)
+    attempts = 0
+    while not s.get('result'):
+        attempts += 1
+        try:
+            if self._result(s):
+                return
+        except Exception as e:
+            log = getattr(__import__('logging').getLogger('candice.brain'), 'warning', None)
+            if log: log('RESULT_RETRY_FAILED attempt=%s error=%s', attempts, type(e).__name__)
+        time.sleep(min(5, 1 + attempts * 0.25))
 
 
 def apply():
@@ -139,3 +160,4 @@ def apply():
     CandiceBrain._message = message
     CandiceBrain._countdown = countdown
     CandiceBrain._result = result
+    CandiceBrain._result_worker = result_worker
