@@ -14,7 +14,7 @@ def message(event,data,request_id=None):
 class OlympReadOnlyClient:
  """Minimal read-only WebSocket client. No order/trade methods exist."""
  def __init__(self,token):
-  self.token=token;self.ws=None;self.running=False;self.auth_invalid=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.assets=set();self._reader_task=None;self._dispatcher_task=None
+  self.token=token;self.ws=None;self.running=False;self.auth_invalid=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.account_snapshots={"demo":None,"real":None};self.assets=set();self._reader_task=None;self._dispatcher_task=None
  def on(self,event,callback):self.callbacks[event].append(callback)
  async def connect(self):
   if self.auth_invalid:raise ConnectionError("OlympTrade access token rejected")
@@ -85,18 +85,28 @@ class OlympReadOnlyClient:
   for _ in range(2):
    try:await self.send(90,{},True,5)
    except Exception as e:log.debug("SESSION_INIT_FAILED error=%s",type(e).__name__)
+  snapshots={}
   for group in ("demo","real"):
    try:
     r=await self.send(1068,[{"group":group}],True,8);rows=(r or {}).get("d") or []
-    if rows:
-     bal=None
-     for x in rows:
-      if isinstance(x,dict):
-       try:bal=float(x.get("amount",x.get("amount_real",x.get("amount_free"))))
-       except Exception:bal=None
-       if bal is not None:break
-     self.account_mode=group.upper();self.account_balance=bal;self.account_currency=str(rows[0].get("currency","") or "");log.info("ACCOUNT_MODE_DETECTED mode=%s balance=%s",self.account_mode,self.account_balance);break
-   except Exception as e:log.debug("ACCOUNT_INIT_FAILED group=%s error=%s",group,type(e).__name__)
+    values=[]
+    for x in rows:
+     if isinstance(x,dict):
+      try:bal=float(x.get("amount",x.get("amount_real",x.get("amount_free"))))
+      except Exception:bal=None
+      if bal is not None:values.append((bal,str(x.get("currency","") or "")))
+    snapshots[group]=max(values) if values else None
+   except Exception as e:
+    snapshots[group]=None;log.debug("ACCOUNT_INIT_FAILED group=%s error=%s",group,type(e).__name__)
+  self.account_snapshots=snapshots
+  available=[v for v in snapshots.values() if v]
+  if snapshots.get("demo") and snapshots.get("real"):self.account_mode="BOTH"
+  elif snapshots.get("demo"):self.account_mode="DEMO"
+  elif snapshots.get("real"):self.account_mode="REAL"
+  else:self.account_mode="UNKNOWN"
+  if available:
+   self.account_balance,self.account_currency=available[0]
+  log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s",snapshots.get("demo"),snapshots.get("real"),self.account_mode)
  async def subscribe_ticks(self,asset):await self.send(12,[{"pair":asset}],False);await self.send(280,[{"pair":asset}],False)
  async def request_candles(self,asset,count=80):
   count=max(60,min(int(count),360));return await self.send(10,[{"pair":asset,"size":count,"to":int(time.time()),"solid":True}],True,12)
