@@ -20,52 +20,74 @@ class OlympReadOnlyClient:
     """Minimal read-only WebSocket client. No order/trade methods exist."""
     def __init__(self,token):
         self.token=token;self.ws=None;self.running=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={}
-        self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.assets=set()
+        self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.assets=set();self._reader_task=None;self._dispatcher_task=None
     def on(self,event,callback):self.callbacks[event].append(callback)
     async def connect(self):
+        if self.running and self.ws:
+            return
         headers={"Origin":ORIGIN,"User-Agent":UA,"Cookie":f"access_token={self.token}"}
         try:
-            self.ws=await websockets.connect(URI,extra_headers=headers,ping_interval=None,open_timeout=10)
+            self.ws=await websockets.connect(URI,extra_headers=headers,ping_interval=20,ping_timeout=10,open_timeout=10,close_timeout=5)
         except TypeError:
-            self.ws=await websockets.connect(URI,additional_headers=headers,ping_interval=None,open_timeout=10)
-        self.running=True;asyncio.create_task(self._reader());asyncio.create_task(self._dispatcher());log.info("OLYMP_CONNECTED")
+            self.ws=await websockets.connect(URI,additional_headers=headers,ping_interval=20,ping_timeout=10,open_timeout=10,close_timeout=5)
+        self.queue=asyncio.Queue();self.running=True
+        self._reader_task=asyncio.create_task(self._reader())
+        self._dispatcher_task=asyncio.create_task(self._dispatcher())
+        log.info("OLYMP_CONNECTED")
     async def close(self):
         self.running=False
-        if self.ws:
-            try:await self.ws.close()
+        ws=self.ws;self.ws=None
+        if ws:
+            try:await ws.close()
             except Exception:pass
-            self.ws=None
+        for task in (self._reader_task,self._dispatcher_task):
+            if task and not task.done():task.cancel()
+        self._reader_task=None;self._dispatcher_task=None
+        for fut in list(self.pending.values()):
+            if not fut.done():fut.set_exception(ConnectionError("OlympTrade WebSocket closed"))
+        self.pending.clear()
     async def send(self,event,data,wait=False,timeout=10):
         if not self.ws or not self.running:raise ConnectionError("OlympTrade WebSocket is not connected")
         rid=uid() if wait else None;fut=None
         if rid:
             fut=asyncio.get_running_loop().create_future();self.pending[rid]=fut
-        await self.ws.send(message(event,data,rid))
-        if not fut:return None
-        try:return await asyncio.wait_for(fut,timeout)
-        finally:self.pending.pop(rid,None)
+        try:
+            await self.ws.send(message(event,data,rid))
+            if not fut:return None
+            return await asyncio.wait_for(fut,timeout)
+        finally:
+            if rid:self.pending.pop(rid,None)
     async def _reader(self):
         try:
-            while self.running:
+            while self.running and self.ws:
                 raw=await self.ws.recv();await self.queue.put(raw)
+        except asyncio.CancelledError:
+            return
         except Exception as e:
             if self.running:log.warning("OLYMP_SOCKET_STOPPED error=%s",type(e).__name__)
-            self.running=False
+        finally:
+            if self.running:
+                self.running=False
+                for fut in list(self.pending.values()):
+                    if not fut.done():fut.set_exception(ConnectionError("OlympTrade WebSocket disconnected"))
+                self.pending.clear()
     async def _dispatcher(self):
-        while self.running:
-            try:raw=await self.queue.get();rows=json.loads(raw) if isinstance(raw,str) else raw
-            except Exception:continue
-            if not isinstance(rows,list):continue
-            for msg in rows:
-                if not isinstance(msg,dict):continue
-                rid=msg.get("uuid")
-                if rid in self.pending and not self.pending[rid].done():self.pending[rid].set_result(msg)
-                e=msg.get("e")
-                for cb in list(self.callbacks.get(e,[])):
-                    try:
-                        r=cb(msg)
-                        if asyncio.iscoroutine(r):await r
-                    except Exception:log.exception("callback failed event=%s",e)
+        try:
+            while self.running:
+                raw=await self.queue.get();rows=json.loads(raw) if isinstance(raw,str) else raw
+                if not isinstance(rows,list):continue
+                for msg in rows:
+                    if not isinstance(msg,dict):continue
+                    rid=msg.get("uuid")
+                    if rid in self.pending and not self.pending[rid].done():self.pending[rid].set_result(msg)
+                    e=msg.get("e")
+                    for cb in list(self.callbacks.get(e,[])):
+                        try:
+                            r=cb(msg)
+                            if asyncio.iscoroutine(r):await r
+                        except Exception:log.exception("callback failed event=%s",e)
+        except asyncio.CancelledError:
+            return
     async def initialize_read_only(self):
         subscriptions=[[220],[110,700,112,140,1038,1037,1039,141,22,26,111],[1054,1076,1301,1097],[141,241],[230,231],[75],[1055],[2223,2301,55,150,152,151,126,602,601],[2076],[126]]
         for sub in subscriptions:
