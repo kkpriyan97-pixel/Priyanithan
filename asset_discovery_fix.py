@@ -38,23 +38,22 @@ def apply():
     original_start=LiveMarketFeed.start
     original_stop=LiveMarketFeed.stop
 
-    async def enhanced_assets(self,msg):
-        found=set()
-        _extract(msg.get("d") if isinstance(msg,dict) else msg,found)
-        new=found-self.assets
-        if new:
-            self.assets.update(new)
-            log.info("ASSET_DISCOVERY found=%s new=%s total=%s assets=%s",len(found),len(new),len(self.assets),sorted(found))
-            for asset in sorted(new):
-                if asset not in self.subscribed:
-                    asyncio.create_task(self._subscribe_asset(asset))
-
     async def hardened_start(self):
-        # Listen broadly for metadata-bearing responses. Discovery never waits
-        # inside the WebSocket dispatcher; each new subscription is a task.
+        # Client callbacks receive exactly one argument: the message.
+        # Keep the feed instance in the closure instead of requiring a self,msg
+        # callback signature. This fixes the production callback TypeError.
+        async def enhanced_assets(msg):
+            found=set()
+            _extract(msg.get("d") if isinstance(msg,dict) else msg,found)
+            new=found-self.assets
+            if new:
+                self.assets.update(new)
+                log.info("ASSET_DISCOVERY found=%s new=%s total=%s assets=%s",len(found),len(new),len(self.assets),sorted(found))
+                for asset in sorted(new):
+                    if asset not in self.subscribed:
+                        self.schedule_asset(asset)
+
         self.client.on("*", enhanced_assets)
-        for event in ASSET_EVENTS:
-            self.client.on(event, enhanced_assets)
         await original_start(self)
 
         async def discovery_watch():
