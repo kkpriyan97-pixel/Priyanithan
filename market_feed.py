@@ -33,7 +33,7 @@ class LiveMarketFeed:
     def __init__(self,on_candle):
         self.on_candle=on_candle; self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip(); self.client=OlympReadOnlyClient(self.token)
         self.assets={a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float)
-        self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._last_poll_log=0
+        self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._last_poll_log=0; self._asset_tasks={}
     @staticmethod
     def _current_bucket(): return int(time.time()//60)*60
     @staticmethod
@@ -41,12 +41,14 @@ class LiveMarketFeed:
         bucket=int(float(ts)//60)*60; return bucket if bucket<int(time.time()//60)*60 else None
     async def start(self):
         if not self.token: raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is required")
-        self.client.on(1,self._tick); self.client.on(1003,self._candle_response); self.client.on(55,self._account); self.client.on(72,self._assets)
+        self.client.on(1,self._tick); self.client.on(1003,self._candle_response); self.client.on(55,self._account)
         await self._connect_and_seed(); self._reconnect_task=asyncio.create_task(self._connection_watch()); self._poll_task=asyncio.create_task(self._poll_loop()); log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY")
     async def stop(self):
         self.connected=False
         for task in (self._reconnect_task,self._poll_task):
             if task and not task.done(): task.cancel()
+        for task in list(self._asset_tasks.values()):
+            if not task.done(): task.cancel()
         await self.client.close()
     async def _connect_and_seed(self):
         await self.client.connect(); self.connected=True; await self.client.initialize_read_only(); self.subscribed.clear(); await self._discover_and_seed()
@@ -70,11 +72,16 @@ class LiveMarketFeed:
         if asset in self.subscribed:return
         try:
             await self.client.subscribe_ticks(asset); response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); self.subscribed.add(asset); self.assets.add(asset); log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
-        except Exception as e: log.warning("ASSET_SUBSCRIBE_FAILED asset=%s error=%s",asset,type(e).__name__)
+        except Exception as e:log.warning("ASSET_SUBSCRIBE_FAILED asset=%s error=%s",asset,type(e).__name__)
+        finally:self._asset_tasks.pop(asset,None)
+    def schedule_asset(self,asset):
+        asset=str(asset).upper().strip()
+        if not asset or asset in self.subscribed or asset in self._asset_tasks:return
+        self.assets.add(asset); self._asset_tasks[asset]=asyncio.create_task(self._subscribe_asset(asset))
     async def _discover_and_seed(self):
-        if not self.assets:self.assets.add("ASIA_X")
-        for asset in list(self.assets): await self._subscribe_asset(asset)
-        log.info("ASSETS_READY count=%s",len(self.assets))
+        for asset in list(self.assets): self.schedule_asset(asset)
+        if self.assets: log.info("ASSETS_CONFIGURED count=%s assets=%s",len(self.assets),sorted(self.assets))
+        else: log.info("ASSETS_WAITING_FOR_DISCOVERY")
     def _account(self,msg):
         d=msg.get("d") if isinstance(msg,dict) else None
         if not isinstance(d,list):return
@@ -89,21 +96,6 @@ class LiveMarketFeed:
         if demos and reals:self.client.account_mode="AMBIGUOUS";self.client.account_balance=None;self.client.account_currency=""
         elif demos:self.client.account_mode="DEMO";self.client.account_balance,self.client.account_currency=max(demos)
         elif reals:self.client.account_mode="REAL";self.client.account_balance,self.client.account_currency=max(reals)
-    async def _assets(self,msg):
-        found=set()
-        def visit(x):
-            if isinstance(x,dict):
-                for k,v in x.items():
-                    if str(k).lower() in {"pair","symbol","asset","instrument"}:
-                        for z in (v if isinstance(v,list) else [v]):
-                            s=str(z.get("id",z.get("pair",z.get("symbol",""))) if isinstance(z,dict) else z).upper().strip()
-                            if 3<=len(s)<=30 and s.replace("_","").isalnum():found.add(s)
-                    else:visit(v)
-            elif isinstance(x,list):
-                for z in x:visit(z)
-        visit(msg.get("d") if isinstance(msg,dict) else None); new=found-self.assets
-        for asset in new:await self._subscribe_asset(asset)
-        if found:self.assets.update(found);log.info("ASSET_DISCOVERY found=%s total=%s",len(found),len(self.assets))
     def _put_candle(self,asset,candle,notify=False):
         bucket=int(float(candle["timestamp"])//60)*60; candle=dict(candle); candle["timestamp"]=float(bucket); old={x["timestamp"]:x for x in self.history[asset]}; old[bucket]=candle; self.history[asset]=deque(sorted(old.values(),key=lambda z:z["timestamp"])[-360:],maxlen=360)
         if notify and bucket>self.last_completed[asset]:
@@ -159,7 +151,7 @@ class LiveMarketFeed:
                     except Exception as e:log.warning("HISTORY_REFRESH_FAILED asset=%s error=%s",asset,type(e).__name__)
                 now=time.time()
                 if now-self._last_poll_log>=30:
-                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s",self.connected,self.client.running,self.ticks,self.candles,len(self.assets))
+                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s",self.connected,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed))
                 await asyncio.sleep(2)
             except asyncio.CancelledError:return
             except Exception as e:log.exception("POLL_LOOP_ERROR error=%s",type(e).__name__);await asyncio.sleep(2)
