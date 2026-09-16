@@ -25,6 +25,11 @@ def start_engine():
  log.info("CANDICE_ENGINE_STARTED | Dubai UTC+04:00 | READ_ONLY | AUTO_TRADE=OFF | MARTINGALE=OFF")
 @app.get("/")
 def root():return jsonify({"name":"Candice AI","status":"online","mode":"READ_ONLY","auto_trade":False,"martingale":False,"timezone":"Asia/Dubai"})
+@app.get("/health")
+def health():
+ fs=feed.status() if feed else {"connected":False}
+ ok=bool(fs.get("connected"))
+ return jsonify({"status":"ok" if ok else "degraded","feed_connected":ok,"mode":"READ_ONLY","auto_trade":False,"martingale":False}),200 if ok else 503
 @app.get("/status")
 def status():
  fs=feed.status() if feed else {};bs={"pending":0,"WIN":0,"LOSS":0,"TIE":0}
