@@ -14,7 +14,7 @@ def message(event,data,request_id=None):
 class OlympReadOnlyClient:
  """Minimal read-only WebSocket client. No order/trade methods exist."""
  def __init__(self,token):
-  self.token=token.strip();self.refresh_token=os.getenv("OLYMPTRADE_REFRESH_TOKEN","").strip();self.ws=None;self.running=False;self.auth_invalid=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.account_snapshots={"demo":None,"real":None};self.account_records=[];self.account_ids=[];self.trader_ids=[];self.account_profitability=[];self._reader_task=None;self._dispatcher_task=None
+  self.token=token.strip();self.refresh_token=os.getenv("OLYMPTRADE_REFRESH_TOKEN","").strip();self.ws=None;self.running=False;self.auth_invalid=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.account_snapshots={"demo":None,"real":None};self.account_records=[];self.account_ids=[];self.trader_ids=[]
   log.info("OLYMP_AUTH_CONFIG access_token=%s refresh_token=%s",bool(self.token),bool(self.refresh_token))
  def on(self,event,callback):self.callbacks[event].append(callback)
  async def connect(self):
@@ -31,7 +31,7 @@ class OlympReadOnlyClient:
   if ws:
    try:await ws.close()
    except Exception:pass
-  for task in (self._reader_task,self._dispatcher_task):
+  for task in (getattr(self,'_reader_task',None),getattr(self,'_dispatcher_task',None)):
    if task and not task.done():task.cancel()
   self._reader_task=None;self._dispatcher_task=None
   for fut in list(self.pending.values()):
@@ -72,8 +72,7 @@ class OlympReadOnlyClient:
      if not isinstance(msg,dict):continue
      rid=msg.get("uuid")
      if rid in self.pending and not self.pending[rid].done():self.pending[rid].set_result(msg)
-     e=msg.get("e")
-     callbacks=list(self.callbacks.get(e,[]))+list(self.callbacks.get("*",[]))
+     e=msg.get("e");callbacks=list(self.callbacks.get(e,[]))+list(self.callbacks.get("*",[]))
      for cb in callbacks:
       try:
        r=cb(msg)
@@ -114,7 +113,7 @@ class OlympReadOnlyClient:
   if rows:self._capture_accounts(rows)
  async def initialize_read_only(self):
   self.on(55,self._capture_balance_message)
-  subscriptions=[[220],[110,700,112,140,1038,1037,1039,141,22,26,111],[1054,1076,1301,1097],[141,241],[230,231],[75],[1055],[2223,2301,55,150,152,151,126,602,601],[2076],[126]]
+  subscriptions=[[183],[220],[110,700,112,140,1038,1037,1039,141,22,26,111],[1054,1076,1301,1097],[141,241],[230,231],[75],[1055],[2223,2301,55,150,152,151,126,602,601],[2076],[126]]
   for sub in subscriptions:
    try:await self.send(98,sub,False)
    except Exception as e:log.debug("SUBSCRIPTION_INIT_FAILED error=%s",type(e).__name__)
@@ -133,28 +132,9 @@ class OlympReadOnlyClient:
     if values:snapshots[group]=max(values)
    except Exception as e:log.debug("ACCOUNT_INIT_FAILED group=%s error=%s",group,type(e).__name__)
   self.account_snapshots=snapshots
-  if snapshots.get("demo") is not None and snapshots.get("real") is not None:self.account_mode="BOTH"
-  elif snapshots.get("demo") is not None:self.account_mode="DEMO"
-  elif snapshots.get("real") is not None:self.account_mode="REAL"
-  else:self.account_mode="UNKNOWN"
-  available=[v for v in (snapshots.get("demo"),snapshots.get("real")) if v is not None]
-  if available:self.account_balance,self.account_currency=available[0]
-  demo_ids=[x for x in self.account_ids if str(x).strip()]
+  self.account_mode="DEMO" if snapshots.get("demo") is not None else "UNKNOWN"
+  if snapshots.get("demo") is not None:self.account_balance,self.account_currency=snapshots["demo"]
   log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s account_ids=%s trader_ids=%s records=%s request_ok=%s refresh_cookie=%s",snapshots.get("demo"),snapshots.get("real"),self.account_mode,len(self.account_ids),len(self.trader_ids),len(self.account_records),any_success,bool(self.refresh_token))
-  self.account_profitability=[]
-  for account_id in demo_ids:
-   try:
-    aid=int(account_id) if str(account_id).isdigit() else account_id
-    response=await self.send(182,[{"account_id":aid}],True,10)
-    rows=self._rows_from_response(response)
-    if rows:
-     self.account_profitability.extend(rows)
-     log.info("ACCOUNT_PROFITABILITY account_id=%s records=%s",account_id,len(rows))
-    else:
-     log.warning("ACCOUNT_PROFITABILITY_EMPTY account_id=%s response_type=%s",account_id,type(response).__name__)
-   except Exception as e:log.warning("ACCOUNT_PROFITABILITY_FAILED account_id=%s error=%s",account_id,type(e).__name__)
-  if self.account_profitability:
-   log.info("ACCOUNT_PROFITABILITY_TOTAL records=%s key_samples=%s",len(self.account_profitability),sorted({str(k) for r in self.account_profitability[:5] if isinstance(r,dict) for k in r.keys()})[:30])
  async def subscribe_ticks(self,asset):await self.send(12,[{"pair":asset}],False);await self.send(280,[{"pair":asset}],False)
  async def request_candles(self,asset,count=80):
   count=max(60,min(int(count),360));return await self.send(10,[{"pair":asset,"size":count,"to":int(time.time()),"solid":True}],True,12)
