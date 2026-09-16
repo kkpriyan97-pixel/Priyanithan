@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio,json,logging,random,string,time
+import asyncio,json,logging,os,random,string,time
 from collections import defaultdict
 import websockets
 log=logging.getLogger("candice.olymp")
@@ -14,12 +14,17 @@ def message(event,data,request_id=None):
 class OlympReadOnlyClient:
  """Minimal read-only WebSocket client. No order/trade methods exist."""
  def __init__(self,token):
-  self.token=token;self.ws=None;self.running=False;self.auth_invalid=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.account_snapshots={"demo":None,"real":None};self.account_records=[];self.account_ids=[];self.trader_ids=[];self.assets=set();self._reader_task=None;self._dispatcher_task=None
+  self.token=token.strip();self.refresh_token=os.getenv("OLYMPTRADE_REFRESH_TOKEN","").strip();self.ws=None;self.running=False;self.auth_invalid=False;self.queue=asyncio.Queue();self.callbacks=defaultdict(list);self.pending={};self.account_mode="UNKNOWN";self.account_balance=None;self.account_currency="";self.account_snapshots={"demo":None,"real":None};self.account_records=[];self.account_ids=[];self.trader_ids=[];self.assets=set();self._reader_task=None;self._dispatcher_task=None
+  log.info("OLYMP_AUTH_CONFIG access_token=%s refresh_token=%s",bool(self.token),bool(self.refresh_token))
  def on(self,event,callback):self.callbacks[event].append(callback)
  async def connect(self):
   if self.auth_invalid:raise ConnectionError("OlympTrade access token rejected")
   if self.running and self.ws:return
-  headers={"Origin":ORIGIN,"User-Agent":UA,"Cookie":f"access_token={self.token}"}
+  # Keep authentication read-only. If both browser session cookies are supplied by the user,
+  # send both; the server decides whether the refresh cookie can renew the session.
+  cookies=[f"access_token={self.token}"] if self.token else []
+  if self.refresh_token:cookies.append(f"refresh_token={self.refresh_token}")
+  headers={"Origin":ORIGIN,"User-Agent":UA,"Cookie":"; ".join(cookies)}
   try:self.ws=await websockets.connect(URI,extra_headers=headers,ping_interval=15,ping_timeout=10,open_timeout=10,close_timeout=5)
   except TypeError:self.ws=await websockets.connect(URI,additional_headers=headers,ping_interval=15,ping_timeout=10,open_timeout=10,close_timeout=5)
   self.queue=asyncio.Queue();self.running=True;self._reader_task=asyncio.create_task(self._reader());self._dispatcher_task=asyncio.create_task(self._dispatcher());log.info("OLYMP_CONNECTED")
@@ -78,7 +83,6 @@ class OlympReadOnlyClient:
       except Exception:log.exception("callback failed event=%s",e)
   except asyncio.CancelledError:return
  def _rows_from_response(self,response):
-  """Flatten account endpoint response without assuming a fixed wrapper shape."""
   if isinstance(response,list):return [x for x in response if isinstance(x,dict)]
   if not isinstance(response,dict):return []
   for key in ("d","data","items","result","accounts"):
@@ -93,13 +97,11 @@ class OlympReadOnlyClient:
   existing={(str(r.get("group","")),str(r.get("id",r.get("account_id",r.get("accountId",""))))) for r in records if isinstance(r,dict)}
   for x in rows if isinstance(rows,list) else []:
    if not isinstance(x,dict):continue
-   group=str(x.get("group",default_group) or default_group or "").lower()
-   safe={}
+   group=str(x.get("group",default_group) or default_group or "").lower();safe={}
    for key in ("id","account_id","accountId","uid","uuid","group","currency","amount","type","name","trader_id","traderId","traderID"):
     if key in x and x.get(key) is not None:safe[key]=x.get(key)
    if group and "group" not in safe:safe["group"]=group
-   rid=str(x.get("id",x.get("account_id",x.get("accountId",x.get("uid",x.get("uuid",""))))) or "").strip()
-   marker=(group,rid)
+   rid=str(x.get("id",x.get("account_id",x.get("accountId",x.get("uid",x.get("uuid",""))))) or "").strip();marker=(group,rid)
    if safe and marker not in existing:records.append(safe);existing.add(marker)
    for key in ("id","account_id","accountId","uid","uuid"):
     value=x.get(key)
@@ -116,30 +118,24 @@ class OlympReadOnlyClient:
   for _ in range(2):
    try:await self.send(90,{},True,5)
    except Exception as e:log.debug("SESSION_INIT_FAILED error=%s",type(e).__name__)
-  snapshots={"demo":self.account_snapshots.get("demo"),"real":self.account_snapshots.get("real")}
-  any_success=False
+  snapshots={"demo":self.account_snapshots.get("demo"),"real":self.account_snapshots.get("real")};any_success=False
   for group in ("demo","real"):
    try:
-    r=await self.send(1068,[{"group":group}],True,8);rows=self._rows_from_response(r);any_success=True
-    self._capture_accounts(rows,group)
-    values=[]
+    r=await self.send(1068,[{"group":group}],True,8);rows=self._rows_from_response(r);any_success=True;self._capture_accounts(rows,group);values=[]
     for x in rows:
      try:bal=float(x.get("amount",x.get("amount_real",x.get("amount_free"))))
      except Exception:bal=None
      if bal is not None:values.append((bal,str(x.get("currency","") or "")))
     if values:snapshots[group]=max(values)
-   except Exception as e:
-    log.debug("ACCOUNT_INIT_FAILED group=%s error=%s",group,type(e).__name__)
+   except Exception as e:log.debug("ACCOUNT_INIT_FAILED group=%s error=%s",group,type(e).__name__)
   self.account_snapshots=snapshots
   if snapshots.get("demo") is not None and snapshots.get("real") is not None:self.account_mode="BOTH"
   elif snapshots.get("demo") is not None:self.account_mode="DEMO"
   elif snapshots.get("real") is not None:self.account_mode="REAL"
   else:self.account_mode="UNKNOWN"
-  available=[]
-  if snapshots.get("demo") is not None:available.append(snapshots["demo"])
-  if snapshots.get("real") is not None:available.append(snapshots["real"])
+  available=[v for v in (snapshots.get("demo"),snapshots.get("real")) if v is not None]
   if available:self.account_balance,self.account_currency=available[0]
-  log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s account_ids=%s trader_ids=%s records=%s request_ok=%s",snapshots.get("demo"),snapshots.get("real"),self.account_mode,len(self.account_ids),len(self.trader_ids),len(self.account_records),any_success)
+  log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s account_ids=%s trader_ids=%s records=%s request_ok=%s refresh_cookie=%s",snapshots.get("demo"),snapshots.get("real"),self.account_mode,len(self.account_ids),len(self.trader_ids),len(self.account_records),any_success,bool(self.refresh_token))
  async def subscribe_ticks(self,asset):await self.send(12,[{"pair":asset}],False);await self.send(280,[{"pair":asset}],False)
  async def request_candles(self,asset,count=80):
   count=max(60,min(int(count),360));return await self.send(10,[{"pair":asset,"size":count,"to":int(time.time()),"solid":True}],True,12)
