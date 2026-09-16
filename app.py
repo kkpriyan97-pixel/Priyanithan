@@ -30,6 +30,10 @@ def status_payload():
 
 def _telegram_report():
     x=status_payload(); f=x.get("feed") or {}; b=x.get("brain") or {}; snaps=f.get("account_snapshots") or {}; assets=f.get("assets") or []
+    client=getattr(feed,"client",None) if feed else None
+    account_ids=getattr(client,"account_ids",[]) if client else []
+    trader_ids=getattr(client,"trader_ids",[]) if client else []
+    account_records=getattr(client,"account_records",[]) if client else []
     def fmt(v):
         if v is None:return "—"
         if isinstance(v,(list,tuple,set)):return ", ".join(map(str,v)) if v else "—"
@@ -40,7 +44,7 @@ def _telegram_report():
         f"⚙️ Engine • {'ONLINE' if x.get('engine_ready') else 'STARTING/DEGRADED'}",
         f"📡 Feed • {'CONNECTED' if f.get('connected') else 'NOT CONNECTED'}",
         f"🧠 Brain • {'RUNNING' if x.get('engine_ready') else 'NOT READY'}","",
-        "👤 OLYMPTRADE ACCOUNT",f"• Mode • {f.get('account_mode','UNKNOWN')}",f"• Demo • {fmt(snaps.get('demo'))}",f"• Real • {fmt(snaps.get('real'))}",f"• Selected balance • {fmt(f.get('account_balance'))} {f.get('account_currency','')}","• Trader ID • NOT EXPOSED by current account payload","",
+        "👤 OLYMPTRADE ACCOUNT",f"• Mode • {f.get('account_mode','UNKNOWN')}",f"• Demo • {fmt(snaps.get('demo'))}",f"• Real • {fmt(snaps.get('real'))}",f"• Selected balance • {fmt(f.get('account_balance'))} {f.get('account_currency','')}",f"• Trader ID(s) • {fmt(trader_ids)}",f"• Account ID(s) • {fmt(account_ids)}",f"• Account records • {len(account_records)}","",
         "🟢 FLEX MARKET","• Flex-only enforcement • ON",f"• Discovered • {len(assets)}",f"• Subscribed • {f.get('subscribed',0)}",f"• Assets • {fmt(assets)}","• Forex processing • BLOCKED","",
         "📊 MARKET ENGINE",f"• Ticks • {f.get('ticks',0)}",f"• Completed 1m candles • {f.get('completed_1m',0)}","• Read-only market data • ON","",
         "🧠 BRAIN / RESULTS",f"• Pending • {b.get('pending',0)}",f"• WIN • {b.get('WIN',0)} | LOSS • {b.get('LOSS',0)} | TIE • {b.get('TIE',0)}",f"• Consecutive losses • {b.get('consecutive_losses',0)}",f"• Daily losses • {b.get('daily_losses',0)}/{b.get('daily_loss_limit',0)}",f"• Last scan • {fmt(b.get('last_scan_assets'))}","",
@@ -83,7 +87,6 @@ async def _engine_loop():
         engine_ready=False; raise
     except Exception as e:
         engine_ready=False; engine_error=type(e).__name__; log.exception("CANDICE_ENGINE_START_FAILED")
-
 
 def start_engine(): asyncio.run(_engine_loop())
 
