@@ -5,8 +5,7 @@ import logging
 import os
 import threading
 import time
-
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, Response
 
 from brain import CandiceBrain
 import brain_fix
@@ -14,96 +13,56 @@ import asset_discovery_fix
 from market_feed import LiveMarketFeed
 from telegram import Telegram
 
-os.environ["TZ"] = "Asia/Dubai"
-try:
-    time.tzset()
-except AttributeError:
-    pass
-
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("candice")
-app = Flask(__name__)
-telegram = Telegram()
-feed = None
-brain = None
-engine_ready = False
-engine_error = None
-
-# Apply runtime fixes before the engine is created.
-brain_fix.apply()
-asset_discovery_fix.apply()
-
+os.environ["TZ"]="Asia/Dubai"
+try: time.tzset()
+except AttributeError: pass
+logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log=logging.getLogger("candice")
+app=Flask(__name__); telegram=Telegram(); feed=None; brain=None; engine_ready=False; engine_error=None
+brain_fix.apply(); asset_discovery_fix.apply()
 
 async def _engine_loop():
-    global feed, brain, engine_ready, engine_error
+    global feed,brain,engine_ready,engine_error
     try:
-        brain_ref = None
-        feed_ref = LiveMarketFeed(lambda a, c: brain_ref.on_candle(a, c) if brain_ref else None)
-        brain_ref = CandiceBrain(telegram.send, feed_ref)
-        feed = feed_ref
-        brain = brain_ref
-
+        brain_ref=None
+        feed_ref=LiveMarketFeed(lambda a,c: brain_ref.on_candle(a,c) if brain_ref else None)
+        brain_ref=CandiceBrain(telegram.send,feed_ref); feed=feed_ref; brain=brain_ref
         log.info("CANDICE_STARTING | timezone=Asia/Dubai | READ_ONLY")
-        telegram.start()
-        await feed.start()
-        engine_ready = True
-        engine_error = None
+        telegram.start(); await feed.start(); engine_ready=True; engine_error=None
         log.info("CANDICE_ENGINE_STARTED | Dubai UTC+04:00 | READ_ONLY | AUTO_TRADE=OFF | MARTINGALE=OFF")
-        threading.Thread(target=brain.run, daemon=True, name="candice-brain").start()
-        log.info("CANDICE_BRAIN_STARTED")
+        threading.Thread(target=brain.run,daemon=True,name="candice-brain").start(); log.info("CANDICE_BRAIN_STARTED")
         await asyncio.Event().wait()
     except asyncio.CancelledError:
-        engine_ready = False
-        raise
+        engine_ready=False; raise
     except Exception as e:
-        engine_ready = False
-        engine_error = type(e).__name__
-        log.exception("CANDICE_ENGINE_START_FAILED")
+        engine_ready=False; engine_error=type(e).__name__; log.exception("CANDICE_ENGINE_START_FAILED")
 
+def start_engine(): asyncio.run(_engine_loop())
 
-def start_engine():
-    asyncio.run(_engine_loop())
-
+def status_payload():
+    fs=feed.status() if feed else {"connected":False,"auth_invalid":False,"assets":[],"subscribed":0,"ticks":0,"completed_1m":0,"history_1m":{}}
+    bs={"pending":0,"WIN":0,"LOSS":0,"TIE":0,"last_scan_assets":[],"daily_losses":0,"consecutive_losses":0,"daily_loss_limit":0}
+    if brain:
+        bs={"pending":len([x for x in brain.pending.values() if not x.get("result")]),"WIN":brain.stats["WIN"],"LOSS":brain.stats["LOSS"],"TIE":brain.stats["TIE"],"last_scan_assets":sorted(brain.last_scan),"daily_losses":brain.daily_losses,"consecutive_losses":brain.consecutive_losses,"daily_loss_limit":brain.max_daily_losses}
+    return {"candice":"online" if engine_ready else "starting","engine_ready":engine_ready,"engine_error":engine_error,"feed":fs,"brain":bs,"timezone":"Asia/Dubai","mode":"READ_ONLY","auto_trade":False,"martingale":False}
 
 @app.get("/")
 def root():
-    return jsonify({
-        "name": "Candice AI", "status": "online" if engine_ready else "starting",
-        "mode": "READ_ONLY", "auto_trade": False, "martingale": False,
-        "timezone": "Asia/Dubai", "engine_ready": engine_ready, "engine_error": engine_error,
-    })
-
+    return Response('''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Candice AI</title><style>body{font-family:system-ui;background:#080b12;color:#f4f6fb;margin:0;padding:24px}main{max-width:760px;margin:auto}section{background:#101521;border:1px solid #263043;border-radius:18px;padding:18px;margin:14px 0}h1{margin:0 0 4px}.muted{color:#9aa6bb}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.box{background:#0b101a;border-radius:12px;padding:12px}.value{font-size:24px;font-weight:700;margin-top:5px}.ok{color:#5ee6a8}.warn{color:#ffd45c}.bad{color:#ff6b7a}code{word-break:break-word}</style></head><body><main><h1>🎯 CANDICE AI <span id="live" class="muted">• STARTING</span></h1><div class="muted">Live market intelligence • read-only / manual only</div><section><h2 id="system">SYSTEM</h2><div class="grid"><div class="box">ACCOUNT MODE<div id="mode" class="value">—</div></div><div class="box">BALANCE<div id="balance" class="value">—</div></div><div class="box">ASSETS DISCOVERED<div id="assets" class="value">0</div></div><div class="box">TRADEABLE / SUBSCRIBED<div id="sub" class="value">0 / 0</div></div><div class="box">TICKS<div id="ticks" class="value">—</div></div><div class="box">COMPLETED 1M<div id="candles" class="value">—</div></div></div></section><section><h2>SIGNAL ENGINE</h2><div id="signal" class="value">Waiting for qualified setup...</div><div class="muted">1m live candles • next 5m decision window</div><p>Scanned assets: <code id="scan">—</code></p></section><section><h2>RISK / PERFORMANCE</h2><div id="perf" class="value">0 WIN / 0 LOSS</div><div class="muted" id="risk">Signals 0 • Current loss streak 0 • Daily losses 0</div></section><section><h2>VERIFICATION</h2><div id="verify" class="muted">Connecting...</div></section></main><script>async function refresh(){try{let r=await fetch('/status?ts='+Date.now(),{cache:'no-store'}),x=await r.json(),f=x.feed||{},b=x.brain||{};document.getElementById('live').textContent=x.engine_ready?'• LIVE':'• STARTING';document.getElementById('live').className=x.engine_ready?'ok':'warn';document.getElementById('system').textContent=x.engine_ready?'SYSTEM • ONLINE':'SYSTEM • STARTING';document.getElementById('mode').textContent=f.account_mode||'UNKNOWN';document.getElementById('balance').textContent=f.account_balance==null?'NOT AVAILABLE':(f.account_balance+' '+(f.account_currency||''));let a=f.assets||[];document.getElementById('assets').textContent=a.length;document.getElementById('sub').textContent=(f.subscribed||0)+' / '+a.length;document.getElementById('ticks').textContent=f.ticks??'—';document.getElementById('candles').textContent=f.completed_1m??'—';let scan=b.last_scan_assets||[];document.getElementById('scan').textContent=scan.length?scan.join(', '):'No qualified setups yet';document.getElementById('signal').textContent=scan.length?'Brain actively analysing '+scan.length+' asset(s)':'Waiting for qualified setup...';document.getElementById('perf').textContent=(b.WIN||0)+' WIN / '+(b.LOSS||0)+' LOSS';document.getElementById('risk').textContent='Signals '+((b.WIN||0)+(b.LOSS||0)+(b.TIE||0))+' • Current loss streak '+(b.consecutive_losses||0)+' • Daily losses '+(b.daily_losses||0)+'/'+(b.daily_loss_limit||0);document.getElementById('verify').textContent=(f.connected?'✓ Market feed connected':'⚠ Market feed not connected')+' • '+(a.length?'Assets discovered: '+a.length:'Waiting for asset discovery')+' • READ_ONLY • Auto-trade OFF • Martingale OFF';}catch(e){document.getElementById('verify').textContent='⚠ Status unavailable'}}refresh();setInterval(refresh,2000)</script></body></html>''',mimetype='text/html')
 
 @app.get("/health")
 def health():
-    fs = feed.status() if feed else {"connected": False, "auth_invalid": False}
-    ok = bool(engine_ready and fs.get("connected"))
-    return jsonify({
-        "status": "ok" if ok else "degraded", "feed_connected": bool(fs.get("connected")),
-        "brain_started": brain is not None, "engine_ready": engine_ready,
-        "mode": "READ_ONLY", "auto_trade": False, "martingale": False,
-        "timezone": "Asia/Dubai", "error": engine_error,
-    }), 200 if ok else 503
-
+    fs=feed.status() if feed else {"connected":False,"auth_invalid":False}; ok=bool(engine_ready and fs.get("connected"))
+    return jsonify({"status":"ok" if ok else "degraded","feed_connected":bool(fs.get("connected")),"brain_started":brain is not None,"engine_ready":engine_ready,"mode":"READ_ONLY","auto_trade":False,"martingale":False,"timezone":"Asia/Dubai","error":engine_error}),200 if ok else 503
 
 @app.get("/status")
-def status():
-    fs = feed.status() if feed else {}
-    bs = {"pending": 0, "WIN": 0, "LOSS": 0, "TIE": 0, "last_scan_assets": []}
-    if brain:
-        bs = {
-            "pending": len([x for x in brain.pending.values() if not x.get("result")]),
-            "WIN": brain.stats["WIN"], "LOSS": brain.stats["LOSS"], "TIE": brain.stats["TIE"],
-            "last_scan_assets": sorted(brain.last_scan), "daily_losses": brain.daily_losses,
-            "consecutive_losses": brain.consecutive_losses, "daily_loss_limit": brain.max_daily_losses,
-        }
-    return jsonify({
-        "candice": "online" if engine_ready else "starting", "engine_ready": engine_ready,
-        "engine_error": engine_error, "feed": fs, "brain": bs, "timezone": "Asia/Dubai",
-        "mode": "READ_ONLY", "auto_trade": False, "martingale": False,
-    })
+def status(): return jsonify(status_payload())
 
+@app.post("/telegram/webhook")
+def telegram_webhook():
+    try: telegram.handle_webhook(request.get_json(silent=True) or {}); return jsonify({"ok":True})
+    except Exception: log.exception("TELEGRAM_WEBHOOK_HANDLER_FAILED"); return jsonify({"ok":False}),500
 
-if __name__ == "__main__":
-    threading.Thread(target=start_engine, daemon=True, name="candice-engine-bootstrap").start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+if __name__=="__main__":
+    threading.Thread(target=start_engine,daemon=True,name="candice-engine-bootstrap").start()
+    app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")))
