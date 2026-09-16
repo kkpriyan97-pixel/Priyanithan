@@ -3,6 +3,7 @@ import asyncio, logging, os, time
 from collections import defaultdict, deque
 from olymp_client import OlympReadOnlyClient
 log = logging.getLogger("candice.feed")
+FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0","false","no","off"}
 
 def num(v):
     try: return float(v)
@@ -32,7 +33,7 @@ def walk_candles(x):
 class LiveMarketFeed:
     def __init__(self,on_candle):
         self.on_candle=on_candle; self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip(); self.client=OlympReadOnlyClient(self.token)
-        self.assets={a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float)
+        self.assets=set() if FLEX_ONLY else {a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float)
         self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._last_poll_log=0; self._asset_tasks={}
     @staticmethod
     def _current_bucket(): return int(time.time()//60)*60
@@ -42,7 +43,7 @@ class LiveMarketFeed:
     async def start(self):
         if not self.token: raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is required")
         self.client.on(1,self._tick); self.client.on(1003,self._candle_response); self.client.on(55,self._account)
-        await self._connect_and_seed(); self._reconnect_task=asyncio.create_task(self._connection_watch()); self._poll_task=asyncio.create_task(self._poll_loop()); log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY")
+        await self._connect_and_seed(); self._reconnect_task=asyncio.create_task(self._connection_watch()); self._poll_task=asyncio.create_task(self._poll_loop()); log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY | FLEX_ONLY=%s",FLEX_ONLY)
     async def stop(self):
         self.connected=False
         for task in (self._reconnect_task,self._poll_task):
@@ -80,8 +81,8 @@ class LiveMarketFeed:
         self.assets.add(asset); self._asset_tasks[asset]=asyncio.create_task(self._subscribe_asset(asset))
     async def _discover_and_seed(self):
         for asset in list(self.assets): self.schedule_asset(asset)
-        if self.assets: log.info("ASSETS_CONFIGURED count=%s assets=%s",len(self.assets),sorted(self.assets))
-        else: log.info("ASSETS_WAITING_FOR_DISCOVERY")
+        if self.assets: log.info("ASSETS_CONFIGURED count=%s assets=%s flex_only=%s",len(self.assets),sorted(self.assets),FLEX_ONLY)
+        else: log.info("ASSETS_WAITING_FOR_FLEX_DISCOVERY")
     def _account(self,msg):
         d=msg.get("d") if isinstance(msg,dict) else None
         if not isinstance(d,list):return
@@ -99,8 +100,7 @@ class LiveMarketFeed:
         elif reals:self.client.account_mode="REAL"
         else:self.client.account_mode="UNKNOWN"
         selected=(reals or demos)
-        if selected:
-            self.client.account_balance,self.client.account_currency=max(selected)
+        if selected:self.client.account_balance,self.client.account_currency=max(selected)
         log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s",self.client.account_snapshots.get("demo"),self.client.account_snapshots.get("real"),self.client.account_mode)
     def _put_candle(self,asset,candle,notify=False):
         bucket=int(float(candle["timestamp"])//60)*60; candle=dict(candle); candle["timestamp"]=float(bucket); old={x["timestamp"]:x for x in self.history[asset]}; old[bucket]=candle; self.history[asset]=deque(sorted(old.values(),key=lambda z:z["timestamp"])[-360:],maxlen=360)
@@ -121,7 +121,9 @@ class LiveMarketFeed:
         for x in walk_candles(msg):
             p=normalize(x)
             if not p:continue
-            asset,candle=p; self.assets.add(asset); bucket=self._completed_bucket(candle["timestamp"])
+            asset,candle=p
+            if FLEX_ONLY and asset not in self.subscribed:continue
+            self.assets.add(asset); bucket=self._completed_bucket(candle["timestamp"])
             if bucket is None:continue
             candle["timestamp"]=float(bucket); self._put_candle(asset,candle,notify=True)
     async def _tick(self,msg):
@@ -131,6 +133,7 @@ class LiveMarketFeed:
             if not isinstance(x,dict):continue
             asset=str(x.get("p",x.get("pair",x.get("symbol","")))).upper().strip(); price=num(x.get("q",x.get("price",x.get("close")))); ts=num(x.get("t",x.get("timestamp",x.get("time"))))
             if not asset or price is None or ts is None:continue
+            if FLEX_ONLY and asset not in self.subscribed:continue
             if ts>1e10:ts/=1000
             self.assets.add(asset); self.ticks+=1; bucket=int(ts//60)*60; cur=self.forming.get(asset)
             if cur is None or cur["timestamp"]!=bucket:
@@ -157,7 +160,7 @@ class LiveMarketFeed:
                     except Exception as e:log.warning("HISTORY_REFRESH_FAILED asset=%s error=%s",asset,type(e).__name__)
                 now=time.time()
                 if now-self._last_poll_log>=30:
-                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s account_mode=%s",self.connected,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed),self.client.account_mode)
+                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s account_mode=%s flex_only=%s",self.connected,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed),self.client.account_mode,FLEX_ONLY)
                 await asyncio.sleep(2)
             except asyncio.CancelledError:return
             except Exception as e:log.exception("POLL_LOOP_ERROR error=%s",type(e).__name__);await asyncio.sleep(2)
@@ -168,4 +171,4 @@ class LiveMarketFeed:
         history=self.history.get(asset)
         return float(history[-1]["close"]) if history else None
     def status(self):
-        return {"connected":self.connected and self.client.running,"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency,"account_snapshots":getattr(self.client,"account_snapshots",{"demo":None,"real":None})}
+        return {"connected":self.connected and self.client.running,"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency,"account_snapshots":getattr(self.client,"account_snapshots",{"demo":None,"real":None}),"flex_only":FLEX_ONLY}
