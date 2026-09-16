@@ -70,7 +70,8 @@ class OlympReadOnlyClient:
      rid=msg.get("uuid")
      if rid in self.pending and not self.pending[rid].done():self.pending[rid].set_result(msg)
      e=msg.get("e")
-     for cb in list(self.callbacks.get(e,[])):
+     callbacks=list(self.callbacks.get(e,[]))+list(self.callbacks.get("*",[]))
+     for cb in callbacks:
       try:
        r=cb(msg)
        if asyncio.iscoroutine(r):await r
