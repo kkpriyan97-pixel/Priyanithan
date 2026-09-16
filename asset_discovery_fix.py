@@ -6,14 +6,18 @@ import re
 
 log = logging.getLogger("candice.assets")
 ASSET_EVENTS = tuple(int(x.strip()) for x in os.getenv("OLYMPTRADE_ASSET_EVENTS", "72,75,126,141,2076,2223,2301").split(",") if x.strip().isdigit())
-FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0","false","no","off"}
+FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
 _PAIR_RE = re.compile(r"^[A-Z0-9][A-Z0-9_./-]{2,29}$")
+_ASSET_KEYS = {"pair", "symbol", "asset", "instrument", "code", "ticker", "short_name", "display_name", "symbol_name", "pair_name"}
+_PROFIT_KEYS = {"profitability", "profitability_percent", "profitability_percentage", "max_profitability", "max_profitability_percent", "payout", "payout_percent", "profit", "profit_percent"}
 
 
 def _candidate(value):
     if not isinstance(value, str):
         return None
     s = value.strip().upper()
+    if s in {"FLEX", "FLEX TIME", "FLEX_TIME", "FIXED TIME", "FOREX", "STOCKS"}:
+        return None
     if _PAIR_RE.fullmatch(s) and any(ch.isalpha() for ch in s):
         return s
     return None
@@ -26,12 +30,27 @@ def _is_flex_mode(value):
     return normalized in {"flex", "flextime"}
 
 
+def _has_profitability(node):
+    if not isinstance(node, dict):
+        return False
+    for key, value in node.items():
+        if str(key).lower() not in _PROFIT_KEYS:
+            continue
+        try:
+            number = float(str(value).replace("%", "").strip())
+            # Olymptrade may encode 79.4 as a percentage or 0.794 as a ratio.
+            if 0 < number <= 100:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _has_flex_marker(node):
     if not isinstance(node, dict):
         return False
-    # Accept only explicit Flex/Flex Time evidence from the market payload.
-    # The Flex asset list exposes profitability, while the mode can also be
-    # encoded as Flex, Flex Time, flex_time, or an explicit boolean flag.
+    # Accept only explicit Flex/Flex Time evidence or a profitability field
+    # known to be exposed with Flex assets. Never infer Flex from the symbol.
     for key, value in node.items():
         k = str(key).lower()
         if k in {"mode", "trading_mode", "trade_mode", "type", "market_type", "market", "name"} and _is_flex_mode(value):
@@ -48,37 +67,45 @@ def _has_flex_marker(node):
                 return True
             if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "enabled", "available", "flex", "flex time", "flex_time", "flextime"}:
                 return True
-        if k in {"profitability", "profitability_percent", "profitability_percentage", "max_profitability", "max_profitability_percent", "payout", "payout_percent"}:
-            try:
-                number = float(str(value).replace("%", "").strip())
-                if 0 < number <= 100:
-                    return True
-            except (TypeError, ValueError):
-                pass
-    return False
+    return _has_profitability(node)
 
 
-def _extract(node, found, flex_context=False):
+def _extract(node, found, flex_context=False, stats=None):
+    if stats is None:
+        stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
     if isinstance(node, dict):
+        stats["dicts"] += 1
         local_flex = flex_context or _has_flex_marker(node)
-        for key, value in node.items():
-            k = str(key).lower()
-            if k in {"pair", "symbol", "asset", "instrument", "code"} and local_flex:
+        if local_flex:
+            stats["qualified_nodes"] += 1
+        # Some payloads use the asset symbol as the dictionary key, with its
+        # metadata (profitability/mode) stored in the value object.
+        for raw_key, value in node.items():
+            key_candidate = _candidate(raw_key)
+            if key_candidate and isinstance(value, dict) and (_has_flex_marker(value) or local_flex):
+                found.add(key_candidate)
+                stats["candidates"] += 1
+            k = str(raw_key).lower()
+            if k in _ASSET_KEYS and local_flex:
                 values = value if isinstance(value, list) else [value]
                 for item in values:
                     if isinstance(item, dict):
-                        for subkey in ("id", "pair", "symbol", "asset", "instrument", "p", "code"):
+                        for subkey in ("id", "pair", "symbol", "asset", "instrument", "p", "code", "ticker", "short_name", "display_name", "symbol_name", "pair_name"):
                             c = _candidate(item.get(subkey))
                             if c:
                                 found.add(c)
+                                stats["candidates"] += 1
                     else:
                         c = _candidate(item)
                         if c:
                             found.add(c)
-            _extract(value, found, local_flex)
+                            stats["candidates"] += 1
+            _extract(value, found, local_flex, stats)
     elif isinstance(node, list):
+        stats["lists"] += 1
         for item in node:
-            _extract(item, found, flex_context)
+            _extract(item, found, flex_context, stats)
+    return stats
 
 
 def apply():
@@ -91,17 +118,19 @@ def apply():
     async def hardened_start(self):
         async def enhanced_assets(msg):
             found = set()
+            stats = {"dicts": 0, "lists": 0, "candidates": 0, "qualified_nodes": 0}
             payload = msg.get("d") if isinstance(msg, dict) else msg
-            _extract(payload, found, False)
-            new = found - self.assets
-            if new:
-                self.assets.update(new)
-                log.info("FLEX_TIME_ASSET_DISCOVERY found=%s new=%s total=%s", len(found), len(new), len(self.assets))
-                for asset in sorted(new):
-                    if asset not in self.subscribed:
-                        self.schedule_asset(asset)
+            _extract(payload, found, False, stats)
+            if found:
+                new = found - self.assets
+                if new:
+                    self.assets.update(new)
+                    log.info("FLEX_TIME_ASSET_DISCOVERY found=%s new=%s total=%s", len(found), len(new), len(self.assets))
+                    for asset in sorted(new):
+                        if asset not in self.subscribed:
+                            self.schedule_asset(asset)
             elif FLEX_ONLY and isinstance(msg, dict) and msg.get("e") in ASSET_EVENTS:
-                log.info("FLEX_TIME_ASSET_EVENT_RECEIVED event=%s no_qualified_assets", msg.get("e"))
+                log.info("FLEX_TIME_ASSET_SCAN event=%s dicts=%s lists=%s qualified_nodes=%s candidates=%s", msg.get("e"), stats["dicts"], stats["lists"], stats["qualified_nodes"], stats["candidates"])
 
         if FLEX_ONLY:
             self.assets.clear()
@@ -119,8 +148,6 @@ def apply():
                 except Exception as exc:
                     log.debug("FLEX_TIME_ASSET_EVENT_REQUEST_FAILED event=%s error=%s", event_id, type(exc).__name__)
 
-        # Do not block engine readiness on a discovery request. The WebSocket
-        # callback receives the resulting asset-list messages asynchronously.
         self._asset_discovery_request_task = asyncio.create_task(request_discovery_events())
 
         async def discovery_watch():
