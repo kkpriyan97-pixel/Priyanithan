@@ -34,7 +34,7 @@ class LiveMarketFeed:
     def __init__(self,on_candle):
         self.on_candle=on_candle; self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip(); self.client=OlympReadOnlyClient(self.token)
         self.assets=set() if FLEX_ONLY else {a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float); self._notified_buckets=defaultdict(set)
-        self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._last_poll_log=0; self._asset_tasks={}
+        self._authoritative_flex_assets=set(); self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._last_poll_log=0; self._asset_tasks={}
     @staticmethod
     def _current_bucket(): return int(time.time()//60)*60
     @staticmethod
@@ -70,6 +70,7 @@ class LiveMarketFeed:
             else: delay=2
             await asyncio.sleep(1)
     async def _subscribe_asset(self,asset):
+        if FLEX_ONLY and asset not in self._authoritative_flex_assets:return
         if asset in self.subscribed:return
         try:
             await self.client.subscribe_ticks(asset); response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); self.subscribed.add(asset); log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
@@ -78,10 +79,10 @@ class LiveMarketFeed:
     def schedule_asset(self,asset):
         asset=str(asset).upper().strip()
         if not asset or asset in self.subscribed or asset in self._asset_tasks:return
-        if FLEX_ONLY and asset not in self.assets:return
+        if FLEX_ONLY and asset not in self._authoritative_flex_assets:return
         self._asset_tasks[asset]=asyncio.create_task(self._subscribe_asset(asset))
     async def _discover_and_seed(self):
-        if self.assets:
+        if self.assets and not FLEX_ONLY:
             for asset in list(self.assets): self.schedule_asset(asset)
             log.info("ASSETS_CONFIGURED count=%s assets=%s flex_only=%s",len(self.assets),sorted(self.assets),FLEX_ONLY)
         else: log.info("ASSETS_WAITING_FOR_AUTHENTICATED_FLEX_EVENT_183")
@@ -98,8 +99,7 @@ class LiveMarketFeed:
             elif group=="real":reals.append(item)
         self.client.account_snapshots={"demo":max(demos) if demos else None,"real":max(reals) if reals else None}
         self.client.account_mode="DEMO" if demos else "UNKNOWN"
-        if demos:
-            self.client.account_balance,self.client.account_currency=max(demos)
+        if demos:self.client.account_balance,self.client.account_currency=max(demos)
         log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s",self.client.account_snapshots.get("demo"),self.client.account_snapshots.get("real"),self.client.account_mode)
     def _put_candle(self,asset,candle,notify=False):
         bucket=int(float(candle["timestamp"])//60)*60; candle=dict(candle); candle["timestamp"]=float(bucket); old={x["timestamp"]:x for x in self.history[asset]}; old[bucket]=candle; self.history[asset]=deque(sorted(old.values(),key=lambda z:z["timestamp"])[-360:],maxlen=360)
@@ -121,7 +121,7 @@ class LiveMarketFeed:
             p=normalize(x)
             if not p:continue
             asset,candle=p
-            if FLEX_ONLY and asset not in self.subscribed:continue
+            if FLEX_ONLY and asset not in self._authoritative_flex_assets:continue
             bucket=self._completed_bucket(candle["timestamp"])
             if bucket is None:continue
             candle["timestamp"]=float(bucket); self._put_candle(asset,candle,notify=True)
@@ -132,7 +132,7 @@ class LiveMarketFeed:
             if not isinstance(x,dict):continue
             asset=str(x.get("p",x.get("pair",x.get("symbol","")))).upper().strip(); price=num(x.get("q",x.get("price",x.get("close")))); ts=num(x.get("t",x.get("timestamp",x.get("time"))))
             if not asset or price is None or ts is None:continue
-            if FLEX_ONLY and asset not in self.subscribed:continue
+            if FLEX_ONLY and asset not in self._authoritative_flex_assets:continue
             if ts>1e10:ts/=1000
             self.ticks+=1; bucket=int(ts//60)*60; cur=self.forming.get(asset)
             if cur is None or cur["timestamp"]!=bucket:
