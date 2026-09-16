@@ -10,6 +10,7 @@ from flask import Flask, jsonify, request, Response
 from brain import CandiceBrain
 import brain_fix
 import asset_discovery_fix
+import sitecustomize
 from market_feed import LiveMarketFeed
 from telegram import Telegram
 
