@@ -1,21 +1,31 @@
 from __future__ import annotations
-import json,logging,os,time
+import json, logging, os, time, threading
 from collections import defaultdict
-from datetime import datetime,timezone,timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
 log=logging.getLogger("candice.brain")
 EXPIRIES=(1,2,3,4,5,10,15)
 STRATEGIES=("Trend Following","Breakout","Pullback","Support / Resistance","Candlestick","Momentum","Mean Reversion","Reversal","Multi-Timeframe","Volatility","Market Structure","Price Action")
+
 class CandiceBrain:
  def __init__(self,send,feed):
-  self.send=send;self.feed=feed;self.pending={};self.sent_cycles=set();self.learning_path=Path(os.getenv("CANDICE_LEARNING_FILE","candice_learning.json"));self.learning=self._load();self.stats=defaultdict(int)
+  self.send,self.feed=send,feed;self.pending={};self.sent_cycles=set();self.learning_path=Path(os.getenv("CANDICE_LEARNING_FILE","candice_learning.json"));self.learning=self._load();self.stats=defaultdict(int);self.day_key=self._day_key();self.daily_losses=0;self.consecutive_losses=0;self.max_daily_losses=max(1,int(os.getenv("DAILY_LOSS_LIMIT","5")));self._load_daily()
+ def _day_key(self):return datetime.now(timezone.utc).strftime("%Y-%m-%d")
  def _load(self):
   try:
-   x=json.loads(self.learning_path.read_text());x.setdefault("setups",{});x.setdefault("assets",{});return x
-  except Exception:return {"setups":{},"assets":{}}
+   x=json.loads(self.learning_path.read_text());x.setdefault("setups",{});x.setdefault("assets",{});x.setdefault("daily",{});return x
+  except Exception:return {"setups":{},"assets":{},"daily":{}}
+ def _load_daily(self):
+  x=self.learning.get("daily",{}).get(self.day_key,{})
+  self.daily_losses=int(x.get("losses",0));self.consecutive_losses=int(x.get("consecutive_losses",0))
  def _save(self):
   try:self.learning_path.write_text(json.dumps(self.learning,ensure_ascii=False,indent=2))
   except Exception as e:log.warning("LEARNING_SAVE_FAILED %s",type(e).__name__)
+ def _reset_day_if_needed(self):
+  k=self._day_key()
+  if k!=self.day_key:self.day_key=k;self.daily_losses=0;self.consecutive_losses=0
+ def _blocked(self):self._reset_day_if_needed();return self.daily_losses>=self.max_daily_losses or self.consecutive_losses>=3
  @staticmethod
  def _ema(v,p):
   if len(v)<p:return None
@@ -53,7 +63,10 @@ class CandiceBrain:
   return (q[-1],s,q[-1]-s) if s is not None else None
  @staticmethod
  def _aggregate(d,n):
-  return [{"open":w[0]["open"],"high":max(x["high"] for x in w),"low":min(x["low"] for x in w),"close":w[-1]["close"],"timestamp":w[-1]["timestamp"]} for i in range(0,len(d)-n+1,n) for w in [d[i:i+n]]]
+  out=[]
+  for i in range(0,len(d)-n+1,n):
+   w=d[i:i+n];out.append({"open":w[0]["open"],"high":max(x["high"] for x in w),"low":min(x["low"] for x in w),"close":w[-1]["close"],"timestamp":w[-1]["timestamp"]})
+  return out
  def _trend(self,d,fast=9,slow=21):
   if len(d)<slow:return 0,0
   c=[x["close"] for x in d];ef=self._ema(c,fast);es=self._ema(c,slow);score=0
@@ -109,10 +122,15 @@ class CandiceBrain:
   try:tg.edit(mid,self._message(s,target,target))
   except Exception:pass
  def _result(self,s):
-  if s.get("result") or time.time()<s["signal_time"]+s["expiry"]*60:return
+  if s.get("result") or time.time()<s["expiry_start"]:return
   price=self.feed.live_price(s["asset"])
   if price is None:return
-  diff=price-s["entry"];result="TIE" if abs(diff)<=max(abs(s["entry"])*1e-8,1e-10) else ("WIN" if (diff>0)==(s["direction"]=="UP") else "LOSS");s["exit"]=price;s["result"]=result;s["result_time"]=time.time();key=f"{s['asset']}|{s['direction']}|{s['pattern']}|{s['strategy']}|{s['trend_15']}|{s['expiry']}";x=self.learning["setups"].setdefault(key,{"n":0,"w":0,"l":0,"t":0});x["n"]+=1;x[{"WIN":"w","LOSS":"l","TIE":"t"}[result]]+=1;self._save();self.stats[result]+=1;st=self.feed.status();bal=st.get("account_balance");b="NOT_AVAILABLE" if bal is None else f"{bal:.2f} {st.get('account_currency','')}".strip();self.send(f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI RESULT\n━━━━━━━━━━━━━━━━━━━━\n📊 ASSET: {s['asset']}\n➡️ DIRECTION: {s['direction']}\n💰 ENTRY: {s['entry']:.6f}\n💰 EXIT: {price:.6f}\n⏱️ EXPIRY: {s['expiry']} MIN\n🏁 RESULT: {result}\n🕒 ENTRY: {datetime.fromtimestamp(s['signal_time'],timezone.utc).strftime('%H:%M:%S')} UAE\n🏁 RESULT: {datetime.fromtimestamp(s['result_time'],timezone.utc).strftime('%H:%M:%S')} UAE\n🧠 STRATEGY: {s['strategy']}\n📈 15M TREND: {s['trend_15']}\n💳 BALANCE: {b}\n🟢 ACCOUNT: {st.get('account_mode','UNKNOWN')}\n🧠 LEARNING: UPDATED\n━━━━━━━━━━━━━━━━━━━━")
+  diff=price-s["entry"];result="TIE" if abs(diff)<=max(abs(s["entry"])*1e-8,1e-10) else ("WIN" if (diff>0)==(s["direction"]=="UP") else "LOSS");s.update(exit=price,result=result,result_time=time.time())
+  key=f"{s['asset']}|{s['direction']}|{s['pattern']}|{s['strategy']}|{s['trend_15']}|{s['expiry']}";x=self.learning["setups"].setdefault(key,{"n":0,"w":0,"l":0,"t":0});x["n"]+=1;x[{"WIN":"w","LOSS":"l","TIE":"t"}[result]]+=1;self._reset_day_if_needed();self.stats[result]+=1
+  if result=="LOSS":self.daily_losses+=1;self.consecutive_losses+=1
+  elif result=="WIN":self.consecutive_losses=0
+  self.learning["daily"][self.day_key]={"losses":self.daily_losses,"consecutive_losses":self.consecutive_losses,"signals":self.learning["daily"].get(self.day_key,{}).get("signals",0)};self._save()
+  st=self.feed.status();bal=st.get("account_balance");b="NOT_AVAILABLE" if bal is None else f"{bal:.2f} {st.get('account_currency','')}".strip();self.send(f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI RESULT\n━━━━━━━━━━━━━━━━━━━━\n📊 ASSET: {s['asset']}\n➡️ DIRECTION: {s['direction']}\n💰 ENTRY: {s['entry']:.6f}\n💰 EXIT: {price:.6f}\n⏱️ EXPIRY: {s['expiry']} MIN\n🏁 RESULT: {result}\n🕒 SIGNAL: {datetime.fromtimestamp(s['signal_time'],timezone.utc).strftime('%H:%M:%S')} UAE\n🎯 TARGET: {datetime.fromtimestamp(s['target_time'],timezone.utc).strftime('%H:%M:%S')} UAE\n🏁 RESULT TIME: {datetime.fromtimestamp(s['result_time'],timezone.utc).strftime('%H:%M:%S')} UAE\n🧠 STRATEGY: {s['strategy']}\n📈 15M TREND: {s['trend_15']}\n💳 BALANCE: {b}\n🟢 ACCOUNT: {st.get('account_mode','UNKNOWN')}\n📉 DAILY LOSSES: {self.daily_losses}/{self.max_daily_losses}\n🔁 CONSECUTIVE LOSSES: {self.consecutive_losses}/3\n🧠 LEARNING: UPDATED\n━━━━━━━━━━━━━━━━━━━━")
  def on_candle(self,asset,candle):
   for s in list(self.pending.values()):
    if s["asset"]==asset:self._result(s)
@@ -123,27 +141,23 @@ class CandiceBrain:
     x=self.analyze(asset,self.feed.snapshot(asset),self.feed.live_price(asset))
     if x:candidates.append(x)
    except Exception:log.exception("ASSET_ANALYSIS_FAILED asset=%s",asset)
-  candidates.sort(key=lambda x:(x["confidence"],-x["expiry"]),reverse=True);return (candidates[0] if candidates else None),len(candidates)
+  candidates.sort(key=lambda x:(x["confidence"],-x["expiry"]),reverse=True);return candidates[0] if candidates else None
  def run(self):
-  log.info("CANDICE_BRAIN_ON | ALL_ASSETS | LIVE_PRICE + LIVE_CANDLE | 1m + 1h + 15m | 5m cycles")
   while True:
-   now=time.time();target=(int(now)//300+1)*300;signal_at=target-40;cycle=int(target//300)
-   for s in list(self.pending.values()):self._result(s)
-   while time.time()<signal_at:time.sleep(min(1,signal_at-time.time()))
-   if cycle in self.sent_cycles:continue
-   best,qualified=self._best_scan()
-   if best:
-    fresh=self.feed.live_price(best["asset"])
-    if fresh is not None:
-     best["entry"]=fresh;best["signal_time"]=time.time();best["target_time"]=target;key=f"{cycle}|{best['asset']}|{int(best['signal_time']//60)}"
-     if key not in self.pending:
-      self.pending[key]=best;msg=self.send(self._message(best,target))
-      if isinstance(msg,dict) and msg.get("message_id"):
-       best["telegram_message_id"]=msg["message_id"]
-       import threading;threading.Thread(target=self._countdown,args=(best,target),daemon=True,name="candice-telegram-countdown").start()
-      log.info("CANDICE_SIGNAL cycle=%s asset=%s direction=%s expiry=%sm entry=%s",cycle,best["asset"],best["direction"],best["expiry"],fresh)
-   else:log.warning("CANDICE_NO_VALID_SETUP cycle=%s qualified=0",cycle)
-   self.sent_cycles.add(cycle)
-   while time.time()<target:
-    for s in list(self.pending.values()):self._result(s)
-    time.sleep(1)
+   try:
+    self._reset_day_if_needed();now=time.time();target=(int(now//300)+1)*300;time.sleep(max(0,target-now-40))
+    if self._blocked():time.sleep(max(1,target-time.time()));continue
+    s=self._best_scan()
+    if not s:time.sleep(2);continue
+    fresh=self.feed.live_price(s["asset"])
+    if fresh is None:continue
+    cycle=int(target//300);dedupe=f"{s['asset']}|{s['expiry']}|{cycle}"
+    if dedupe in self.sent_cycles:continue
+    self.sent_cycles.add(dedupe);s["entry"]=fresh;s["signal_time"]=time.time();s["target_time"]=target;s["expiry_start"]=target+s["expiry"]*60
+    r=self.send(self._message(s,target,s["signal_time"]))
+    if not isinstance(r,dict):log.warning("TELEGRAM_SIGNAL_NOT_CONFIRMED");continue
+    s["telegram_message_id"]=r.get("message_id");key=f"{s['asset']}|{s['direction']}|{s['expiry']}|{cycle}";self.pending[key]=s
+    self.learning["daily"].setdefault(self.day_key,{"losses":self.daily_losses,"consecutive_losses":self.consecutive_losses,"signals":0});self.learning["daily"][self.day_key]["signals"]+=1;self._save()
+    threading.Thread(target=self._countdown,args=(s,target),daemon=True).start()
+    while time.time()<target:time.sleep(.5)
+   except Exception:log.exception("BRAIN_LOOP_ERROR");time.sleep(2)
