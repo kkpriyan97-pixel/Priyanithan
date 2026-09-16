@@ -30,8 +30,8 @@ def _has_flex_marker(node):
     if not isinstance(node, dict):
         return False
     # Accept only explicit Flex/Flex Time evidence from the market payload.
-    # OlympTrade's Flex asset list exposes profitability, while the UI mode
-    # may be encoded as Flex, Flex Time, flex_time, or a boolean flag.
+    # The Flex asset list exposes profitability, while the mode can also be
+    # encoded as Flex, Flex Time, flex_time, or an explicit boolean flag.
     for key, value in node.items():
         k = str(key).lower()
         if k in {"mode", "trading_mode", "trade_mode", "type", "market_type", "market", "name"} and _is_flex_mode(value):
@@ -48,7 +48,6 @@ def _has_flex_marker(node):
                 return True
             if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "enabled", "available", "flex", "flex time", "flex_time", "flextime"}:
                 return True
-        # Flex asset rows shown in the app carry a profitability value.
         if k in {"profitability", "profitability_percent", "profitability_percentage", "max_profitability", "max_profitability_percent", "payout", "payout_percent"}:
             try:
                 number = float(str(value).replace("%", "").strip())
@@ -92,7 +91,8 @@ def apply():
     async def hardened_start(self):
         async def enhanced_assets(msg):
             found = set()
-            _extract(msg.get("d") if isinstance(msg, dict) else msg, found, False)
+            payload = msg.get("d") if isinstance(msg, dict) else msg
+            _extract(payload, found, False)
             new = found - self.assets
             if new:
                 self.assets.update(new)
@@ -100,8 +100,8 @@ def apply():
                 for asset in sorted(new):
                     if asset not in self.subscribed:
                         self.schedule_asset(asset)
-            elif FLEX_ONLY and isinstance(msg, dict):
-                log.debug("FLEX_TIME_ASSET_DISCOVERY no_explicit_flex_time_assets event=%s", msg.get("e"))
+            elif FLEX_ONLY and isinstance(msg, dict) and msg.get("e") in ASSET_EVENTS:
+                log.info("FLEX_TIME_ASSET_EVENT_RECEIVED event=%s no_qualified_assets", msg.get("e"))
 
         if FLEX_ONLY:
             self.assets.clear()
@@ -111,23 +111,24 @@ def apply():
         async def request_discovery_events():
             if not self.client.running:
                 return
-            # 220 is the primary asset-list request. The additional known
-            # asset events are also refreshed so Flex Time rows are exposed
-            # even when the server sends them on a secondary event channel.
             events = list(dict.fromkeys((220,) + ASSET_EVENTS))
+            log.info("FLEX_TIME_ASSET_EVENT_REQUESTS events=%s", events)
             for event_id in events:
                 try:
                     await self.client.send(98, [event_id], False)
                 except Exception as exc:
                     log.debug("FLEX_TIME_ASSET_EVENT_REQUEST_FAILED event=%s error=%s", event_id, type(exc).__name__)
 
-        await request_discovery_events()
+        # Do not block engine readiness on a discovery request. The WebSocket
+        # callback receives the resulting asset-list messages asynchronously.
+        self._asset_discovery_request_task = asyncio.create_task(request_discovery_events())
 
         async def discovery_watch():
             while self.connected:
                 try:
-                    await request_discovery_events()
                     await asyncio.sleep(30)
+                    if self.connected:
+                        await request_discovery_events()
                 except asyncio.CancelledError:
                     return
                 except Exception as exc:
@@ -137,9 +138,10 @@ def apply():
         log.info("FLEX_TIME_ASSET_DISCOVERY_WATCH_STARTED events=%s flex_only=%s", ASSET_EVENTS, FLEX_ONLY)
 
     async def hardened_stop(self):
-        task = getattr(self, "_asset_discovery_task", None)
-        if task and not task.done():
-            task.cancel()
+        for name in ("_asset_discovery_task", "_asset_discovery_request_task"):
+            task = getattr(self, name, None)
+            if task and not task.done():
+                task.cancel()
         await original_stop(self)
 
     LiveMarketFeed.start = hardened_start
