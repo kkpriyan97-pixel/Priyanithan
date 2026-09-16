@@ -33,7 +33,7 @@ def walk_candles(x):
 class LiveMarketFeed:
     def __init__(self,on_candle):
         self.on_candle=on_candle; self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip(); self.client=OlympReadOnlyClient(self.token)
-        self.assets=set() if FLEX_ONLY else {a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float)
+        self.assets=set() if FLEX_ONLY else {a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float); self._notified_buckets=defaultdict(set)
         self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._last_poll_log=0; self._asset_tasks={}
     @staticmethod
     def _current_bucket(): return int(time.time()//60)*60
@@ -72,17 +72,19 @@ class LiveMarketFeed:
     async def _subscribe_asset(self,asset):
         if asset in self.subscribed:return
         try:
-            await self.client.subscribe_ticks(asset); response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); self.subscribed.add(asset); self.assets.add(asset); log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
+            await self.client.subscribe_ticks(asset); response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); self.subscribed.add(asset); log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
         except Exception as e:log.warning("ASSET_SUBSCRIBE_FAILED asset=%s error=%s",asset,type(e).__name__)
         finally:self._asset_tasks.pop(asset,None)
     def schedule_asset(self,asset):
         asset=str(asset).upper().strip()
         if not asset or asset in self.subscribed or asset in self._asset_tasks:return
-        self.assets.add(asset); self._asset_tasks[asset]=asyncio.create_task(self._subscribe_asset(asset))
+        if FLEX_ONLY and asset not in self.assets:return
+        self._asset_tasks[asset]=asyncio.create_task(self._subscribe_asset(asset))
     async def _discover_and_seed(self):
-        for asset in list(self.assets): self.schedule_asset(asset)
-        if self.assets: log.info("ASSETS_CONFIGURED count=%s assets=%s flex_only=%s",len(self.assets),sorted(self.assets),FLEX_ONLY)
-        else: log.info("ASSETS_WAITING_FOR_FLEX_DISCOVERY")
+        if self.assets:
+            for asset in list(self.assets): self.schedule_asset(asset)
+            log.info("ASSETS_CONFIGURED count=%s assets=%s flex_only=%s",len(self.assets),sorted(self.assets),FLEX_ONLY)
+        else: log.info("ASSETS_WAITING_FOR_AUTHENTICATED_FLEX_EVENT_183")
     def _account(self,msg):
         d=msg.get("d") if isinstance(msg,dict) else None
         if not isinstance(d,list):return
@@ -95,17 +97,14 @@ class LiveMarketFeed:
             if group=="demo":demos.append(item)
             elif group=="real":reals.append(item)
         self.client.account_snapshots={"demo":max(demos) if demos else None,"real":max(reals) if reals else None}
-        if demos and reals:self.client.account_mode="BOTH"
-        elif demos:self.client.account_mode="DEMO"
-        elif reals:self.client.account_mode="REAL"
-        else:self.client.account_mode="UNKNOWN"
-        selected=(reals or demos)
-        if selected:self.client.account_balance,self.client.account_currency=max(selected)
+        self.client.account_mode="DEMO" if demos else "UNKNOWN"
+        if demos:
+            self.client.account_balance,self.client.account_currency=max(demos)
         log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s",self.client.account_snapshots.get("demo"),self.client.account_snapshots.get("real"),self.client.account_mode)
     def _put_candle(self,asset,candle,notify=False):
         bucket=int(float(candle["timestamp"])//60)*60; candle=dict(candle); candle["timestamp"]=float(bucket); old={x["timestamp"]:x for x in self.history[asset]}; old[bucket]=candle; self.history[asset]=deque(sorted(old.values(),key=lambda z:z["timestamp"])[-360:],maxlen=360)
-        if notify and bucket>self.last_completed[asset]:
-            self.last_completed[asset]=float(bucket); self.candles+=1; log.info("CANDLE_COMPLETED asset=%s timestamp=%s source=feed",asset,bucket)
+        if notify and bucket>self.last_completed[asset] and bucket not in self._notified_buckets[asset]:
+            self._notified_buckets[asset].add(bucket); self.last_completed[asset]=float(bucket); self.candles+=1; log.info("CANDLE_COMPLETED asset=%s timestamp=%s source=feed",asset,bucket)
             try:self.on_candle(asset,dict(candle))
             except Exception:log.exception("CANDLE_CALLBACK_FAILED asset=%s",asset)
     def _consume_history(self,asset,msg,seed=False):
@@ -123,7 +122,7 @@ class LiveMarketFeed:
             if not p:continue
             asset,candle=p
             if FLEX_ONLY and asset not in self.subscribed:continue
-            self.assets.add(asset); bucket=self._completed_bucket(candle["timestamp"])
+            bucket=self._completed_bucket(candle["timestamp"])
             if bucket is None:continue
             candle["timestamp"]=float(bucket); self._put_candle(asset,candle,notify=True)
     async def _tick(self,msg):
@@ -135,7 +134,7 @@ class LiveMarketFeed:
             if not asset or price is None or ts is None:continue
             if FLEX_ONLY and asset not in self.subscribed:continue
             if ts>1e10:ts/=1000
-            self.assets.add(asset); self.ticks+=1; bucket=int(ts//60)*60; cur=self.forming.get(asset)
+            self.ticks+=1; bucket=int(ts//60)*60; cur=self.forming.get(asset)
             if cur is None or cur["timestamp"]!=bucket:
                 if cur and cur["timestamp"]>self.last_completed[asset]:self._put_candle(asset,cur,notify=True)
                 self.forming[asset]={"open":price,"high":price,"low":price,"close":price,"timestamp":float(bucket)}
@@ -155,8 +154,8 @@ class LiveMarketFeed:
                         completed=[c for c in history if float(c["timestamp"])<current_bucket]
                         if not completed:continue
                         latest=max(float(c["timestamp"]) for c in completed)
-                        if latest>before:
-                            candle=next(c for c in completed if float(c["timestamp"])==latest); self.last_completed[asset]=latest; self.candles+=1; log.info("CANDLE_COMPLETED asset=%s timestamp=%s source=history_poll",asset,int(latest)); self.on_candle(asset,dict(candle))
+                        if latest>before and int(latest) not in self._notified_buckets[asset]:
+                            candle=next(c for c in completed if float(c["timestamp"])==latest); self._notified_buckets[asset].add(int(latest)); self.last_completed[asset]=latest; self.candles+=1; log.info("CANDLE_COMPLETED asset=%s timestamp=%s source=history_poll",asset,int(latest)); self.on_candle(asset,dict(candle))
                     except Exception as e:log.warning("HISTORY_REFRESH_FAILED asset=%s error=%s",asset,type(e).__name__)
                 now=time.time()
                 if now-self._last_poll_log>=30:
