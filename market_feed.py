@@ -61,7 +61,13 @@ class LiveMarketFeed:
             if not task.done(): task.cancel()
         await self.client.close()
     async def _connect_and_seed(self):
-        await self.client.connect(); self.connected=True; self._last_tick_at=time.time(); await self.client.initialize_read_only(); self.subscribed.clear(); self._asset_tasks.clear(); await self._discover_and_seed()
+        await self.client.connect(); self.connected=True; self._last_tick_at=time.time(); await self.client.initialize_read_only(); self.subscribed.clear(); self._asset_tasks.clear();
+        if FLEX_ONLY and self._authoritative_flex_assets:
+            self.assets=set(self._authoritative_flex_assets)
+            log.info("FLEX_RECONNECT_RESTORE_UNIVERSE assets=%s",len(self.assets))
+            for asset in sorted(self._authoritative_flex_assets): self.schedule_asset(asset)
+        else:
+            await self._discover_and_seed()
     async def _flex_probe_loop(self):
         log.info("FLEX_AUTHENTICATED_PROBE_LOOP_STARTED interval=%ss",FLEX_PROBE_SECONDS)
         while self.connected:
@@ -95,7 +101,7 @@ class LiveMarketFeed:
                 self._watchdog_reconnecting=True
                 log.warning("OLYMP_FEED_STALE seconds=%.1f ticks=%s assets=%s subscribed=%s action=reconnect",stale,self.ticks,len(self.assets),len(self.subscribed))
                 try:
-                    await self.client.close(); self.subscribed.clear(); self.forming.clear(); self._last_quote_price.clear(); self._last_quote_ts.clear(); self._last_quote_at.clear(); self._authoritative_flex_assets.clear(); self.assets.clear() if FLEX_ONLY else None
+                    await self.client.close(); self.subscribed.clear(); self.forming.clear(); self._last_quote_price.clear(); self._last_quote_ts.clear(); self._last_quote_at.clear(); log.info("FLEX_ASSET_UNIVERSE_PRESERVED_FOR_RECONNECT assets=%s",len(self._authoritative_flex_assets))
                     await asyncio.sleep(1); await self._connect_and_seed(); delay=2
                     log.info("OLYMP_STALE_RECONNECT_OK assets=%s subscribed=%s ticks=%s",len(self.assets),len(self.subscribed),self.ticks)
                 except asyncio.CancelledError:return
