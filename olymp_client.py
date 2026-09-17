@@ -113,13 +113,16 @@ class OlympReadOnlyClient:
   if rows:self._capture_accounts(rows)
  async def initialize_read_only(self):
   self.on(55,self._capture_balance_message)
+  # Establish the authenticated session first. Some authenticated inventory
+  # subscriptions are ignored when sent before session initialization.
+  for _ in range(2):
+   try:await self.send(90,{},True,5)
+   except Exception as e:log.debug("SESSION_INIT_FAILED error=%s",type(e).__name__)
+  await asyncio.sleep(1)
   subscriptions=[[183],[220],[110,700,112,140,1038,1037,1039,141,22,26,111],[1054,1076,1301,1097],[141,241],[230,231],[75],[1055],[2223,2301,55,150,152,151,126,602,601],[2076],[126]]
   for sub in subscriptions:
    try:await self.send(98,sub,False)
    except Exception as e:log.debug("SUBSCRIPTION_INIT_FAILED error=%s",type(e).__name__)
-  for _ in range(2):
-   try:await self.send(90,{},True,5)
-   except Exception as e:log.debug("SESSION_INIT_FAILED error=%s",type(e).__name__)
   await asyncio.sleep(2)
   snapshots={"demo":self.account_snapshots.get("demo"),"real":self.account_snapshots.get("real")};any_success=False
   for group in ("demo","real"):
