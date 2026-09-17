@@ -7,14 +7,16 @@ FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0", 
 async def _flex_refresh_loop(feed):
     while getattr(feed, "client", None) is not None and getattr(feed.client, "running", False):
         try:
-            # 183 is the only accepted account/Flex asset channel. No public/global fallback.
+            # Ask the authenticated Flex channel frequently so the account asset
+            # universe can be learned progressively instead of waiting 30s per
+            # fragment. Event 183 remains the only accepted source.
             await feed.client.send(98, [183], False)
             log.debug("FLEX_ASSET_REFRESH_REQUEST event=183")
         except asyncio.CancelledError:
             return
         except Exception as e:
             log.debug("FLEX_ASSET_REFRESH_FAILED error=%s", type(e).__name__)
-        await asyncio.sleep(30)
+        await asyncio.sleep(2)
 
 def apply():
     from market_feed import LiveMarketFeed
@@ -31,7 +33,7 @@ def apply():
         if FLEX_ONLY and getattr(self, "client", None):
             task = asyncio.create_task(_flex_refresh_loop(self))
             self._flex_refresh_task = task
-        log.info("ACCOUNT_ASSET_DISCOVERY_DISABLED_GENERIC_SOURCE=true authenticated_flex_channel=event_183 strict_fail_closed=true")
+        log.info("ACCOUNT_ASSET_DISCOVERY_DISABLED_GENERIC_SOURCE=true authenticated_flex_channel=event_183 strict_fail_closed=true refresh_interval=2s")
 
     async def hardened_stop(self):
         task = getattr(self, "_flex_refresh_task", None)
