@@ -61,10 +61,14 @@ def _attach(feed):
     feed._flex_last_event = 0.0
 
     async def _finalize():
-        # Event 183 is observed as a stream/fragmented response, not a complete
-        # snapshot. Give it a collection window so Brain can scan the full
-        # authenticated Flex universe instead of replacing it every 2 seconds.
-        await asyncio.sleep(30.0)
+        # Event 183 arrives as fragmented authenticated account data. Wait for
+        # a short quiet period after the most recent fragment, then publish the
+        # accumulated universe. New fragments reset this timer.
+        while True:
+            last = feed._flex_last_event
+            await asyncio.sleep(8.0)
+            if last == feed._flex_last_event:
+                break
         found = set(feed._flex_event_batch)
         feed._flex_event_batch.clear()
         if not found:
@@ -74,7 +78,6 @@ def _attach(feed):
         feed._flex_seen_assets.update(found)
         authoritative = set(feed._flex_seen_assets)
         feed._authoritative_flex_assets = authoritative
-        old = set(feed.assets)
         feed.assets = set(authoritative)
 
         log.info(
@@ -87,6 +90,7 @@ def _attach(feed):
 
     async def on_message(msg):
         # HARD RULE: only authenticated Flex event 183 defines the asset universe.
+        # No OTC/REAL classification is inferred from symbol names or price data.
         if not isinstance(msg, dict) or msg.get("e") != 183:
             return
         found = set()
