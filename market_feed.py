@@ -6,6 +6,9 @@ log = logging.getLogger("candice.feed")
 FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0","false","no","off"}
 STALE_TICK_SECONDS = max(20, int(os.getenv("FEED_STALE_TICK_SECONDS", "45")))
 FLEX_PROBE_SECONDS = max(5, int(os.getenv("FLEX_PROBE_SECONDS", "10")))
+MIN_HISTORY_READY = max(60, int(os.getenv("MIN_HISTORY_READY", "60")))
+SUBSCRIBE_CONCURRENCY = max(2, int(os.getenv("SUBSCRIBE_CONCURRENCY", "8")))
+ASSET_RETRY_SECONDS = max(15, int(os.getenv("ASSET_RETRY_SECONDS", "45")))
 
 def num(v):
     try: return float(v)
@@ -36,7 +39,8 @@ class LiveMarketFeed:
     def __init__(self,on_candle):
         self.on_candle=on_candle; self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip(); self.client=OlympReadOnlyClient(self.token)
         self.assets=set() if FLEX_ONLY else {a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float); self._notified_buckets=defaultdict(set)
-        self._authoritative_flex_assets=set(); self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._flex_probe_task=None; self._last_poll_log=0; self._asset_tasks={}; self._last_tick_at=0.0; self._last_candle_at=0.0; self._watchdog_reconnecting=False
+        self._authoritative_flex_assets=set(); self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._flex_probe_task=None; self._asset_retry_task=None; self._last_poll_log=0; self._asset_tasks={}; self._asset_retry_at={}
+        self._last_tick_at=0.0; self._last_candle_at=0.0; self._last_quote_price={}; self._last_quote_ts={}; self._last_quote_at={}; self._watchdog_reconnecting=False; self._subscribe_sem=asyncio.Semaphore(SUBSCRIBE_CONCURRENCY)
     @staticmethod
     def _current_bucket(): return int(time.time()//60)*60
     @staticmethod
@@ -46,32 +50,40 @@ class LiveMarketFeed:
         if not self.token: raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is required")
         self.client.on(1,self._tick); self.client.on(1003,self._candle_response); self.client.on(55,self._account)
         await self._connect_and_seed(); self._reconnect_task=asyncio.create_task(self._connection_watch()); self._poll_task=asyncio.create_task(self._poll_loop())
-        if FLEX_ONLY:self._flex_probe_task=asyncio.create_task(self._flex_probe_loop())
-        log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY | FLEX_ONLY=%s STALE_WATCHDOG=%ss FLEX_PROBE=%ss",FLEX_ONLY,STALE_TICK_SECONDS,FLEX_PROBE_SECONDS)
+        if FLEX_ONLY:
+            self._flex_probe_task=asyncio.create_task(self._flex_probe_loop()); self._asset_retry_task=asyncio.create_task(self._asset_retry_loop())
+        log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY | FLEX_ONLY=%s STALE_WATCHDOG=%ss FLEX_PROBE=%ss HISTORY_READY=%s SUBSCRIBE_CONCURRENCY=%s",FLEX_ONLY,STALE_TICK_SECONDS,FLEX_PROBE_SECONDS,MIN_HISTORY_READY,SUBSCRIBE_CONCURRENCY)
     async def stop(self):
         self.connected=False
-        for task in (self._reconnect_task,self._poll_task,self._flex_probe_task):
+        for task in (self._reconnect_task,self._poll_task,self._flex_probe_task,self._asset_retry_task):
             if task and not task.done(): task.cancel()
         for task in list(self._asset_tasks.values()):
             if not task.done(): task.cancel()
         await self.client.close()
     async def _connect_and_seed(self):
-        await self.client.connect(); self.connected=True; self._last_tick_at=time.time(); await self.client.initialize_read_only(); self.subscribed.clear(); await self._discover_and_seed()
+        await self.client.connect(); self.connected=True; self._last_tick_at=time.time(); await self.client.initialize_read_only(); self.subscribed.clear(); self._asset_tasks.clear(); await self._discover_and_seed()
     async def _flex_probe_loop(self):
         log.info("FLEX_AUTHENTICATED_PROBE_LOOP_STARTED interval=%ss",FLEX_PROBE_SECONDS)
         while self.connected:
             try:
                 if self.client.running and not self._authoritative_flex_assets:
                     try:
-                        await self.client.send(98,[183],False)
-                        log.info("FLEX_EVENT_183_RESUBSCRIBE requested=true")
-                    except Exception as e:
-                        log.warning("FLEX_EVENT_183_RESUBSCRIBE_FAILED error=%s",type(e).__name__)
+                        await self.client.send(98,[183],False); log.info("FLEX_EVENT_183_RESUBSCRIBE requested=true")
+                    except Exception as e: log.warning("FLEX_EVENT_183_RESUBSCRIBE_FAILED error=%s",type(e).__name__)
                 await asyncio.sleep(FLEX_PROBE_SECONDS)
             except asyncio.CancelledError:return
-            except Exception as e:
-                log.warning("FLEX_PROBE_LOOP_ERROR error=%s",type(e).__name__)
-                await asyncio.sleep(FLEX_PROBE_SECONDS)
+            except Exception as e: log.warning("FLEX_PROBE_LOOP_ERROR error=%s",type(e).__name__); await asyncio.sleep(FLEX_PROBE_SECONDS)
+    async def _asset_retry_loop(self):
+        log.info("ASSET_VALIDATION_RETRY_LOOP_STARTED interval=%ss",ASSET_RETRY_SECONDS)
+        while self.connected:
+            try:
+                now=time.time()
+                for asset in sorted(self._authoritative_flex_assets):
+                    if asset in self.subscribed or asset in self._asset_tasks: continue
+                    if now >= self._asset_retry_at.get(asset,0): self.schedule_asset(asset)
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:return
+            except Exception as e: log.warning("ASSET_RETRY_LOOP_ERROR error=%s",type(e).__name__); await asyncio.sleep(5)
     async def _connection_watch(self):
         log.info("FEED_CONNECTION_WATCH_STARTED stale_threshold=%ss",STALE_TICK_SECONDS)
         delay=2
@@ -79,20 +91,15 @@ class LiveMarketFeed:
             if self.client.auth_invalid:
                 self.connected=False; self.subscribed.clear(); log.error("OLYMP_RECONNECT_STOPPED reason=invalid_token"); break
             stale=time.time()-self._last_tick_at if self._last_tick_at else 0
-            # An empty Flex session is not evidence of a dead connection. Keep
-            # the authenticated session alive and let the discovery probe work.
-            # Reconnect automatically only after real market subscriptions exist
-            # and their tick stream has actually gone stale.
             if self.client.running and self.subscribed and stale >= STALE_TICK_SECONDS and not self._watchdog_reconnecting:
                 self._watchdog_reconnecting=True
                 log.warning("OLYMP_FEED_STALE seconds=%.1f ticks=%s assets=%s subscribed=%s action=reconnect",stale,self.ticks,len(self.assets),len(self.subscribed))
                 try:
-                    await self.client.close(); self.subscribed.clear(); self.forming.clear(); self._authoritative_flex_assets.clear(); self.assets.clear() if FLEX_ONLY else None
+                    await self.client.close(); self.subscribed.clear(); self.forming.clear(); self._last_quote_price.clear(); self._last_quote_ts.clear(); self._last_quote_at.clear(); self._authoritative_flex_assets.clear(); self.assets.clear() if FLEX_ONLY else None
                     await asyncio.sleep(1); await self._connect_and_seed(); delay=2
                     log.info("OLYMP_STALE_RECONNECT_OK assets=%s subscribed=%s ticks=%s",len(self.assets),len(self.subscribed),self.ticks)
                 except asyncio.CancelledError:return
-                except Exception as e:
-                    self.client.running=False; log.warning("OLYMP_STALE_RECONNECT_FAILED error=%s",type(e).__name__); delay=min(delay*2,30)
+                except Exception as e: self.client.running=False; log.warning("OLYMP_STALE_RECONNECT_FAILED error=%s",type(e).__name__); delay=min(delay*2,30)
                 finally:self._watchdog_reconnecting=False
             elif not self.client.running and not self._watchdog_reconnecting:
                 log.warning("OLYMP_RECONNECT_START delay=%ss",delay); self.subscribed.clear()
@@ -105,12 +112,22 @@ class LiveMarketFeed:
             else: delay=2
             await asyncio.sleep(1)
     async def _subscribe_asset(self,asset):
-        if FLEX_ONLY and asset not in self._authoritative_flex_assets:return
-        if asset in self.subscribed:return
-        try:
-            await self.client.subscribe_ticks(asset); response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); self.subscribed.add(asset); self._last_tick_at=time.time(); log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
-        except Exception as e:log.warning("ASSET_SUBSCRIBE_FAILED asset=%s error=%s",asset,type(e).__name__)
-        finally:self._asset_tasks.pop(asset,None)
+        async with self._subscribe_sem:
+            if FLEX_ONLY and asset not in self._authoritative_flex_assets:return
+            if asset in self.subscribed:return
+            try:
+                response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); history_len=len(self.history[asset])
+                if history_len < MIN_HISTORY_READY:
+                    self._asset_retry_at[asset]=time.time()+ASSET_RETRY_SECONDS
+                    log.info("ASSET_VALIDATION_RETRY asset=%s history=%s required=%s",asset,history_len,MIN_HISTORY_READY)
+                    return
+                await self.client.subscribe_ticks(asset); self.subscribed.add(asset); self._asset_retry_at.pop(asset,None); latest=self.history[asset][-1] if self.history[asset] else None
+                if latest:
+                    self._last_quote_price[asset]=float(latest["close"]); self._last_quote_ts[asset]=float(latest["timestamp"]); self._last_quote_at[asset]=0.0
+                log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,history_len)
+            except Exception as e:
+                self._asset_retry_at[asset]=time.time()+ASSET_RETRY_SECONDS; log.warning("ASSET_SUBSCRIBE_FAILED asset=%s error=%s retry=%ss",asset,type(e).__name__,ASSET_RETRY_SECONDS)
+            finally:self._asset_tasks.pop(asset,None)
     def schedule_asset(self,asset):
         asset=str(asset).upper().strip()
         if not asset or asset in self.subscribed or asset in self._asset_tasks:return
@@ -132,8 +149,7 @@ class LiveMarketFeed:
             item=(balance,str(x.get("currency","") or ""))
             if group=="demo":demos.append(item)
             elif group=="real":reals.append(item)
-        self.client.account_snapshots={"demo":max(demos) if demos else None,"real":max(reals) if reals else None}
-        self.client.account_mode="DEMO" if demos else "UNKNOWN"
+        self.client.account_snapshots={"demo":max(demos) if demos else None,"real":max(reals) if reals else None}; self.client.account_mode="DEMO" if demos else "UNKNOWN"
         if demos:self.client.account_balance,self.client.account_currency=max(demos)
         log.info("ACCOUNT_SNAPSHOT demo=%s real=%s mode=%s",self.client.account_snapshots.get("demo"),self.client.account_snapshots.get("real"),self.client.account_mode)
     def _put_candle(self,asset,candle,notify=False):
@@ -169,7 +185,7 @@ class LiveMarketFeed:
             if not asset or price is None or ts is None:continue
             if FLEX_ONLY and asset not in self._authoritative_flex_assets:continue
             if ts>1e10:ts/=1000
-            self.ticks+=1; self._last_tick_at=time.time(); bucket=int(ts//60)*60; cur=self.forming.get(asset)
+            self.ticks+=1; self._last_tick_at=time.time(); self._last_quote_price[asset]=price; self._last_quote_ts[asset]=ts; self._last_quote_at[asset]=time.time(); bucket=int(ts//60)*60; cur=self.forming.get(asset)
             if cur is None or cur["timestamp"]!=bucket:
                 if cur and cur["timestamp"]>self.last_completed[asset]:self._put_candle(asset,cur,notify=True)
                 self.forming[asset]={"open":price,"high":price,"low":price,"close":price,"timestamp":float(bucket)}
@@ -194,15 +210,21 @@ class LiveMarketFeed:
                     except Exception as e:log.warning("HISTORY_REFRESH_FAILED asset=%s error=%s",asset,type(e).__name__)
                 now=time.time(); stale=(now-self._last_tick_at) if self._last_tick_at else 0
                 if now-self._last_poll_log>=30:
-                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s account_mode=%s flex_only=%s tick_age=%.1f",self.connected and self.client.running,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed),self.client.account_mode,FLEX_ONLY,stale)
+                    self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s account_mode=%s flex_only=%s tick_age=%.1f ready_history=%s",self.connected and self.client.running,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed),self.client.account_mode,FLEX_ONLY,stale,sum(1 for a in self.subscribed if len(self.history.get(a,()))>=MIN_HISTORY_READY))
                 await asyncio.sleep(2)
             except asyncio.CancelledError:return
             except Exception as e:log.exception("POLL_LOOP_ERROR error=%s",type(e).__name__);await asyncio.sleep(2)
     def snapshot(self,asset):return list(self.history.get(asset,()))
     def live_price(self,asset):
         cur=self.forming.get(asset)
-        return float(cur["close"]) if cur else (float(self.history[asset][-1]["close"]) if self.history.get(asset) else None)
+        if cur:return float(cur["close"])
+        history=self.history.get(asset)
+        return float(history[-1]["close"]) if history else None
+    def live_quote(self,asset):
+        a=str(asset).upper().strip(); price=self._last_quote_price.get(a); ts=self._last_quote_ts.get(a); seen=self._last_quote_at.get(a)
+        if price is None or ts is None or not seen:return None
+        age=max(0.0,time.time()-float(seen)); return float(price),float(ts),age
     def status(self):
-        tick_age=(time.time()-self._last_tick_at) if self._last_tick_at else None
-        healthy=self.connected and self.client.running and (not self.subscribed or tick_age is None or tick_age<STALE_TICK_SECONDS)
-        return {"connected":healthy,"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency,"account_snapshots":getattr(self.client,"account_snapshots",{"demo":None,"real":None}),"flex_only":FLEX_ONLY,"tick_age_seconds":tick_age,"stale_tick_threshold":STALE_TICK_SECONDS}
+        tick_age=(time.time()-self._last_tick_at) if self._last_tick_at else None; healthy=self.connected and self.client.running and (not self.subscribed or tick_age is None or tick_age<STALE_TICK_SECONDS)
+        ready_history=sum(1 for a in self.subscribed if len(self.history.get(a,()))>=MIN_HISTORY_READY)
+        return {"connected":healthy,"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"ready_history":ready_history,"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency,"account_snapshots":getattr(self.client,"account_snapshots",{"demo":None,"real":None}),"flex_only":FLEX_ONLY,"tick_age_seconds":tick_age,"stale_tick_threshold":STALE_TICK_SECONDS}
