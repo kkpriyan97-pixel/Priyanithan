@@ -79,8 +79,11 @@ class LiveMarketFeed:
             if self.client.auth_invalid:
                 self.connected=False; self.subscribed.clear(); log.error("OLYMP_RECONNECT_STOPPED reason=invalid_token"); break
             stale=time.time()-self._last_tick_at if self._last_tick_at else 0
-            no_assets=FLEX_ONLY and not self._authoritative_flex_assets
-            if self.client.running and (self.subscribed and stale >= STALE_TICK_SECONDS or no_assets and stale >= STALE_TICK_SECONDS) and not self._watchdog_reconnecting:
+            # An empty Flex session is not evidence of a dead connection. Keep
+            # the authenticated session alive and let the discovery probe work.
+            # Reconnect automatically only after real market subscriptions exist
+            # and their tick stream has actually gone stale.
+            if self.client.running and self.subscribed and stale >= STALE_TICK_SECONDS and not self._watchdog_reconnecting:
                 self._watchdog_reconnecting=True
                 log.warning("OLYMP_FEED_STALE seconds=%.1f ticks=%s assets=%s subscribed=%s action=reconnect",stale,self.ticks,len(self.assets),len(self.subscribed))
                 try:
@@ -105,7 +108,7 @@ class LiveMarketFeed:
         if FLEX_ONLY and asset not in self._authoritative_flex_assets:return
         if asset in self.subscribed:return
         try:
-            await self.client.subscribe_ticks(asset); response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); self.subscribed.add(asset); log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
+            await self.client.subscribe_ticks(asset); response=await self.client.request_candles(asset,360); self._consume_history(asset,response,seed=True); self.subscribed.add(asset); self._last_tick_at=time.time(); log.info("ASSET_SUBSCRIBED asset=%s history=%s",asset,len(self.history[asset]))
         except Exception as e:log.warning("ASSET_SUBSCRIBE_FAILED asset=%s error=%s",asset,type(e).__name__)
         finally:self._asset_tasks.pop(asset,None)
     def schedule_asset(self,asset):
@@ -201,4 +204,5 @@ class LiveMarketFeed:
         return float(cur["close"]) if cur else (float(self.history[asset][-1]["close"]) if self.history.get(asset) else None)
     def status(self):
         tick_age=(time.time()-self._last_tick_at) if self._last_tick_at else None
-        return {"connected":self.connected and self.client.running and (tick_age is None or tick_age<STALE_TICK_SECONDS),"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency,"account_snapshots":getattr(self.client,"account_snapshots",{"demo":None,"real":None}),"flex_only":FLEX_ONLY,"tick_age_seconds":tick_age,"stale_tick_threshold":STALE_TICK_SECONDS}
+        healthy=self.connected and self.client.running and (not self.subscribed or tick_age is None or tick_age<STALE_TICK_SECONDS)
+        return {"connected":healthy,"auth_invalid":self.client.auth_invalid,"assets":sorted(self.assets),"subscribed":len(self.subscribed),"ticks":self.ticks,"completed_1m":self.candles,"history_1m":{a:len(self.history[a]) for a in sorted(self.assets)},"account_mode":self.client.account_mode,"account_balance":self.client.account_balance,"account_currency":self.client.account_currency,"account_snapshots":getattr(self.client,"account_snapshots",{"demo":None,"real":None}),"flex_only":FLEX_ONLY,"tick_age_seconds":tick_age,"stale_tick_threshold":STALE_TICK_SECONDS}
