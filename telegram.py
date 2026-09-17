@@ -6,7 +6,8 @@ class Telegram:
   raw=os.getenv("TELEGRAM_BOT_TOKEN","").strip(); token=raw
   if token.startswith("https://api.telegram.org/bot"): token=token[len("https://api.telegram.org/bot"):]
   if token.lower().startswith("bot"): token=token[3:]
-  self.token=token.strip(); self.chat=""; self.access_code=os.getenv("CANDICE_ACCESS_CODE","").strip(); self.api=f"https://api.telegram.org/bot{self.token}" if self.token else ""; self.webhook_url=(os.getenv("TELEGRAM_WEBHOOK_URL","").strip() or (os.getenv("RENDER_EXTERNAL_URL","").strip().rstrip("/")+"/telegram/webhook" if os.getenv("RENDER_EXTERNAL_URL") else "")); self.authorized=False; self._send_lock=threading.Lock(); self._poll_thread=None; self._stop=threading.Event(); self._offset=0; self.ready=False; self._status_provider=None
+  self.token=token.strip(); self.chat=os.getenv("CANDICE_TELEGRAM_CHAT_ID","").strip(); self.access_code=os.getenv("CANDICE_ACCESS_CODE","").strip(); self.api=f"https://api.telegram.org/bot{self.token}" if self.token else ""; self.webhook_url=(os.getenv("TELEGRAM_WEBHOOK_URL","").strip() or (os.getenv("RENDER_EXTERNAL_URL","").strip().rstrip("/")+"/telegram/webhook" if os.getenv("RENDER_EXTERNAL_URL") else "")); self.authorized=bool(self.chat); self._send_lock=threading.Lock(); self._poll_thread=None; self._stop=threading.Event(); self._offset=0; self.ready=False; self._status_provider=None
+  if self.authorized: log.info("TELEGRAM_ACCESS_CONFIGURED_FROM_ENV")
  def configure_status_provider(self,provider): self._status_provider=provider
  def _post(self,method,payload=None,timeout=15):
   if not self.api:return None
@@ -49,8 +50,7 @@ class Telegram:
    if not self.access_code:self._send_to(cid,"⚠️ Access is not configured on the server yet.");return
    if supplied!=self.access_code:log.warning("TELEGRAM_ACCESS_DENIED");self._send_to(cid,"❌ Invalid access code.");return
    self.chat=cid;self.authorized=True;log.info("TELEGRAM_ACCESS_GRANTED");self._send_to(cid,"✅ ACCESS GRANTED\n\n"+self._report());return
-  if cmd in {"/report","/status","/account","/assets"}:
-   self._send_to(cid,self._report() if self.authorized and self.chat==cid else "🔐 Access required. Use: /access <your access code>")
+  if cmd in {"/report","/status","/account","/assets"}: self._send_to(cid,self._report() if self.authorized and self.chat==cid else "🔐 Access required. Use: /access <your access code>")
  def configure_webhook(self):
   if not self.api or not self.webhook_url:return False
   return bool(self._post("setWebhook",{"url":self.webhook_url,"drop_pending_updates":False},15))
@@ -66,7 +66,7 @@ class Telegram:
   log.info("TELEGRAM_COMMAND_POLL_STARTED interval=2s"); self._post("deleteWebhook",{"drop_pending_updates":False},10)
   while not self._stop.is_set():
    try:
-    params={"limit":20,"timeout":1};
+    params={"limit":20,"timeout":1}
     if self._offset:params["offset"]=self._offset
     with self._send_lock:r=requests.get(f"{self.api}/getUpdates",params=params,timeout=5)
     if r.status_code==409:self._stop.wait(10);continue
