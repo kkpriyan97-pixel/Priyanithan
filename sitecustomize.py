@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
@@ -8,21 +7,24 @@ import time
 log = logging.getLogger("candice.flex_probe")
 _PAIR_RE = re.compile(r"^[A-Z0-9][A-Z0-9_./-]{2,39}$")
 _ASSET_KEYS = {
-    "pair", "symbol", "asset", "instrument", "code", "ticker",
-    "short_name", "display_name", "symbol_name", "pair_name",
-    "asset_id", "asset_name", "asset_code", "symbol_code", "ticker_symbol",
-    "instrument_name", "instrument_code", "shortName", "name", "title"
+    "pair", "symbol", "asset", "instrument", "ticker", "short_name",
+    "display_name", "symbol_name", "pair_name", "asset_id", "asset_name",
+    "asset_code", "symbol_code", "ticker_symbol", "instrument_name",
+    "instrument_code", "shortName", "pair_name"
 }
-_BAD = {"FLEX", "FLEX TIME", "FLEX_TIME", "FIXED TIME", "FOREX", "STOCKS", "ASSET", "SYMBOL"}
+_BAD = {
+    "FLEX", "FLEX TIME", "FLEX_TIME", "FIXED TIME", "FOREX", "STOCKS",
+    "ASSET", "SYMBOL", "PAIR", "INSTRUMENT", "TICKER"
+}
 
 
 def _candidate(v):
     if not isinstance(v, str):
         return None
     s = v.strip().upper()
-    if s in _BAD or not _PAIR_RE.fullmatch(s) or not any(c.isalpha() for c in s):
+    if s in _BAD or " " in s or not _PAIR_RE.fullmatch(s):
         return None
-    if " " in s or len(s) > 40:
+    if not any(c.isalpha() for c in s):
         return None
     return s
 
@@ -30,19 +32,27 @@ def _candidate(v):
 def _extract(node, out):
     if isinstance(node, dict):
         for key, value in node.items():
-            if str(key).lower() in {k.lower() for k in _ASSET_KEYS}:
+            lk = str(key).strip().lower()
+            if lk in {k.lower() for k in _ASSET_KEYS}:
                 values = value if isinstance(value, list) else [value]
                 for item in values:
                     if isinstance(item, dict):
                         for subkey in _ASSET_KEYS:
-                            candidate = _candidate(item.get(subkey))
-                            if candidate:
-                                out.add(candidate)
+                            c = _candidate(item.get(subkey))
+                            if c:
+                                out.add(c)
                                 break
                     else:
-                        candidate = _candidate(item)
-                        if candidate:
-                            out.add(candidate)
+                        c = _candidate(item)
+                        if c:
+                            out.add(c)
+            elif isinstance(key, str) and isinstance(value, dict):
+                # Some authenticated catalogue payloads use pair/symbol as the
+                # dictionary key and put metadata in the child object.
+                c = _candidate(key)
+                if c and any(str(k).strip().lower() in {x.lower() for x in _ASSET_KEYS} for k in value):
+                    out.add(c)
+                _extract(value, out)
             elif isinstance(value, (dict, list)):
                 _extract(value, out)
     elif isinstance(node, list):
@@ -50,66 +60,56 @@ def _extract(node, out):
             _extract(item, out)
 
 
+def _publish(feed, found, source):
+    found = {a for a in found if _candidate(a)}
+    if not found:
+        return
+    feed._flex_seen_assets.update(found)
+    feed._authoritative_flex_assets = set(feed._flex_seen_assets)
+    feed.assets = set(feed._flex_seen_assets)
+    log.info(
+        "FLEX_ASSET_DISCOVERED source=%s new=%s total=%s assets=%s",
+        source, len(found), len(feed.assets), sorted(found)
+    )
+    for asset in sorted(found):
+        feed.schedule_asset(asset)
+
+
 def _attach(feed):
-    if getattr(feed, "_account_flex_probe_attached", False):
+    if getattr(feed, "_resilient_asset_discovery_attached", False):
         return
 
-    feed._authoritative_flex_assets = set()
-    feed._flex_event_batch = set()
-    feed._flex_seen_assets = set()
-    feed._flex_finalize_task = None
-    feed._flex_last_event = 0.0
+    feed._flex_seen_assets = set(getattr(feed, "_flex_seen_assets", set()))
+    feed._authoritative_flex_assets = set(getattr(feed, "_authoritative_flex_assets", set()))
+    feed._flex_last_event = float(getattr(feed, "_flex_last_event", 0.0))
 
-    async def _finalize():
-        # Event 183 arrives as fragmented authenticated account data. Wait for
-        # a short quiet period after the most recent fragment, then publish the
-        # accumulated universe. New fragments reset this timer.
-        while True:
-            last = feed._flex_last_event
-            await asyncio.sleep(8.0)
-            if last == feed._flex_last_event:
-                break
-        found = set(feed._flex_event_batch)
-        feed._flex_event_batch.clear()
-        if not found:
-            log.warning("FLEX_ACCOUNT_ASSETS_EMPTY event=183")
-            return
-
-        feed._flex_seen_assets.update(found)
-        authoritative = set(feed._flex_seen_assets)
-        feed._authoritative_flex_assets = authoritative
-        feed.assets = set(authoritative)
-
-        log.info(
-            "FLEX_ACCOUNT_ASSETS_FULL_SCAN event=183 source=authenticated_demo_session batch=%s total=%s assets=%s",
-            len(found), len(authoritative), sorted(authoritative),
-        )
-
-        for asset in sorted(authoritative - set(feed.subscribed)):
-            feed.schedule_asset(asset)
-
-    async def on_message(msg):
-        # HARD RULE: only authenticated Flex event 183 defines the asset universe.
-        # No OTC/REAL classification is inferred from symbol names or price data.
-        if not isinstance(msg, dict) or msg.get("e") != 183:
+    async def on_event_183(msg):
+        if not isinstance(msg, dict):
             return
         found = set()
         _extract(msg.get("d"), found)
-        log.info(
-            "FLEX_EVENT_183_SHAPE top=%s found=%s",
-            type(msg.get("d")).__name__, sorted(found),
-        )
-        if not found:
-            return
-        feed._flex_event_batch.update(found)
-        feed._flex_last_event = time.time()
-        task = feed._flex_finalize_task
-        if task and not task.done():
-            return
-        feed._flex_finalize_task = asyncio.create_task(_finalize())
+        log.info("FLEX_EVENT_183_SHAPE top=%s found=%s", type(msg.get("d")).__name__, sorted(found))
+        if found:
+            feed._flex_last_event = time.time()
+            _publish(feed, found, "authenticated_event_183")
 
-    feed.client.on(183, on_message)
-    feed._account_flex_probe_attached = True
+    async def on_authenticated_event(msg):
+        if not isinstance(msg, dict):
+            return
+        event = msg.get("e")
+        if event == 183:
+            return
+        # Discover only from authenticated websocket messages and only from
+        # explicit pair/symbol/instrument fields. No OTC/REAL inference here.
+        found = set()
+        _extract(msg.get("d"), found)
+        if found:
+            _publish(feed, found, f"authenticated_event_{event}")
+
+    feed.client.on(183, on_event_183)
+    feed.client.on("*", on_authenticated_event)
+    feed._resilient_asset_discovery_attached = True
+    log.info("FLEX_RESILIENT_DISCOVERY_ATTACHED source=authenticated_websocket events=183+authenticated_candidates")
 
 
 def _patch():
@@ -117,7 +117,7 @@ def _patch():
         from market_feed import LiveMarketFeed
     except Exception:
         return
-    if getattr(LiveMarketFeed, "_account_flex_probe_patched", False):
+    if getattr(LiveMarketFeed, "_resilient_asset_discovery_patched", False):
         return
     original_init = LiveMarketFeed.__init__
 
@@ -126,8 +126,8 @@ def _patch():
         _attach(self)
 
     LiveMarketFeed.__init__ = init
-    LiveMarketFeed._account_flex_probe_patched = True
-    log.info("FLEX_ACCOUNT_PROBE_PATCHED source=authenticated_websocket event_183_only=true full_scan=true demo_real_supported=true")
+    LiveMarketFeed._resilient_asset_discovery_patched = True
+    log.info("FLEX_RESILIENT_DISCOVERY_PATCHED authenticated_only=true market_type_inference=false")
 
 
 _patch()
