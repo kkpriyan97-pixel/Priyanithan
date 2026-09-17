@@ -5,6 +5,7 @@ from olymp_client import OlympReadOnlyClient
 log = logging.getLogger("candice.feed")
 FLEX_ONLY = os.getenv("OLYMPTRADE_FLEX_ONLY", "1").strip().lower() not in {"0","false","no","off"}
 STALE_TICK_SECONDS = max(20, int(os.getenv("FEED_STALE_TICK_SECONDS", "45")))
+FLEX_PROBE_SECONDS = max(5, int(os.getenv("FLEX_PROBE_SECONDS", "10")))
 
 def num(v):
     try: return float(v)
@@ -35,7 +36,7 @@ class LiveMarketFeed:
     def __init__(self,on_candle):
         self.on_candle=on_candle; self.token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip(); self.client=OlympReadOnlyClient(self.token)
         self.assets=set() if FLEX_ONLY else {a.strip().upper() for a in os.getenv("OLYMPTRADE_ASSETS","").split(",") if a.strip()}; self.subscribed=set(); self.forming={}; self.history=defaultdict(lambda:deque(maxlen=360)); self.last_completed=defaultdict(float); self._notified_buckets=defaultdict(set)
-        self._authoritative_flex_assets=set(); self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._last_poll_log=0; self._asset_tasks={}; self._last_tick_at=0.0; self._last_candle_at=0.0; self._watchdog_reconnecting=False
+        self._authoritative_flex_assets=set(); self.ticks=0; self.candles=0; self.connected=False; self._reconnect_task=None; self._poll_task=None; self._flex_probe_task=None; self._last_poll_log=0; self._asset_tasks={}; self._last_tick_at=0.0; self._last_candle_at=0.0; self._watchdog_reconnecting=False
     @staticmethod
     def _current_bucket(): return int(time.time()//60)*60
     @staticmethod
@@ -44,16 +45,33 @@ class LiveMarketFeed:
     async def start(self):
         if not self.token: raise RuntimeError("OLYMPTRADE_ACCESS_TOKEN is required")
         self.client.on(1,self._tick); self.client.on(1003,self._candle_response); self.client.on(55,self._account)
-        await self._connect_and_seed(); self._reconnect_task=asyncio.create_task(self._connection_watch()); self._poll_task=asyncio.create_task(self._poll_loop()); log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY | FLEX_ONLY=%s STALE_WATCHDOG=%ss",FLEX_ONLY,STALE_TICK_SECONDS)
+        await self._connect_and_seed(); self._reconnect_task=asyncio.create_task(self._connection_watch()); self._poll_task=asyncio.create_task(self._poll_loop())
+        if FLEX_ONLY:self._flex_probe_task=asyncio.create_task(self._flex_probe_loop())
+        log.info("LIVE_MARKET_FEED started | 1m candles | READ_ONLY | FLEX_ONLY=%s STALE_WATCHDOG=%ss FLEX_PROBE=%ss",FLEX_ONLY,STALE_TICK_SECONDS,FLEX_PROBE_SECONDS)
     async def stop(self):
         self.connected=False
-        for task in (self._reconnect_task,self._poll_task):
+        for task in (self._reconnect_task,self._poll_task,self._flex_probe_task):
             if task and not task.done(): task.cancel()
         for task in list(self._asset_tasks.values()):
             if not task.done(): task.cancel()
         await self.client.close()
     async def _connect_and_seed(self):
         await self.client.connect(); self.connected=True; self._last_tick_at=time.time(); await self.client.initialize_read_only(); self.subscribed.clear(); await self._discover_and_seed()
+    async def _flex_probe_loop(self):
+        log.info("FLEX_AUTHENTICATED_PROBE_LOOP_STARTED interval=%ss",FLEX_PROBE_SECONDS)
+        while self.connected:
+            try:
+                if self.client.running and not self._authoritative_flex_assets:
+                    try:
+                        await self.client.send(98,[183],False)
+                        log.info("FLEX_EVENT_183_RESUBSCRIBE requested=true")
+                    except Exception as e:
+                        log.warning("FLEX_EVENT_183_RESUBSCRIBE_FAILED error=%s",type(e).__name__)
+                await asyncio.sleep(FLEX_PROBE_SECONDS)
+            except asyncio.CancelledError:return
+            except Exception as e:
+                log.warning("FLEX_PROBE_LOOP_ERROR error=%s",type(e).__name__)
+                await asyncio.sleep(FLEX_PROBE_SECONDS)
     async def _connection_watch(self):
         log.info("FEED_CONNECTION_WATCH_STARTED stale_threshold=%ss",STALE_TICK_SECONDS)
         delay=2
@@ -61,11 +79,12 @@ class LiveMarketFeed:
             if self.client.auth_invalid:
                 self.connected=False; self.subscribed.clear(); log.error("OLYMP_RECONNECT_STOPPED reason=invalid_token"); break
             stale=time.time()-self._last_tick_at if self._last_tick_at else 0
-            if self.client.running and self.subscribed and stale >= STALE_TICK_SECONDS and not self._watchdog_reconnecting:
+            no_assets=FLEX_ONLY and not self._authoritative_flex_assets
+            if self.client.running and (self.subscribed and stale >= STALE_TICK_SECONDS or no_assets and stale >= STALE_TICK_SECONDS) and not self._watchdog_reconnecting:
                 self._watchdog_reconnecting=True
-                log.warning("OLYMP_FEED_STALE seconds=%.1f ticks=%s subscribed=%s action=reconnect",stale,self.ticks,len(self.subscribed))
+                log.warning("OLYMP_FEED_STALE seconds=%.1f ticks=%s assets=%s subscribed=%s action=reconnect",stale,self.ticks,len(self.assets),len(self.subscribed))
                 try:
-                    await self.client.close(); self.subscribed.clear(); self.forming.clear()
+                    await self.client.close(); self.subscribed.clear(); self.forming.clear(); self._authoritative_flex_assets.clear(); self.assets.clear() if FLEX_ONLY else None
                     await asyncio.sleep(1); await self._connect_and_seed(); delay=2
                     log.info("OLYMP_STALE_RECONNECT_OK assets=%s subscribed=%s ticks=%s",len(self.assets),len(self.subscribed),self.ticks)
                 except asyncio.CancelledError:return
@@ -170,8 +189,7 @@ class LiveMarketFeed:
                         if latest>before and int(latest) not in self._notified_buckets[asset]:
                             candle=next(c for c in completed if float(c["timestamp"])==latest); self._notified_buckets[asset].add(int(latest)); self.last_completed[asset]=latest; self.candles+=1; self._last_candle_at=time.time(); log.info("CANDLE_COMPLETED asset=%s timestamp=%s source=history_poll",asset,int(latest)); self.on_candle(asset,dict(candle))
                     except Exception as e:log.warning("HISTORY_REFRESH_FAILED asset=%s error=%s",asset,type(e).__name__)
-                now=time.time()
-                stale=(now-self._last_tick_at) if self._last_tick_at else 0
+                now=time.time(); stale=(now-self._last_tick_at) if self._last_tick_at else 0
                 if now-self._last_poll_log>=30:
                     self._last_poll_log=now; log.info("FEED_HEARTBEAT connected=%s running=%s ticks=%s completed_1m=%s assets=%s subscribed=%s account_mode=%s flex_only=%s tick_age=%.1f",self.connected and self.client.running,self.client.running,self.ticks,self.candles,len(self.assets),len(self.subscribed),self.client.account_mode,FLEX_ONLY,stale)
                 await asyncio.sleep(2)
