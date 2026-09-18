@@ -51,7 +51,7 @@ class ActiveSignal:
 class BrainState:
     cycle_id: int = 0
     cycle_signal_sent: bool = False
-    sent_keys: set[tuple[str, str, str]] = field(default_factory=set)
+    sent_keys: set[tuple[str, str]] = field(default_factory=set)
     cooldown_until: dict[str, float] = field(default_factory=dict)
     active_signal: ActiveSignal | None = None
     last_result: dict[str, Any] | None = None
@@ -83,13 +83,13 @@ class BrainState:
         # Exactly one final signal maximum per 5-minute cycle.
         return not self.cycle_signal_sent and self.active_signal is None
 
-    def duplicate_key(self, pair: str, entry_candle_ts: Any, direction: str) -> tuple[str, str, str]:
-        return (str(pair), str(entry_candle_ts), str(direction).upper())
+    def duplicate_key(self, pair: str, entry_candle_ts: Any, direction: str = "") -> tuple[str, str]:
+        return (str(pair), str(entry_candle_ts))
 
     def is_duplicate(self, pair: str, entry_candle_ts: Any, direction: str) -> bool:
         # Expiry is intentionally NOT part of this key: the same asset and
         # entry candle cannot produce a second signal with another expiry.
-        return self.duplicate_key(pair, entry_candle_ts, direction) in self.sent_keys
+        return self.duplicate_key(pair, entry_candle_ts) in self.sent_keys
 
     def mark_signal_sent(
         self,
