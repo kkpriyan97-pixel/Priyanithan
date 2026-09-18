@@ -119,13 +119,11 @@ def is_currently_open(item: dict, now_ts: float | None = None) -> bool:
     open_ts = item.get("time_open_trading")
     close_ts = item.get("time_close_trading")
 
-    # Schedule fields are authoritative when both are present and sensible.
-    # Do not reject assets when the feed omits them or sends zero/null.
-    if isinstance(open_ts, (int, float)) and isinstance(close_ts, (int, float)):
-        if open_ts > 0 and close_ts > 0:
-            if now < open_ts or now >= close_ts:
-                return False
-
+    # Olymptrade's instrument feed uses time_open/time_close as the
+    # surrounding schedule boundaries (often the NEXT open after the current
+    # session). The explicit locked/locked_trading flags are the authoritative
+    # current-state fields. Do not misclassify a currently open asset just
+    # because time_open points to the next session.
     return True
 
 
