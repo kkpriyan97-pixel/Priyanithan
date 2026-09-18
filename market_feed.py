@@ -9,6 +9,7 @@ FLEX_PROBE_SECONDS = max(5, int(os.getenv("FLEX_PROBE_SECONDS", "10")))
 MIN_HISTORY_READY = max(60, int(os.getenv("MIN_HISTORY_READY", "60")))
 SUBSCRIBE_CONCURRENCY = max(2, int(os.getenv("SUBSCRIBE_CONCURRENCY", "8")))
 ASSET_RETRY_SECONDS = max(15, int(os.getenv("ASSET_RETRY_SECONDS", "45")))
+DISCOVERY_STALE_SECONDS = max(60, int(os.getenv("DISCOVERY_STALE_SECONDS", "90")))
 
 def num(v):
     try: return float(v)
@@ -97,7 +98,19 @@ class LiveMarketFeed:
             if self.client.auth_invalid:
                 self.connected=False; self.subscribed.clear(); log.error("OLYMP_RECONNECT_STOPPED reason=invalid_token"); break
             stale=time.time()-self._last_tick_at if self._last_tick_at else 0
-            if self.client.running and self.subscribed and self.ticks > 0 and stale >= STALE_TICK_SECONDS and not self._watchdog_reconnecting:
+            discovery_stale = stale if FLEX_ONLY and not self.assets else 0
+            if FLEX_ONLY and not self.assets and discovery_stale >= DISCOVERY_STALE_SECONDS and not self._watchdog_reconnecting:
+                self._watchdog_reconnecting=True
+                log.warning("FLEX_DISCOVERY_STALE seconds=%.1f action=reconnect", discovery_stale)
+                try:
+                    await self.client.close(); self.subscribed.clear(); self.forming.clear()
+                    self._authoritative_flex_assets.clear(); self.assets.clear()
+                    await asyncio.sleep(1); await self._connect_and_seed(); delay=2
+                    log.info("FLEX_DISCOVERY_RECONNECT_OK assets=%s subscribed=%s ticks=%s", len(self.assets), len(self.subscribed), self.ticks)
+                except asyncio.CancelledError:return
+                except Exception as e: self.client.running=False; log.warning("FLEX_DISCOVERY_RECONNECT_FAILED error=%s",type(e).__name__); delay=min(delay*2,30)
+                finally:self._watchdog_reconnecting=False
+            elif self.client.running and self.subscribed and self.ticks > 0 and stale >= STALE_TICK_SECONDS and not self._watchdog_reconnecting:
                 self._watchdog_reconnecting=True
                 log.warning("OLYMP_FEED_STALE seconds=%.1f ticks=%s assets=%s subscribed=%s action=reconnect",stale,self.ticks,len(self.assets),len(self.subscribed))
                 try:
