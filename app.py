@@ -126,6 +126,25 @@ async def market_worker() -> None:
             )
 
             assets = await client.market.get_available_assets(client.account_id)
+            otc_assets = await client.market.get_otc_assets(client.account_id)
+            otc_pairs = [
+                str(
+                    item.get("pair")
+                    or item.get("p")
+                    or item.get("symbol")
+                    or item.get("instrument")
+                    or item.get("id")
+                    or ""
+                )
+                for item in otc_assets
+                if isinstance(item, dict)
+            ]
+            otc_pairs = sorted({p for p in otc_pairs if p})
+            log.info(
+                "OTC_ASSET_ACCESS read_only=true count=%d pairs=%s",
+                len(otc_pairs),
+                ",".join(otc_pairs),
+            )
             if not assets:
                 await asyncio.sleep(3)
                 assets = await client.market.get_available_assets(client.account_id)
@@ -165,10 +184,9 @@ async def market_worker() -> None:
                 and is_open(item)
             ]
 
-            otc_assets = [
+            flex_otc_assets = [
                 item for item in flex_assets
-                if "OTC" in pair_name(item).upper()
-                or "_OTC" in pair_name(item).upper()
+                if "_OTC" in pair_name(item).upper()
             ]
             real_assets = [
                 item for item in flex_assets
@@ -180,8 +198,16 @@ async def market_worker() -> None:
                 len(assets),
                 len(flex_assets),
                 len(real_assets),
-                len(otc_assets),
+                len(flex_otc_assets),
             )
+
+            # OTC is discovered independently from Flex. Olymptrade documents
+            # OTC under Fixed Time (FT), so OTC access stays read-only and is not
+            # mixed into Flex selection.
+            if otc_pairs:
+                log.info("OTC_ASSET_LIST_READY count=%d", len(otc_pairs))
+            else:
+                log.warning("OTC_ASSET_LIST_EMPTY authenticated feed returned no OTC assets.")
 
             # Flex mode is kept separate from Fixed Time. If the authenticated
             # feed exposes no Flex-capable instrument, fail cleanly instead of
