@@ -31,9 +31,14 @@ def _extract(node,out):
                     else:
                         c=_candidate(item)
                         if c: out.add(c)
-            elif isinstance(key,str) and isinstance(value,dict):
+            # OTC/FLEX identifiers are authoritative even when the platform
+            # places them under a generic id/code field rather than an asset key.
+            if isinstance(value,str):
+                c=_candidate(value)
+                if c and _market(c): out.add(c)
+            if isinstance(key,str) and isinstance(value,dict):
                 c=_candidate(key)
-                if c and any(str(k).strip().lower() in {x.lower() for x in _ASSET_KEYS} for k in value): out.add(c)
+                if c and (any(str(k).strip().lower() in {x.lower() for x in _ASSET_KEYS} for x in value) or _market(c)): out.add(c)
                 _extract(value,out)
             elif isinstance(value,(dict,list)): _extract(value,out)
     elif isinstance(node,list):
