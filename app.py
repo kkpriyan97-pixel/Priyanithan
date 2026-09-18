@@ -89,6 +89,15 @@ async def market_worker() -> None:
             STATE["status"] = "connected"
             log.info("NEXORA_AI_STARTED read_only=true")
 
+            # Complete the authenticated browser-like startup sequence first.
+            await client.initialize_session()
+            log.info(
+                "AUTH_SESSION_READY account_id=%s account_group=%s",
+                client.account_id,
+                client.account_group,
+            )
+            await asyncio.sleep(2)
+
             asset = await client.market.get_first_available_asset()
             if not asset:
                 raise RuntimeError("No authenticated OlympTrade asset was returned.")
