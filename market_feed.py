@@ -97,7 +97,7 @@ class LiveMarketFeed:
             if self.client.auth_invalid:
                 self.connected=False; self.subscribed.clear(); log.error("OLYMP_RECONNECT_STOPPED reason=invalid_token"); break
             stale=time.time()-self._last_tick_at if self._last_tick_at else 0
-            if self.client.running and self.subscribed and stale >= STALE_TICK_SECONDS and not self._watchdog_reconnecting:
+            if self.client.running and self.subscribed and self.ticks > 0 and stale >= STALE_TICK_SECONDS and not self._watchdog_reconnecting:
                 self._watchdog_reconnecting=True
                 log.warning("OLYMP_FEED_STALE seconds=%.1f ticks=%s assets=%s subscribed=%s action=reconnect",stale,self.ticks,len(self.assets),len(self.subscribed))
                 try:
