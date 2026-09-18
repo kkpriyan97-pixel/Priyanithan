@@ -1,392 +1,185 @@
-import asyncio
-import json
-import logging
-import os
-import time
+import asyncio,json,logging,os,time
 from typing import Any
-
+import httpx
 from olymptrade_ws import OlympTradeClient
 from olymptrade_ws.olympconfig import parameters
+from brain_rules import BrainState,rank_signal_candidates
+from candice_brain import analyze_asset
+from ai_engine import snapshot_from_asset
+from ai_router import analyze_with_fallback
 
-from brain_rules import BrainState
-\nfrom brain_rules import BrainState
+logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
+log=logging.getLogger("candice")
+BRAIN=BrainState()
+STATE={"status":"starting","assets":[],"prices":{},"candles":{},"analyses":{},"read_only":True,"cycle":0,"last_cycle":None}
+CLIENT=None
+LOCK=asyncio.Lock()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("nexora_ai")
+def pair_name(x):
+    return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
 
-BRAIN = BrainState()
+def display_name(x):
+    for k in ("title","name","display_name","displayName"):
+        if isinstance(x.get(k),str) and x[k].strip():return x[k].strip()
+    return ""
 
-STATE: dict[str, Any] = {
-    "status": "starting",
-    "asset": None,
-    "asset_data": None,
-    "asset_list": [],
-    "last_price": None,
-    "last_tick_ts": None,
-    "candles": 0,
-    "read_only": True,
-}
+def event_records(client,event_id):
+    out=[]
+    try:cached=client.get_cached_events(event_id)
+    except Exception:cached=[]
+    for m in cached or []:
+        d=m.get("d") if isinstance(m,dict) else None
+        if isinstance(d,list):out.extend(x for x in d if isinstance(x,dict))
+    return out
 
+def build_assets(client,raw):
+    prof={}
+    for x in event_records(client,182):
+        p=pair_name(x);v=x.get("profitability")
+        if p and isinstance(v,(int,float)):prof[p]=(int(v),x)
+    out=[]
+    for x in raw:
+        p=pair_name(x)
+        if not p or p not in prof:continue
+        title=display_name(x) or display_name(prof[p][1])
+        if not title:continue
+        out.append({"pair":p,"display_name":title,"title":title,"signal_asset_label":f"{title} ({p})","profitability":prof[p][0],"locked":x.get("locked") is True,"locked_trading":x.get("locked_trading") is True,"mode":"OTC" if "_OTC" in p.upper() else "REAL"})
+    return out
 
-async def on_tick(message: dict) -> None:
-    for tick in message.get("d", []) or []:
-        if not isinstance(tick, dict):
-            continue
-        pair = tick.get("p") or tick.get("pair")
-        if pair == STATE.get("asset"):
-            STATE["last_price"] = tick.get("q")
-            STATE["last_tick_ts"] = tick.get("t")
-            log.info(
-                "ASSET_TICK asset=%s price=%s ts=%s",
-                pair,
-                tick.get("q"),
-                tick.get("t"),
-            )
-
-
-def pair_name(item: dict) -> str:
-    return str(
-        item.get("pair")
-        or item.get("p")
-        or item.get("symbol")
-        or item.get("instrument")
-        or item.get("id")
-        or ""
-    )
-
-
-def display_name(item: dict, fallback: str = "") -> str:
-    """Read the account's own display name; never synthesize or rename it."""
-    for key in ("title", "name", "display_name", "displayName"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return fallback.strip() if isinstance(fallback, str) else ""
-
-
-def signal_asset_label(item: dict) -> str:
-    """Return the required user-facing label from live account metadata.
-
-    The left side is always the account-provided display name. The pair is
-    appended only in parentheses as the internal/API identifier. No hardcoded
-    asset-name mapping is used.
-    """
-    name = str(item.get("display_name") or item.get("title") or "").strip()
-    pair = str(item.get("pair") or "").strip()
-    if not name or not pair:
-        return ""
-    return f"{name} ({pair})"
-
-
-def event_records(client: OlympTradeClient, event_id: int) -> list[dict]:
-    records: list[dict] = []
-    try:
-        cached = client.get_cached_events(event_id)
-    except Exception:
-        cached = []
-    for message in cached or []:
-        if not isinstance(message, dict):
-            continue
-        data = message.get("d")
-        if isinstance(data, list):
-            records.extend(x for x in data if isinstance(x, dict))
-    return records
-
-
-def build_account_asset_list(client: OlympTradeClient, raw_assets: list[dict]) -> list[dict]:
-    """
-    Build the FT asset list from the authenticated account-visible feeds.
-
-    API pair is kept only as an internal identifier. The user-facing name is
-    taken from the authenticated instrument metadata and is never normalized,
-    renamed, or converted from the API symbol.
-
-    No static allowlist or screenshot-derived name list is used.
-    """
-    profitability: dict[str, int] = {}
-    profitability_meta: dict[str, dict] = {}
-    for item in event_records(client, 182):
-        pair = pair_name(item)
-        value = item.get("profitability")
-        if pair and isinstance(value, (int, float)):
-            profitability[pair] = int(value)
-            profitability_meta[pair] = item
-
-    instruments: dict[str, dict] = {}
-    for item in raw_assets:
-        if not isinstance(item, dict):
-            continue
-        pair = pair_name(item)
-        if pair:
-            instruments[pair] = item
-
-    result: list[dict] = []
-    for pair, profit in profitability.items():
-        instrument = instruments.get(pair)
-        if not instrument:
-            continue
-
-        # Prefer the authenticated instrument's original display name.
-        # If that feed does not carry a title, use the same field from the
-        # profitability record before falling back to the internal pair.
-        meta = profitability_meta.get(pair, {})
-        title = display_name(instrument)
-        if not title:
-            title = display_name(meta)
-        if not title:
-            log.warning("ASSET_DISPLAY_NAME_MISSING pair=%s", pair)
-            continue
-
-        result.append(
-            {
-                "pair": pair,
-                "title": title,
-                "display_name": title,
-                "signal_asset_label": f"{title} ({pair})",
-                "profitability": profit,
-                "locked": instrument.get("locked") is True,
-                "locked_trading": instrument.get("locked_trading") is True,
-                "locked_reason": instrument.get("locked_reason") or "",
-                "time_open": instrument.get("time_open"),
-                "time_close": instrument.get("time_close"),
-                "time_open_trading": instrument.get("time_open_trading"),
-                "time_close_trading": instrument.get("time_close_trading"),
-                "mode": "OTC" if "_OTC" in pair.upper() else "REAL",
-                "instrument": instrument,
-            }
-        )
-    return result
-
-
-def is_currently_open(item: dict, now_ts: float | None = None) -> bool:
-    if item.get("locked") or item.get("locked_trading"):
+async def telegram(text):
+    token=os.getenv("TELEGRAM_BOT_TOKEN","").strip();chat=os.getenv("TELEGRAM_CHAT_ID","").strip()
+    if not token or not chat:
+        log.warning("TELEGRAM_NOT_CONFIGURED")
         return False
-
-    # Explicit lock flags are the authoritative current-state fields.
-    # Do not interpret time_open/time_close as current session state because
-    # those fields may describe the surrounding/next session boundary.
-    return True
-
-
-def select_first_open_asset(account_assets: list[dict]) -> dict | None:
-    open_real = [
-        x for x in account_assets
-        if x.get("mode") == "REAL" and is_currently_open(x)
-    ]
-    if not open_real:
-        return None
-
-    best_profit = max(int(x.get("profitability") or 0) for x in open_real)
-    return next(x for x in open_real if int(x.get("profitability") or 0) == best_profit)
-
-
-async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        await reader.read(4096)
-        body = json.dumps(
-            {
-                "service": "NEXORA-AI",
-                "status": STATE.get("status"),
-                "read_only": True,
-                "asset": STATE.get("asset"),
-                "asset_display_name": (STATE.get("asset_data") or {}).get("display_name"),
-                "signal_asset_label": signal_asset_label(STATE.get("asset_data") or {}),
-                "last_price": STATE.get("last_price"),
-                "last_tick_ts": STATE.get("last_tick_ts"),
-                "candles": STATE.get("candles"),
-                "asset_list_count": len(STATE.get("asset_list") or []),
-            }
-        ).encode()
-        response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: application/json\r\n"
-            b"Cache-Control: no-store\r\n"
-            + f"Content-Length: {len(body)}\r\n".encode()
-            + b"Connection: close\r\n\r\n"
-            + body
-        )
-        writer.write(response)
-        await writer.drain()
-    except Exception:
-        pass
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
+        async with httpx.AsyncClient(timeout=8) as h:
+            r=await h.post(f"https://api.telegram.org/bot{token}/sendMessage",json={"chat_id":chat,"text":text})
+            r.raise_for_status();return True
+    except Exception as e:
+        log.warning("TELEGRAM_SEND_FAILED %s",e);return False
 
+async def on_tick(message):
+    for t in message.get("d",[]) or []:
+        if not isinstance(t,dict):continue
+        p=str(t.get("p") or t.get("pair") or "")
+        q=t.get("q");ts=t.get("t")
+        if p and q is not None:
+            try:STATE["prices"][p]=(float(q),float(ts) if ts is not None else time.time())
+            except Exception:pass
 
-async def market_worker() -> None:
-    while True:
-        token = os.getenv("OLYMPTRADE_ACCESS_TOKEN")
-        if not token:
-            STATE["status"] = "waiting_for_token"
-            log.error("OLYMPTRADE_ACCESS_TOKEN is not set in Render Environment Variables.")
-            await asyncio.sleep(30)
-            continue
-
-        client = OlympTradeClient(access_token=token, log_raw_messages=False)
-        client.register_callback(parameters.E_TICK_UPDATE, on_tick)
-
-        try:
-            STATE["status"] = "connecting"
-            await client.start()
-            STATE["status"] = "connected"
-            log.info("NEXORA_AI_STARTED read_only=true")
-
-            startup_subscriptions = [
-                [220],
-                [110, 700, 112, 140, 1038, 1037, 1039, 141, 22, 26, 111],
-                [1054, 1076, 1301, 1097],
-                [141, 241],
-                [230, 231],
-                [75],
-                [1055],
-                [2223, 2301, 55, 150, 152, 151, 126, 602, 601],
-                [2076],
-                [126],
-            ]
-            for sub in startup_subscriptions:
-                await client.send_request(98, sub, requires_response=False)
-
-            await asyncio.sleep(5)
-
-            for message in client.get_cached_events(55):
-                data = message.get("d") if isinstance(message, dict) else None
-                if isinstance(data, list):
-                    for account in data:
-                        if isinstance(account, dict) and account.get("group") == "demo":
-                            client.account_id = account.get("account_id")
-                            client.account_group = "demo"
-                            break
-                if client.account_id:
-                    break
-
-            log.info(
-                "AUTH_SESSION_READY account_id=%s account_group=%s",
-                client.account_id,
-                client.account_group,
-            )
-
-            raw_assets = await client.market.get_available_assets(client.account_id)
-            otc_assets = await client.market.get_otc_assets(client.account_id)
-            otc_pairs = sorted(
-                {
-                    pair_name(item)
-                    for item in otc_assets
-                    if isinstance(item, dict) and pair_name(item)
-                }
-            )
-            log.info(
-                "OTC_ASSET_ACCESS read_only=true count=%d pairs=%s",
-                len(otc_pairs),
-                ",".join(otc_pairs),
-            )
-
-            account_assets = build_account_asset_list(client, raw_assets)
-
-            if len(account_assets) < 5:
-                await asyncio.sleep(3)
-                account_assets = build_account_asset_list(client, raw_assets)
-
-            if not account_assets:
-                raise RuntimeError(
-                    "Authenticated Olymptrade FT asset list is empty: "
-                    "no profitability/instrument intersection was received."
-                )
-
-            BRAIN.prune_expired_cooldowns()
-            candidate_assets = BRAIN.filter_candidates(account_assets)
-            log.info("BRAIN_CANDIDATES_READY total=%d eligible=%d cooldown=%d", len(account_assets), len(candidate_assets), len(account_assets) - len(candidate_assets))
-
-            STATE["asset_list"] = [
-                {k: v for k, v in item.items() if k != "instrument"}
-                for item in account_assets
-            ]
-
-            open_assets = [x for x in account_assets if is_currently_open(x)]
-            real_assets = [x for x in account_assets if x.get("mode") == "REAL"]
-            otc_account_assets = [x for x in account_assets if x.get("mode") == "OTC"]
-
-            log.info(
-                "ACCOUNT_ASSET_LIST_READY total=%d open=%d closed=%d real=%d otc=%d",
-                len(account_assets),
-                len(open_assets),
-                len(account_assets) - len(open_assets),
-                len(real_assets),
-                len(otc_account_assets),
-            )
-            log.info(
-                "ACCOUNT_ASSET_LIST=%s",
-                ",".join(
-                    f"{x['signal_asset_label']}:{x['profitability']}:"
-                    f"{'OPEN' if is_currently_open(x) else 'CLOSED'}"
-                    for x in account_assets
-                ),
-            )
-
-            selected = select_first_open_asset(candidate_assets)
-            if not selected:
-                raise RuntimeError(
-                    "Authenticated account asset list is present, but no currently open REAL asset is available."
-                )
-
-            pair = selected["pair"]
-            STATE["asset"] = pair
-            STATE["asset_data"] = selected
-            log.info(
-                "FIRST_OLYMPTRADE_ASSET display_name=%s pair=%s profitability=%s mode=%s",
-                selected["display_name"],
-                pair,
-                selected["profitability"],
-                selected["mode"],
-            )
-
-            candles = await client.market.get_candles(pair, size=60, count=5)
-            STATE["candles"] = len(candles or [])
-            log.info(
-                "ASSET_HISTORY_OK display_name=%s pair=%s candles=%d",
-                selected["display_name"],
-                pair,
-                STATE["candles"],
-            )
-
-            await client.market.subscribe_ticks(pair)
-            log.info(
-                "ASSET_TICK_SUBSCRIBED display_name=%s pair=%s",
-                selected["display_name"],
-                pair,
-            )
-            STATE["status"] = "live_read_only"
-
-            while True:
-                await asyncio.sleep(30)
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            STATE["status"] = "error"
-            log.exception("MARKET_WORKER_ERROR: %s", exc)
-            await asyncio.sleep(15)
-        finally:
+async def refresh_candles():
+    client=CLIENT;assets=STATE["assets"]
+    if not client:return
+    sem=asyncio.Semaphore(8)
+    async def one(a):
+        async with sem:
             try:
-                await client.stop()
-            except Exception:
-                pass
+                cs=await client.market.get_candles(a["pair"],size=60,count=60)
+                if cs:STATE["candles"][a["pair"]]=cs
+                p=STATE["prices"].get(a["pair"],(None,None))[0]
+                an=analyze_asset(a,STATE["candles"].get(a["pair"],[]),p)
+                if an:
+                    an["profitability"]=a["profitability"];STATE["analyses"][a["pair"]]=an
+                else:STATE["analyses"].pop(a["pair"],None)
+            except Exception as e:log.debug("CANDLE_REFRESH_FAILED %s %s",a["pair"],e)
+    await asyncio.gather(*(one(a) for a in assets))
+    log.info("LIVE_ANALYSIS_REFRESH assets=%d qualified=%d",len(assets),len(STATE["analyses"]))
 
+async def final_candidate():
+    BRAIN.prune_expired_cooldowns()
+    eligible=BRAIN.filter_candidates(STATE["assets"])
+    raw=[STATE["analyses"][a["pair"]].copy() for a in eligible if a["pair"] in STATE["analyses"]]
+    raw=rank_signal_candidates(raw)
+    if not raw:return None
+    # AI reviews the strongest technical candidates; fallback provider is automatic.
+    reviewed=[]
+    for x in raw[:8]:
+        cs=STATE["candles"].get(x["pair"],[])
+        price=STATE["prices"].get(x["pair"],(x.get("price"),None))[0]
+        snap=snapshot_from_asset(next(a for a in eligible if a["pair"]==x["pair"]),cs,price,time.time())
+        try:
+            d=await analyze_with_fallback(snap)
+            if d and int(d.get("confidence",0))>=90:
+                x.update({"confidence":int(d["confidence"]),"reason":d.get("reason") or x["reason"],"ai_provider":d.get("provider")});reviewed.append(x)
+        except Exception as e:log.warning("AI_REVIEW_FAILED pair=%s %s",x["pair"],e)
+    return rank_signal_candidates(reviewed)[0] if reviewed else None
 
-async def main() -> None:
-    port = int(os.getenv("PORT", "10000"))
-    server = await asyncio.start_server(handle_http, "0.0.0.0", port)
-    log.info("HTTP_HEALTH_SERVER_LISTENING port=%s", port)
+async def result_watch(key):
+    s=BRAIN.active_signals.get(key)
+    if not s:return
+    await asyncio.sleep(max(0,s.expiry_minutes*60-(time.time()-s.entry_ts)))
+    price=STATE["prices"].get(s.pair,(None,None))[0]
+    if price is None:
+        cs=STATE["candles"].get(s.pair,[])
+        if cs:price=float(cs[-1].get("close",cs[-1].get("c",s.entry_price)))
+    if price is None:return
+    rec=BRAIN.finish_signal(key,price)
+    label=f"{rec['display_name']} ({rec['pair']})"
+    icon={"WIN":"🟢","LOSS":"🔴","TIE":"🟡"}[rec["result"]]
+    await telegram(f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI RESULT\n━━━━━━━━━━━━━━━━━━━━\n\n📊 ASSET: {label}\n➡️ DIRECTION: {rec['direction']}\n\n💰 ENTRY: {rec['entry_price']}\n💰 EXIT: {rec['exit_price']}\n⏱️ EXPIRY: {rec['expiry_minutes']} MIN\n\n{icon} {rec['result']}\n\n🧠 STRATEGY: {rec['strategy']}\n📈 15M TREND: {rec['trend_15m']}\n🕯️ 1M STRUCTURE: {rec['structure_1m']}\n\n🧠 Brain learning recorded\n━━━━━━━━━━━━━━━━━━━━")
+    log.info("RESULT pair=%s result=%s exit=%s cooldown=%s",rec["pair"],rec["result"],rec["exit_price"],rec["result"]=="LOSS")
 
+async def cycle_loop():
+    while True:
+        now=time.time();next_boundary=(int(now)//300+1)*300
+        target=next_boundary
+        start=target-40
+        await asyncio.sleep(max(0,start-time.time()))
+        cycle_id=target//300
+        BRAIN.start_cycle(int(cycle_id));STATE["cycle"]=int(cycle_id)
+        # Keep the 40-second window live: re-rank immediately before signal.
+        candidate=await final_candidate()
+        if candidate:
+            p=candidate["pair"];entry=STATE["prices"].get(p,(None,None))[0]
+            if entry is not None and BRAIN.can_send_cycle_signal():
+                ts=time.time();s=BRAIN.mark_signal_sent(pair=p,display_name=candidate["display_name"],direction=candidate["direction"],expiry_minutes=candidate["expiry_minutes"],entry_price=entry,entry_ts=ts,entry_candle_ts=candidate["entry_candle_ts"],strategy=candidate["strategy"],reason=candidate["reason"],confidence=candidate["confidence"])
+                key=f"{s.cycle_id}:{s.pair}:{s.entry_ts}"
+                target_dt=time.strftime("%H:%M:%S",time.localtime(target))
+                msg=f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n\n📊 ASSET: {s.display_name} ({s.pair})\n➡️ DIRECTION: {s.direction}\n\n🕒 SIGNAL: {time.strftime('%H:%M:%S',time.localtime(ts))} UAE\n🎯 TARGET: {target_dt} UAE\n⏳ SIGNAL COUNTDOWN: 00:40\n\n⏱️ EXPIRY: {s.expiry_minutes} MIN\n💰 ENTRY: {s.entry_price}\n\n📈 15M TREND: {s.trend_15m}\n🕯️ 1M STRUCTURE: {s.structure_1m}\n🧠 STRATEGY: {s.strategy}\n🎯 CONFIDENCE: {s.confidence}%\n🟢 ACCOUNT: DEMO\n\n🧠 {s.reason}\n━━━━━━━━━━━━━━━━━━━━"
+                await telegram(msg);asyncio.create_task(result_watch(key));log.info("FINAL_SIGNAL cycle=%s pair=%s direction=%s confidence=%s",cycle_id,p,s.direction,s.confidence)
+        else:log.info("NO_VALID_FINAL_SETUP cycle=%s",cycle_id)
+        # refresh full market evidence for the next cycle
+        await refresh_candles()
+
+async def market_worker():
+    global CLIENT
+    while True:
+        token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip()
+        if not token:STATE["status"]="waiting_for_token";await asyncio.sleep(30);continue
+        client=OlympTradeClient(access_token=token,log_raw_messages=False);CLIENT=client;client.register_callback(parameters.E_TICK_UPDATE,on_tick)
+        try:
+            STATE["status"]="connecting";await client.start();STATE["status"]="connected"
+            await asyncio.sleep(4)
+            for m in client.get_cached_events(55):
+                d=m.get("d") if isinstance(m,dict) else None
+                if isinstance(d,list):
+                    for a in d:
+                        if isinstance(a,dict) and a.get("group")=="demo":client.account_id=a.get("account_id");client.account_group="demo";break
+                if client.account_id:break
+            raw=await client.market.get_available_assets(client.account_id);assets=build_assets(client,raw)
+            STATE["assets"]=assets;STATE["status"]="live_read_only"
+            log.info("ALL_ASSETS_READY count=%d",len(assets))
+            for a in assets:
+                try:await client.market.subscribe_ticks(a["pair"])
+                except Exception as e:log.debug("TICK_SUBSCRIBE_FAILED %s %s",a["pair"],e)
+            await refresh_candles()
+            if not any(x.done() for x in []):pass
+            while True:await asyncio.sleep(30)
+        except Exception as e:
+            STATE["status"]="error";log.exception("MARKET_WORKER_ERROR %s",e);await asyncio.sleep(15)
+        finally:
+            try:await client.stop()
+            except Exception:pass
+            CLIENT=None
+
+async def health(reader,writer):
     try:
-        await market_worker()
-    finally:
-        server.close()
-        await server.wait_closed()
+        await reader.read(2048)
+        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":True,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals)}).encode()
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"+body);await writer.drain()
+    finally:writer.close()
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+async def main():
+    port=int(os.getenv("PORT","10000"));server=await asyncio.start_server(health,"0.0.0.0",port)
+    await asyncio.gather(market_worker(),cycle_loop(),server.serve_forever())
+if __name__=="__main__":asyncio.run(main())
