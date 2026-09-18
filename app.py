@@ -134,18 +134,27 @@ async def market_worker() -> None:
             if not assets:
                 raise RuntimeError("OlympTrade connected, but no asset/instrument records were returned.")
 
-            # Prefer an unlocked, trade-enabled instrument; fall back to the first record.
-            asset = next(
-                (
-                    item for item in assets
-                    if isinstance(item, dict)
-                    and not item.get("locked", True)
-                    and not item.get("disabled", False)
-                ),
-                assets[0],
+            # Flex-only mode: use instrument records that expose Flex/Forex-style
+            # multiplicator settings. Fixed-Time profitability-only records (e.g. e:182
+            # entries with just pair/profitability) are excluded.
+            flex_assets = [
+                item for item in assets
+                if isinstance(item, dict)
+                and isinstance(item.get("allowed_multiplicators"), list)
+                and item.get("allowed_multiplicators")
+                and not item.get("locked", True)
+                and not item.get("locked_trading", True)
+                and not item.get("disabled", False)
+            ]
+            log.info(
+                "FLEX_ASSET_SCAN total=%d flex_open=%d",
+                len(assets),
+                len(flex_assets),
             )
-            if not asset:
-                raise RuntimeError("No authenticated OlympTrade asset was returned.")
+            if not flex_assets:
+                raise RuntimeError("No unlocked Flex asset was returned.")
+
+            asset = flex_assets[0]
 
             pair = (
                 asset.get("pair")
