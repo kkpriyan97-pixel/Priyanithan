@@ -186,9 +186,11 @@ class CandiceBrain:
     def run(self):
         while True:
             try:
-                self._reset_day_if_needed();now=time.time();target=(int(now//300)+1)*300
-                time.sleep(max(0,target-time.time())); cycle=int(target//300)
+                self._reset_day_if_needed();now=time.time();target=(int(now//300)+1)*300;decision_time=target-40
+                if now>decision_time+1:target+=300;decision_time+=300
+                time.sleep(max(0,decision_time-time.time()));cycle=int(target//300)
                 if self._blocked():log.warning("BRAIN_BLOCKED cycle=%s daily_losses=%s consecutive_losses=%s",cycle,self.daily_losses,self.consecutive_losses);time.sleep(max(1,target-time.time()));continue
+                if time.time()>decision_time+2:log.warning("SIGNAL_WINDOW_MISSED cycle=%s",cycle);time.sleep(max(1,target-time.time()));continue
                 s=self._best_scan()
                 if not s:log.info("SIGNAL_WINDOW_NO_SIGNAL target=%s",target);time.sleep(max(1,target-time.time()));continue
                 fresh=self.feed.live_price(s["asset"])
