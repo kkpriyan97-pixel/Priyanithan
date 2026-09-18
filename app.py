@@ -50,6 +50,15 @@ def pair_name(item: dict) -> str:
     )
 
 
+def display_name(item: dict, pair: str) -> str:
+    """Return the platform-provided human-facing name without rewriting it."""
+    for key in ("title", "name", "display_name", "displayName"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return pair
+
+
 def event_records(client: OlympTradeClient, event_id: int) -> list[dict]:
     records: list[dict] = []
     try:
@@ -69,21 +78,21 @@ def build_account_asset_list(client: OlympTradeClient, raw_assets: list[dict]) -
     """
     Build the FT asset list from the authenticated account-visible feeds.
 
-    e=182 is the full profitability list shown by the Olymptrade FT Assets panel.
-    e=1054 supplies the authenticated instrument records, including lock/schedule
-    state. The intersection is the source of truth. No static allowlist or
-    screenshot-derived list is used by the bot.
+    API pair is kept only as an internal identifier. The user-facing name is
+    taken from the authenticated instrument metadata and is never normalized,
+    renamed, or converted from the API symbol.
+
+    No static allowlist or screenshot-derived name list is used.
     """
     profitability: dict[str, int] = {}
+    profitability_meta: dict[str, dict] = {}
     for item in event_records(client, 182):
         pair = pair_name(item)
         value = item.get("profitability")
         if pair and isinstance(value, (int, float)):
             profitability[pair] = int(value)
+            profitability_meta[pair] = item
 
-    # get_available_assets() is the authenticated current instrument universe.
-    # Use it for identity/lock/schedule metadata, and intersect it with the full
-    # e=182 profitability feed. This avoids stale/partial e=1054 cache snapshots.
     instruments: dict[str, dict] = {}
     for item in raw_assets:
         if not isinstance(item, dict):
@@ -97,10 +106,20 @@ def build_account_asset_list(client: OlympTradeClient, raw_assets: list[dict]) -
         instrument = instruments.get(pair)
         if not instrument:
             continue
+
+        # Prefer the authenticated instrument's original display name.
+        # If that feed does not carry a title, use the same field from the
+        # profitability record before falling back to the internal pair.
+        meta = profitability_meta.get(pair, {})
+        title = display_name(instrument, "")
+        if not title:
+            title = display_name(meta, pair)
+
         result.append(
             {
                 "pair": pair,
-                "title": instrument.get("title") or pair,
+                "title": title,
+                "display_name": title,
                 "profitability": profit,
                 "locked": instrument.get("locked") is True,
                 "locked_trading": instrument.get("locked_trading") is True,
@@ -120,15 +139,9 @@ def is_currently_open(item: dict, now_ts: float | None = None) -> bool:
     if item.get("locked") or item.get("locked_trading"):
         return False
 
-    now = time.time() if now_ts is None else now_ts
-    open_ts = item.get("time_open_trading")
-    close_ts = item.get("time_close_trading")
-
-    # Olymptrade's instrument feed uses time_open/time_close as the
-    # surrounding schedule boundaries (often the NEXT open after the current
-    # session). The explicit locked/locked_trading flags are the authoritative
-    # current-state fields. Do not misclassify a currently open asset just
-    # because time_open points to the next session.
+    # Explicit lock flags are the authoritative current-state fields.
+    # Do not interpret time_open/time_close as current session state because
+    # those fields may describe the surrounding/next session boundary.
     return True
 
 
@@ -140,8 +153,6 @@ def select_first_open_asset(account_assets: list[dict]) -> dict | None:
     if not open_real:
         return None
 
-    # Do not use arbitrary raw instrument order. Prefer the highest current
-    # account-visible profitability, then preserve the authenticated list order.
     best_profit = max(int(x.get("profitability") or 0) for x in open_real)
     return next(x for x in open_real if int(x.get("profitability") or 0) == best_profit)
 
@@ -155,6 +166,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 "status": STATE.get("status"),
                 "read_only": True,
                 "asset": STATE.get("asset"),
+                "asset_display_name": (STATE.get("asset_data") or {}).get("display_name"),
                 "last_price": STATE.get("last_price"),
                 "last_tick_ts": STATE.get("last_tick_ts"),
                 "candles": STATE.get("candles"),
@@ -214,8 +226,6 @@ async def market_worker() -> None:
             for sub in startup_subscriptions:
                 await client.send_request(98, sub, requires_response=False)
 
-            # Allow the authenticated account/instrument/profitability pushes to
-            # populate the event cache before constructing the list.
             await asyncio.sleep(5)
 
             for message in client.get_cached_events(55):
@@ -235,8 +245,6 @@ async def market_worker() -> None:
                 client.account_group,
             )
 
-            # Keep the authenticated raw feed available for diagnostics, but do
-            # not use its global order as the account asset list.
             raw_assets = await client.market.get_available_assets(client.account_id)
             otc_assets = await client.market.get_otc_assets(client.account_id)
             otc_pairs = sorted(
@@ -254,11 +262,9 @@ async def market_worker() -> None:
 
             account_assets = build_account_asset_list(client, raw_assets)
 
-            # If the first cache snapshot arrived before the full feeds, wait
-            # briefly and rebuild instead of falling back to a static/raw list.
             if len(account_assets) < 5:
                 await asyncio.sleep(3)
-                account_assets = build_account_asset_list(client)
+                account_assets = build_account_asset_list(client, raw_assets)
 
             if not account_assets:
                 raise RuntimeError(
@@ -286,7 +292,8 @@ async def market_worker() -> None:
             log.info(
                 "ACCOUNT_ASSET_LIST=%s",
                 ",".join(
-                    f"{x['pair']}:{x['profitability']}:{'OPEN' if is_currently_open(x) else 'CLOSED'}"
+                    f"{x['display_name']}[{x['pair']}]:{x['profitability']}:"
+                    f"{'OPEN' if is_currently_open(x) else 'CLOSED'}"
                     for x in account_assets
                 ),
             )
@@ -301,19 +308,28 @@ async def market_worker() -> None:
             STATE["asset"] = pair
             STATE["asset_data"] = selected
             log.info(
-                "FIRST_OLYMPTRADE_ASSET=%s profitability=%s mode=%s",
+                "FIRST_OLYMPTRADE_ASSET display_name=%s pair=%s profitability=%s mode=%s",
+                selected["display_name"],
                 pair,
                 selected["profitability"],
                 selected["mode"],
             )
-            log.info("ASSET_DATA=%s", selected)
 
             candles = await client.market.get_candles(pair, size=60, count=5)
             STATE["candles"] = len(candles or [])
-            log.info("ASSET_HISTORY_OK asset=%s candles=%d", pair, STATE["candles"])
+            log.info(
+                "ASSET_HISTORY_OK display_name=%s pair=%s candles=%d",
+                selected["display_name"],
+                pair,
+                STATE["candles"],
+            )
 
             await client.market.subscribe_ticks(pair)
-            log.info("ASSET_TICK_SUBSCRIBED asset=%s", pair)
+            log.info(
+                "ASSET_TICK_SUBSCRIBED display_name=%s pair=%s",
+                selected["display_name"],
+                pair,
+            )
             STATE["status"] = "live_read_only"
 
             while True:
