@@ -89,16 +89,61 @@ async def market_worker() -> None:
             STATE["status"] = "connected"
             log.info("NEXORA_AI_STARTED read_only=true")
 
-            # Complete the authenticated browser-like startup sequence first.
-            await client.initialize_session()
+            # Start the read-only market/account subscriptions without blocking on
+            # the optional account-info request. Asset/instrument pushes arrive asynchronously.
+            startup_subscriptions = [
+                [220],
+                [110, 700, 112, 140, 1038, 1037, 1039, 141, 22, 26, 111],
+                [1054, 1076, 1301, 1097],
+                [141, 241],
+                [230, 231],
+                [75],
+                [1055],
+                [2223, 2301, 55, 150, 152, 151, 126, 602, 601],
+                [2076],
+                [126],
+            ]
+            for sub in startup_subscriptions:
+                await client.send_request(98, sub, requires_response=False)
+
+            # Allow the server's account/instrument pushes to populate the cache.
+            await asyncio.sleep(5)
+
+            # Prefer the demo account from the balance push for read-only discovery.
+            for message in client.get_cached_events(55):
+                data = message.get("d") if isinstance(message, dict) else None
+                if isinstance(data, list):
+                    for account in data:
+                        if isinstance(account, dict) and account.get("group") == "demo":
+                            client.account_id = account.get("account_id")
+                            client.account_group = "demo"
+                            break
+                if client.account_id:
+                    break
+
             log.info(
                 "AUTH_SESSION_READY account_id=%s account_group=%s",
                 client.account_id,
                 client.account_group,
             )
-            await asyncio.sleep(2)
 
-            asset = await client.market.get_first_available_asset()
+            assets = await client.market.get_available_assets(client.account_id)
+            if not assets:
+                await asyncio.sleep(3)
+                assets = await client.market.get_available_assets(client.account_id)
+            if not assets:
+                raise RuntimeError("OlympTrade connected, but no asset/instrument records were returned.")
+
+            # Prefer an unlocked, trade-enabled instrument; fall back to the first record.
+            asset = next(
+                (
+                    item for item in assets
+                    if isinstance(item, dict)
+                    and not item.get("locked", True)
+                    and not item.get("disabled", False)
+                ),
+                assets[0],
+            )
             if not asset:
                 raise RuntimeError("No authenticated OlympTrade asset was returned.")
 
