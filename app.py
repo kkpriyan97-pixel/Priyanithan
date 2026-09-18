@@ -89,8 +89,8 @@ async def market_worker() -> None:
             STATE["status"] = "connected"
             log.info("NEXORA_AI_STARTED read_only=true")
 
-            # Start the read-only market/account subscriptions without blocking on
-            # the optional account-info request. Asset/instrument pushes arrive asynchronously.
+            # Read-only instrument/account pushes used by the authenticated
+            # Olymptrade session. No order or trade endpoint is called here.
             startup_subscriptions = [
                 [220],
                 [110, 700, 112, 140, 1038, 1037, 1039, 141, 22, 26, 111],
@@ -106,10 +106,8 @@ async def market_worker() -> None:
             for sub in startup_subscriptions:
                 await client.send_request(98, sub, requires_response=False)
 
-            # Allow the server's account/instrument pushes to populate the cache.
             await asyncio.sleep(5)
 
-            # Prefer the demo account from the balance push for read-only discovery.
             for message in client.get_cached_events(55):
                 data = message.get("d") if isinstance(message, dict) else None
                 if isinstance(data, list):
@@ -134,51 +132,84 @@ async def market_worker() -> None:
             if not assets:
                 raise RuntimeError("OlympTrade connected, but no asset/instrument records were returned.")
 
-            # Flex-only mode: use instrument records that expose Flex/Forex-style
-            # multiplicator settings. Fixed-Time profitability-only records (e.g. e:182
-            # entries with just pair/profitability) are excluded.
+            def pair_name(item: dict) -> str:
+                return str(
+                    item.get("pair")
+                    or item.get("p")
+                    or item.get("symbol")
+                    or item.get("instrument")
+                    or item.get("id")
+                    or ""
+                )
+
+            def is_open(item: dict) -> bool:
+                # Missing lock flags are allowed; only an explicit True blocks an asset.
+                return (
+                    item.get("locked") is not True
+                    and item.get("locked_trading") is not True
+                    and item.get("disabled") is not True
+                )
+
+            def has_flex_metadata(item: dict) -> bool:
+                multipliers = item.get("allowed_multiplicators")
+                suggestions = item.get("multiplicator_suggestions")
+                return (
+                    (isinstance(multipliers, (list, tuple)) and bool(multipliers))
+                    or (isinstance(suggestions, (list, tuple)) and bool(suggestions))
+                )
+
             flex_assets = [
                 item for item in assets
                 if isinstance(item, dict)
-                and isinstance(item.get("allowed_multiplicators"), list)
-                and item.get("allowed_multiplicators")
-                and not item.get("locked", True)
-                and not item.get("locked_trading", True)
-                and not item.get("disabled", False)
+                and has_flex_metadata(item)
+                and is_open(item)
             ]
+
+            otc_assets = [
+                item for item in flex_assets
+                if "OTC" in pair_name(item).upper()
+                or "_OTC" in pair_name(item).upper()
+            ]
+            real_assets = [
+                item for item in flex_assets
+                if item not in otc_assets
+            ]
+
             log.info(
-                "FLEX_ASSET_SCAN total=%d flex_open=%d",
+                "FLEX_ASSET_SCAN total=%d flex_open=%d flex_real=%d flex_otc=%d",
                 len(assets),
                 len(flex_assets),
+                len(real_assets),
+                len(otc_assets),
             )
+
+            # Flex mode is kept separate from Fixed Time. If the authenticated
+            # feed exposes no Flex-capable instrument, fail cleanly instead of
+            # silently selecting a Fixed Time profitability-only record.
             if not flex_assets:
-                raise RuntimeError("No unlocked Flex asset was returned.")
+                raise RuntimeError("No open Flex-capable instrument was returned by the authenticated market feed.")
 
-            asset = flex_assets[0]
+            # Prefer a real-market Flex instrument. OTC records are retained in
+            # the diagnostic count but are not mixed into the Flex selection.
+            asset = real_assets[0] if real_assets else flex_assets[0]
 
-            pair = (
-                asset.get("pair")
-                or asset.get("p")
-                or asset.get("symbol")
-                or asset.get("instrument")
-            )
+            pair = pair_name(asset)
             if not pair:
                 raise RuntimeError(f"Asset response has no pair identifier: {asset}")
 
-            STATE["asset"] = str(pair)
+            STATE["asset"] = pair
             STATE["asset_data"] = asset
             log.info("FIRST_OLYMPTRADE_ASSET=%s", pair)
             log.info("ASSET_DATA=%s", asset)
 
-            candles = await client.market.get_candles(str(pair), size=60, count=5)
+            candles = await client.market.get_candles(pair, size=60, count=5)
             STATE["candles"] = len(candles or [])
             log.info("ASSET_HISTORY_OK asset=%s candles=%d", pair, STATE["candles"])
 
-            await client.market.subscribe_ticks(str(pair))
+            await client.market.subscribe_ticks(pair)
             log.info("ASSET_TICK_SUBSCRIBED asset=%s", pair)
             STATE["status"] = "live_read_only"
 
-            # Keep the authenticated read-only market connection alive.
             while True:
                 await asyncio.sleep(30)
 
