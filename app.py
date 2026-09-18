@@ -7,6 +7,7 @@ from typing import Any
 
 from olymptrade_ws import OlympTradeClient
 from olymptrade_ws.olympconfig import parameters
+\nfrom brain_rules import BrainState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("nexora_ai")
