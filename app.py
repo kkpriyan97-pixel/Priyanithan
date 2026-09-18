@@ -50,13 +50,27 @@ def pair_name(item: dict) -> str:
     )
 
 
-def display_name(item: dict, pair: str) -> str:
-    """Return the platform-provided human-facing name without rewriting it."""
+def display_name(item: dict, fallback: str = "") -> str:
+    """Read the account's own display name; never synthesize or rename it."""
     for key in ("title", "name", "display_name", "displayName"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return pair
+    return fallback.strip() if isinstance(fallback, str) else ""
+
+
+def signal_asset_label(item: dict) -> str:
+    """Return the required user-facing label from live account metadata.
+
+    The left side is always the account-provided display name. The pair is
+    appended only in parentheses as the internal/API identifier. No hardcoded
+    asset-name mapping is used.
+    """
+    name = str(item.get("display_name") or item.get("title") or "").strip()
+    pair = str(item.get("pair") or "").strip()
+    if not name or not pair:
+        return ""
+    return f"{name} ({pair})"
 
 
 def event_records(client: OlympTradeClient, event_id: int) -> list[dict]:
@@ -111,15 +125,19 @@ def build_account_asset_list(client: OlympTradeClient, raw_assets: list[dict]) -
         # If that feed does not carry a title, use the same field from the
         # profitability record before falling back to the internal pair.
         meta = profitability_meta.get(pair, {})
-        title = display_name(instrument, "")
+        title = display_name(instrument)
         if not title:
-            title = display_name(meta, pair)
+            title = display_name(meta)
+        if not title:
+            log.warning("ASSET_DISPLAY_NAME_MISSING pair=%s", pair)
+            continue
 
         result.append(
             {
                 "pair": pair,
                 "title": title,
                 "display_name": title,
+                "signal_asset_label": f"{title} ({pair})",
                 "profitability": profit,
                 "locked": instrument.get("locked") is True,
                 "locked_trading": instrument.get("locked_trading") is True,
@@ -167,6 +185,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 "read_only": True,
                 "asset": STATE.get("asset"),
                 "asset_display_name": (STATE.get("asset_data") or {}).get("display_name"),
+                "signal_asset_label": signal_asset_label(STATE.get("asset_data") or {}),
                 "last_price": STATE.get("last_price"),
                 "last_tick_ts": STATE.get("last_tick_ts"),
                 "candles": STATE.get("candles"),
@@ -292,7 +311,7 @@ async def market_worker() -> None:
             log.info(
                 "ACCOUNT_ASSET_LIST=%s",
                 ",".join(
-                    f"{x['display_name']}[{x['pair']}]:{x['profitability']}:"
+                    f"{x['signal_asset_label']}:{x['profitability']}:"
                     f"{'OPEN' if is_currently_open(x) else 'CLOSED'}"
                     for x in account_assets
                 ),
