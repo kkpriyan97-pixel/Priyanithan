@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from olymptrade_ws import OlympTradeClient
@@ -14,6 +15,7 @@ STATE: dict[str, Any] = {
     "status": "starting",
     "asset": None,
     "asset_data": None,
+    "asset_list": [],
     "last_price": None,
     "last_tick_ts": None,
     "candles": 0,
@@ -37,6 +39,110 @@ async def on_tick(message: dict) -> None:
             )
 
 
+def pair_name(item: dict) -> str:
+    return str(
+        item.get("pair")
+        or item.get("p")
+        or item.get("symbol")
+        or item.get("instrument")
+        or item.get("id")
+        or ""
+    )
+
+
+def event_records(client: OlympTradeClient, event_id: int) -> list[dict]:
+    records: list[dict] = []
+    try:
+        cached = client.get_cached_events(event_id)
+    except Exception:
+        cached = []
+    for message in cached or []:
+        if not isinstance(message, dict):
+            continue
+        data = message.get("d")
+        if isinstance(data, list):
+            records.extend(x for x in data if isinstance(x, dict))
+    return records
+
+
+def build_account_asset_list(client: OlympTradeClient) -> list[dict]:
+    """
+    Build the FT asset list from the authenticated account-visible feeds.
+
+    e=182 is the full profitability list shown by the Olymptrade FT Assets panel.
+    e=1054 supplies the authenticated instrument records, including lock/schedule
+    state. The intersection is the source of truth. No static allowlist or
+    screenshot-derived list is used by the bot.
+    """
+    profitability: dict[str, int] = {}
+    for item in event_records(client, 182):
+        pair = pair_name(item)
+        value = item.get("profitability")
+        if pair and isinstance(value, (int, float)):
+            profitability[pair] = int(value)
+
+    instruments: dict[str, dict] = {}
+    for item in event_records(client, 1054):
+        pair = pair_name(item)
+        if pair:
+            instruments[pair] = item
+
+    result: list[dict] = []
+    for pair, profit in profitability.items():
+        instrument = instruments.get(pair)
+        if not instrument:
+            continue
+        result.append(
+            {
+                "pair": pair,
+                "title": instrument.get("title") or pair,
+                "profitability": profit,
+                "locked": instrument.get("locked") is True,
+                "locked_trading": instrument.get("locked_trading") is True,
+                "locked_reason": instrument.get("locked_reason") or "",
+                "time_open": instrument.get("time_open"),
+                "time_close": instrument.get("time_close"),
+                "time_open_trading": instrument.get("time_open_trading"),
+                "time_close_trading": instrument.get("time_close_trading"),
+                "mode": "OTC" if "_OTC" in pair.upper() else "REAL",
+                "instrument": instrument,
+            }
+        )
+    return result
+
+
+def is_currently_open(item: dict, now_ts: float | None = None) -> bool:
+    if item.get("locked") or item.get("locked_trading"):
+        return False
+
+    now = time.time() if now_ts is None else now_ts
+    open_ts = item.get("time_open_trading")
+    close_ts = item.get("time_close_trading")
+
+    # Schedule fields are authoritative when both are present and sensible.
+    # Do not reject assets when the feed omits them or sends zero/null.
+    if isinstance(open_ts, (int, float)) and isinstance(close_ts, (int, float)):
+        if open_ts > 0 and close_ts > 0:
+            if now < open_ts or now >= close_ts:
+                return False
+
+    return True
+
+
+def select_first_open_asset(account_assets: list[dict]) -> dict | None:
+    open_real = [
+        x for x in account_assets
+        if x.get("mode") == "REAL" and is_currently_open(x)
+    ]
+    if not open_real:
+        return None
+
+    # Do not use arbitrary raw instrument order. Prefer the highest current
+    # account-visible profitability, then preserve the authenticated list order.
+    best_profit = max(int(x.get("profitability") or 0) for x in open_real)
+    return next(x for x in open_real if int(x.get("profitability") or 0) == best_profit)
+
+
 async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
         await reader.read(4096)
@@ -49,6 +155,7 @@ async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 "last_price": STATE.get("last_price"),
                 "last_tick_ts": STATE.get("last_tick_ts"),
                 "candles": STATE.get("candles"),
+                "asset_list_count": len(STATE.get("asset_list") or []),
             }
         ).encode()
         response = (
@@ -89,8 +196,6 @@ async def market_worker() -> None:
             STATE["status"] = "connected"
             log.info("NEXORA_AI_STARTED read_only=true")
 
-            # Read-only instrument/account pushes used by the authenticated
-            # Olymptrade session. No order or trade endpoint is called here.
             startup_subscriptions = [
                 [220],
                 [110, 700, 112, 140, 1038, 1037, 1039, 141, 22, 26, 111],
@@ -106,6 +211,8 @@ async def market_worker() -> None:
             for sub in startup_subscriptions:
                 await client.send_request(98, sub, requires_response=False)
 
+            # Allow the authenticated account/instrument/profitability pushes to
+            # populate the event cache before constructing the list.
             await asyncio.sleep(5)
 
             for message in client.get_cached_events(55):
@@ -125,108 +232,78 @@ async def market_worker() -> None:
                 client.account_group,
             )
 
-            assets = await client.market.get_available_assets(client.account_id)
+            # Keep the authenticated raw feed available for diagnostics, but do
+            # not use its global order as the account asset list.
+            raw_assets = await client.market.get_available_assets(client.account_id)
             otc_assets = await client.market.get_otc_assets(client.account_id)
-            otc_pairs = [
-                str(
-                    item.get("pair")
-                    or item.get("p")
-                    or item.get("symbol")
-                    or item.get("instrument")
-                    or item.get("id")
-                    or ""
-                )
-                for item in otc_assets
-                if isinstance(item, dict)
-            ]
-            otc_pairs = sorted({p for p in otc_pairs if p})
+            otc_pairs = sorted(
+                {
+                    pair_name(item)
+                    for item in otc_assets
+                    if isinstance(item, dict) and pair_name(item)
+                }
+            )
             log.info(
                 "OTC_ASSET_ACCESS read_only=true count=%d pairs=%s",
                 len(otc_pairs),
                 ",".join(otc_pairs),
             )
-            if not assets:
+
+            account_assets = build_account_asset_list(client)
+
+            # If the first cache snapshot arrived before the full feeds, wait
+            # briefly and rebuild instead of falling back to a static/raw list.
+            if len(account_assets) < 5:
                 await asyncio.sleep(3)
-                assets = await client.market.get_available_assets(client.account_id)
-            if not assets:
-                raise RuntimeError("OlympTrade connected, but no asset/instrument records were returned.")
+                account_assets = build_account_asset_list(client)
 
-            def pair_name(item: dict) -> str:
-                return str(
-                    item.get("pair")
-                    or item.get("p")
-                    or item.get("symbol")
-                    or item.get("instrument")
-                    or item.get("id")
-                    or ""
+            if not account_assets:
+                raise RuntimeError(
+                    "Authenticated Olymptrade FT asset list is empty: "
+                    "no profitability/instrument intersection was received."
                 )
 
-            def is_open(item: dict) -> bool:
-                # Missing lock flags are allowed; only an explicit True blocks an asset.
-                return (
-                    item.get("locked") is not True
-                    and item.get("locked_trading") is not True
-                    and item.get("disabled") is not True
-                )
-
-            def has_flex_metadata(item: dict) -> bool:
-                multipliers = item.get("allowed_multiplicators")
-                suggestions = item.get("multiplicator_suggestions")
-                return (
-                    (isinstance(multipliers, (list, tuple)) and bool(multipliers))
-                    or (isinstance(suggestions, (list, tuple)) and bool(suggestions))
-                )
-
-            flex_assets = [
-                item for item in assets
-                if isinstance(item, dict)
-                and has_flex_metadata(item)
-                and is_open(item)
+            STATE["asset_list"] = [
+                {k: v for k, v in item.items() if k != "instrument"}
+                for item in account_assets
             ]
 
-            flex_otc_assets = [
-                item for item in flex_assets
-                if "_OTC" in pair_name(item).upper()
-            ]
-            real_assets = [
-                item for item in flex_assets
-                if item not in otc_assets
-            ]
+            open_assets = [x for x in account_assets if is_currently_open(x)]
+            real_assets = [x for x in account_assets if x.get("mode") == "REAL"]
+            otc_account_assets = [x for x in account_assets if x.get("mode") == "OTC"]
 
             log.info(
-                "FLEX_ASSET_SCAN total=%d flex_open=%d flex_real=%d flex_otc=%d",
-                len(assets),
-                len(flex_assets),
+                "ACCOUNT_ASSET_LIST_READY total=%d open=%d closed=%d real=%d otc=%d",
+                len(account_assets),
+                len(open_assets),
+                len(account_assets) - len(open_assets),
                 len(real_assets),
-                len(flex_otc_assets),
+                len(otc_account_assets),
+            )
+            log.info(
+                "ACCOUNT_ASSET_LIST=%s",
+                ",".join(
+                    f"{x['pair']}:{x['profitability']}:{'OPEN' if is_currently_open(x) else 'CLOSED'}"
+                    for x in account_assets
+                ),
             )
 
-            # OTC is discovered independently from Flex. Olymptrade documents
-            # OTC under Fixed Time (FT), so OTC access stays read-only and is not
-            # mixed into Flex selection.
-            if otc_pairs:
-                log.info("OTC_ASSET_LIST_READY count=%d", len(otc_pairs))
-            else:
-                log.warning("OTC_ASSET_LIST_EMPTY authenticated feed returned no OTC assets.")
+            selected = select_first_open_asset(account_assets)
+            if not selected:
+                raise RuntimeError(
+                    "Authenticated account asset list is present, but no currently open REAL asset is available."
+                )
 
-            # Flex mode is kept separate from Fixed Time. If the authenticated
-            # feed exposes no Flex-capable instrument, fail cleanly instead of
-            # silently selecting a Fixed Time profitability-only record.
-            if not flex_assets:
-                raise RuntimeError("No open Flex-capable instrument was returned by the authenticated market feed.")
-
-            # Prefer a real-market Flex instrument. OTC records are retained in
-            # the diagnostic count but are not mixed into the Flex selection.
-            asset = real_assets[0] if real_assets else flex_assets[0]
-
-            pair = pair_name(asset)
-            if not pair:
-                raise RuntimeError(f"Asset response has no pair identifier: {asset}")
-
+            pair = selected["pair"]
             STATE["asset"] = pair
-            STATE["asset_data"] = asset
-            log.info("FIRST_OLYMPTRADE_ASSET=%s", pair)
-            log.info("ASSET_DATA=%s", asset)
+            STATE["asset_data"] = selected
+            log.info(
+                "FIRST_OLYMPTRADE_ASSET=%s profitability=%s mode=%s",
+                pair,
+                selected["profitability"],
+                selected["mode"],
+            )
+            log.info("ASSET_DATA=%s", selected)
 
             candles = await client.market.get_candles(pair, size=60, count=5)
             STATE["candles"] = len(candles or [])
