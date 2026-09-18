@@ -65,7 +65,7 @@ def event_records(client: OlympTradeClient, event_id: int) -> list[dict]:
     return records
 
 
-def build_account_asset_list(client: OlympTradeClient) -> list[dict]:
+def build_account_asset_list(client: OlympTradeClient, raw_assets: list[dict]) -> list[dict]:
     """
     Build the FT asset list from the authenticated account-visible feeds.
 
@@ -81,8 +81,13 @@ def build_account_asset_list(client: OlympTradeClient) -> list[dict]:
         if pair and isinstance(value, (int, float)):
             profitability[pair] = int(value)
 
+    # get_available_assets() is the authenticated current instrument universe.
+    # Use it for identity/lock/schedule metadata, and intersect it with the full
+    # e=182 profitability feed. This avoids stale/partial e=1054 cache snapshots.
     instruments: dict[str, dict] = {}
-    for item in event_records(client, 1054):
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            continue
         pair = pair_name(item)
         if pair:
             instruments[pair] = item
@@ -247,7 +252,7 @@ async def market_worker() -> None:
                 ",".join(otc_pairs),
             )
 
-            account_assets = build_account_asset_list(client)
+            account_assets = build_account_asset_list(client, raw_assets)
 
             # If the first cache snapshot arrived before the full feeds, wait
             # briefly and rebuild instead of falling back to a static/raw list.
