@@ -7,10 +7,14 @@ from typing import Any
 
 from olymptrade_ws import OlympTradeClient
 from olymptrade_ws.olympconfig import parameters
+
+from brain_rules import BrainState
 \nfrom brain_rules import BrainState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("nexora_ai")
+
+BRAIN = BrainState()
 
 STATE: dict[str, Any] = {
     "status": "starting",
@@ -292,6 +296,10 @@ async def market_worker() -> None:
                     "no profitability/instrument intersection was received."
                 )
 
+            BRAIN.prune_expired_cooldowns()
+            candidate_assets = BRAIN.filter_candidates(account_assets)
+            log.info("BRAIN_CANDIDATES_READY total=%d eligible=%d cooldown=%d", len(account_assets), len(candidate_assets), len(account_assets) - len(candidate_assets))
+
             STATE["asset_list"] = [
                 {k: v for k, v in item.items() if k != "instrument"}
                 for item in account_assets
@@ -318,7 +326,7 @@ async def market_worker() -> None:
                 ),
             )
 
-            selected = select_first_open_asset(account_assets)
+            selected = select_first_open_asset(candidate_assets)
             if not selected:
                 raise RuntimeError(
                     "Authenticated account asset list is present, but no currently open REAL asset is available."
