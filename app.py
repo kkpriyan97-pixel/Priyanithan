@@ -105,19 +105,59 @@ async def final_candidate():
     return rank_signal_candidates(reviewed)[0] if reviewed else None
 
 async def result_watch(key):
+    """Finalize a signal reliably after expiry and never silently drop a result."""
     s=BRAIN.active_signals.get(key)
-    if not s:return
-    await asyncio.sleep(max(0,s.expiry_minutes*60-(time.time()-s.entry_ts)))
-    price=STATE["prices"].get(s.pair,(None,None))[0]
+    if not s:
+        log.warning("RESULT_WATCH_MISSING key=%s",key)
+        return
+    wait=max(0,s.expiry_minutes*60-(time.time()-s.entry_ts))
+    if wait: await asyncio.sleep(wait)
+
+    # Refresh candles and retry. The old code checked one in-memory tick once;
+    # when that tick was absent at expiry it returned without sending a result.
+    price=None
+    verification="candle-closed"
+    for attempt in range(6):
+        try:
+            if CLIENT:
+                cs=await CLIENT.market.get_candles(s.pair,size=5,count=5)
+                if cs:
+                    STATE["candles"][s.pair]=cs
+                    closed=cs[-2] if len(cs)>=2 else cs[-1]
+                    price=closed.get("close",closed.get("c"))
+                    if price is not None:
+                        price=float(price)
+                        break
+        except Exception as e:
+            log.warning("RESULT_CANDLE_READ_FAILED pair=%s attempt=%d %s",s.pair,attempt+1,e)
+        tick=STATE["prices"].get(s.pair,(None,None))[0]
+        if tick is not None:
+            price=float(tick)
+            verification="tick-fallback"
+            break
+        await asyncio.sleep(2)
+
     if price is None:
-        cs=STATE["candles"].get(s.pair,[])
-        if cs:price=float(cs[-1].get("close",cs[-1].get("c",s.entry_price)))
-    if price is None:return
-    rec=BRAIN.finish_signal(key,price)
+        log.error("RESULT_NOT_VERIFIED pair=%s key=%s entry=%s",s.pair,key,s.entry_price)
+        return
+    try:
+        rec=BRAIN.finish_signal(key,price)
+    except Exception:
+        log.exception("RESULT_FINALIZE_FAILED pair=%s key=%s",s.pair,key)
+        return
+
     label=f"{rec['display_name']} ({rec['pair']})"
     icon={"WIN":"🟢","LOSS":"🔴","TIE":"🟡"}[rec["result"]]
-    await telegram(f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI RESULT\n━━━━━━━━━━━━━━━━━━━━\n\n📊 ASSET: {label}\n➡️ DIRECTION: {rec['direction']}\n\n💰 ENTRY: {rec['entry_price']}\n💰 EXIT: {rec['exit_price']}\n⏱️ EXPIRY: {rec['expiry_minutes']} MIN\n\n{icon} {rec['result']}\n\n🧠 STRATEGY: {rec['strategy']}\n📈 15M TREND: {rec['trend_15m']}\n🕯️ 1M STRUCTURE: {rec['structure_1m']}\n\n🧠 Brain learning recorded\n━━━━━━━━━━━━━━━━━━━━")
-    log.info("RESULT pair=%s result=%s exit=%s cooldown=%s",rec["pair"],rec["result"],rec["exit_price"],rec["result"]=="LOSS")
+    sent=await telegram(
+        f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • TRADE RESULT\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n📈 {label}\n\n"
+        f"➡️ {rec['direction']}\n\n💰 Entry: {rec['entry_price']}\n"
+        f"🏁 Exit: {rec['exit_price']}\n\n⏱️ Duration: {rec['expiry_minutes']} MIN\n"
+        f"🔎 Verification: {verification}\n\n{icon} {rec['result']}\n\n"
+        f"⚠️ RESULT ONLY — AUTO TRADE OFF\n━━━━━━━━━━━━━━━━━━━━"
+    )
+    log.info("RESULT_SENT pair=%s result=%s exit=%s verification=%s telegram=%s cooldown=%s",
+             rec["pair"],rec["result"],rec["exit_price"],verification,sent,rec["result"]=="LOSS")
 
 async def cycle_loop():
     while True:
