@@ -99,7 +99,7 @@ async def final_candidate():
         snap=snapshot_from_asset(next(a for a in eligible if a["pair"]==x["pair"]),cs,price,time.time())
         try:
             d=await analyze_with_fallback(snap)
-            # AI is a verifier, not a replacement brain: direction must agree\n            # with the independently calculated Candice strategy.\n            if d and str(d.get("direction","")).upper()==str(x.get("direction","")).upper() and int(d.get("confidence",0))>=90:\n                x.update({"confidence":min(int(x["confidence"]),int(d["confidence"])),"reason":f"{x["reason"]} AI verified ({d.get("provider")}).","ai_provider":d.get("provider")});reviewed.append(x)
+            # AI is a verifier, not a replacement brain: direction must agree\n            # with the independently calculated Candice strategy.\n            if d and str(d.get("direction","")).upper()==str(x.get("direction","")).upper() and int(d.get("confidence",0))>=90:\n                x.update({"confidence":min(int(x["confidence"]),int(d["confidence"])),"reason":f"{x['reason']} AI verified ({d.get('provider')}).","ai_provider":d.get("provider")});reviewed.append(x)
         except Exception as e:log.warning("AI_REVIEW_FAILED pair=%s %s",x["pair"],e)
     return rank_signal_candidates(reviewed)[0] if reviewed else None
 
