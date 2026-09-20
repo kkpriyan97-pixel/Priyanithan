@@ -11,9 +11,10 @@ from ai_router import analyze_with_fallback
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 log=logging.getLogger("candice")
 BRAIN=BrainState()
-STATE={"status":"starting","assets":[],"prices":{},"candles":{},"analyses":{},"read_only":True,"cycle":0,"last_cycle":None}
+STATE={"status":"starting","assets":[],"prices":{},"candles":{},"analyses":{},"read_only":True,"cycle":0,"last_cycle":None,"account_id":None,"account_group":"demo","feed_source":"authenticated_websocket","last_asset_sync":None,"last_tick":None}
 CLIENT=None
 LOCK=asyncio.Lock()
+LIVE_BARS={}
 
 def pair_name(x):
     return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
@@ -32,19 +33,89 @@ def event_records(client,event_id):
         if isinstance(d,list):out.extend(x for x in d if isinstance(x,dict))
     return out
 
-def build_assets(client,raw):
-    prof={}
-    for x in event_records(client,182):
-        p=pair_name(x);v=x.get("profitability")
-        if p and isinstance(v,(int,float)):prof[p]=(int(v),x)
+def build_account_assets(raw):
+    """Normalize the authenticated account-scoped asset feed only."""
     out=[]
-    for x in raw:
+    seen=set()
+    for x in raw or []:
+        if not isinstance(x,dict):
+            continue
         p=pair_name(x)
-        if not p or p not in prof:continue
-        title=display_name(x) or display_name(prof[p][1])
-        if not title:continue
-        out.append({"pair":p,"display_name":title,"title":title,"signal_asset_label":f"{title} ({p})","profitability":prof[p][0],"locked":x.get("locked") is True,"locked_trading":x.get("locked_trading") is True,"mode":"OTC" if "_OTC" in p.upper() else "REAL"})
+        if not p or p in seen:
+            continue
+        unavailable=(x.get("disabled") is True or x.get("locked") is True or
+                     x.get("locked_trading") is True or
+                     any(k in x and x.get(k) is False for k in ("active","available","tradable","is_active","is_available","is_tradable")))
+        status=str(x.get("status") or x.get("state") or "").strip().lower()
+        if unavailable or status in {"disabled","locked","inactive","unavailable","closed","off"}:
+            continue
+        title=display_name(x)
+        if not title:
+            continue
+        v=x.get("profitability")
+        if not isinstance(v,(int,float)):
+            v=x.get("payout",x.get("profit",0))
+        try:
+            v=int(v)
+        except Exception:
+            v=0
+        seen.add(p)
+        out.append({"pair":p,"display_name":title,"title":title,
+                    "signal_asset_label":f"{title} ({p})","profitability":v,
+                    "locked":False,"locked_trading":False,
+                    "mode":"OTC" if "_OTC" in p.upper() else "REAL"})
     return out
+
+def extract_asset_list(payload):
+    if isinstance(payload,list):
+        return [x for x in payload if isinstance(x,dict)]
+    if not isinstance(payload,dict):
+        return []
+    d=payload.get("d",payload)
+    if isinstance(d,list):
+        return [x for x in d if isinstance(x,dict)]
+    if isinstance(d,dict):
+        for k in ("assets","profitability","instruments","pairs","data"):
+            if isinstance(d.get(k),list):
+                return [x for x in d[k] if isinstance(x,dict)]
+    return []
+
+async def sync_account_assets(client,account_id):
+    """Read current account-visible assets through the authenticated WebSocket."""
+    if not client or not account_id:
+        return False
+    try:
+        response=await client.send_request(182,[{"account_id":account_id}],requires_response=True,timeout=8)
+        raw=extract_asset_list(response)
+        assets=build_account_assets(raw)
+        if assets:
+            previous={a["pair"]:a for a in STATE["assets"]}
+            STATE["assets"]=assets
+            STATE["last_asset_sync"]=time.time()
+            STATE["account_id"]=account_id
+            STATE["feed_source"]="authenticated_websocket:event_182"
+            log.info("ACCOUNT_LIVE_ASSET_SCAN source=authenticated_websocket event=182 account_id=%s raw=%d visible=%d",account_id,len(raw),len(assets))
+            return previous != {a["pair"]:a for a in assets}
+        log.warning("ACCOUNT_LIVE_ASSET_SCAN_EMPTY account_id=%s",account_id)
+    except Exception as e:
+        log.warning("ACCOUNT_LIVE_ASSET_SCAN_FAILED account_id=%s %s",account_id,e)
+    return False
+
+async def on_asset_update(message):
+    raw=extract_asset_list(message)
+    if not raw:
+        return
+    incoming=build_account_assets(raw)
+    if not incoming:
+        return
+    current={a["pair"]:a for a in STATE["assets"]}
+    for a in incoming:
+        current[a["pair"]]=a
+    STATE["assets"]=list(current.values())
+    STATE["last_asset_sync"]=time.time()
+    STATE["feed_source"]="authenticated_websocket:event_183"
+    log.info("ACCOUNT_ASSET_FEED_UPDATE event=183 visible=%d",len(STATE["assets"]))
+
 
 async def telegram(text):
     token=os.getenv("TELEGRAM_BOT_TOKEN","").strip();chat=os.getenv("TELEGRAM_CHAT_ID","").strip()
@@ -58,32 +129,63 @@ async def telegram(text):
     except Exception as e:
         log.warning("TELEGRAM_SEND_FAILED %s",e);return False
 
+def _tick_timestamp(ts):
+    try:
+        v=float(ts)
+        if v>20_000_000_000:
+            v/=1000.0
+        return v
+    except Exception:
+        return time.time()
+
+def _update_live_bar(pair,price,ts):
+    minute=int(ts//60)*60
+    bars=LIVE_BARS.setdefault(pair,[])
+    if not bars or int(float(bars[-1]["time"])//60)*60 != minute:
+        bars.append({"time":minute,"open":price,"high":price,"low":price,"close":price,"volume":1})
+        if len(bars)>120:
+            del bars[:-120]
+    else:
+        b=bars[-1]
+        b["high"]=max(float(b["high"]),price)
+        b["low"]=min(float(b["low"]),price)
+        b["close"]=price
+        b["volume"]=int(b.get("volume",0))+1
+    return bars
+
 async def on_tick(message):
     for t in message.get("d",[]) or []:
-        if not isinstance(t,dict):continue
+        if not isinstance(t,dict):
+            continue
         p=str(t.get("p") or t.get("pair") or "")
-        q=t.get("q");ts=t.get("t")
+        q=t.get("q");ts=_tick_timestamp(t.get("t"))
         if p and q is not None:
-            try:STATE["prices"][p]=(float(q),float(ts) if ts is not None else time.time())
-            except Exception:pass
+            try:
+                price=float(q)
+                STATE["prices"][p]=(price,ts)
+                STATE["last_tick"]=time.time()
+                _update_live_bar(p,price,ts)
+            except Exception:
+                pass
+
 
 async def refresh_candles():
-    client=CLIENT;assets=STATE["assets"]
-    if not client:return
-    sem=asyncio.Semaphore(8)
-    async def one(a):
-        async with sem:
-            try:
-                cs=await client.market.get_candles(a["pair"],size=60,count=60)
-                if cs:STATE["candles"][a["pair"]]=cs
-                p=STATE["prices"].get(a["pair"],(None,None))[0]
-                an=analyze_asset(a,STATE["candles"].get(a["pair"],[]),p)
-                if an:
-                    an["profitability"]=a["profitability"];STATE["analyses"][a["pair"]]=an
-                else:STATE["analyses"].pop(a["pair"],None)
-            except Exception as e:log.debug("CANDLE_REFRESH_FAILED %s %s",a["pair"],e)
-    await asyncio.gather(*(one(a) for a in assets))
-    log.info("LIVE_ANALYSIS_REFRESH assets=%d qualified=%d",len(assets),len(STATE["analyses"]))
+    """Analyze local 1-minute candles built directly from the authenticated live tick feed."""
+    assets=STATE["assets"]
+    for a in assets:
+        p=a["pair"]
+        cs=LIVE_BARS.get(p,[])
+        if cs:
+            STATE["candles"][p]=list(cs[-120:])
+        price=STATE["prices"].get(p,(None,None))[0]
+        an=analyze_asset(a,STATE["candles"].get(p,[]),price)
+        if an:
+            an["profitability"]=a["profitability"]
+            STATE["analyses"][p]=an
+        else:
+            STATE["analyses"].pop(p,None)
+    log.info("LIVE_ANALYSIS_REFRESH source=local_1m_bars assets=%d qualified=%d ticks=%d",len(assets),len(STATE["analyses"]),len(STATE["prices"]))
+
 
 async def final_candidate():
     BRAIN.prune_expired_cooldowns()
@@ -185,37 +287,83 @@ async def market_worker():
     global CLIENT
     while True:
         token=os.getenv("OLYMPTRADE_ACCESS_TOKEN","").strip()
-        if not token:STATE["status"]="waiting_for_token";await asyncio.sleep(30);continue
-        client=OlympTradeClient(access_token=token,log_raw_messages=False);CLIENT=client;client.register_callback(parameters.E_TICK_UPDATE,on_tick)
+        if not token:
+            STATE["status"]="waiting_for_token"
+            await asyncio.sleep(30)
+            continue
+        client=OlympTradeClient(access_token=token,log_raw_messages=False)
+        CLIENT=client
+        client.register_callback(parameters.E_TICK_UPDATE,on_tick)
+        client.register_callback(parameters.E_ASSET_PROFITABILITY_UPDATE,on_asset_update)
         try:
-            STATE["status"]="connecting";await client.start();STATE["status"]="connected"
+            STATE["status"]="connecting"
+            await client.start()
+            STATE["status"]="connected"
             await asyncio.sleep(4)
+
+            # Read only the DEMO account identity from the authenticated session.
             for m in client.get_cached_events(55):
                 d=m.get("d") if isinstance(m,dict) else None
                 if isinstance(d,list):
                     for a in d:
-                        if isinstance(a,dict) and a.get("group")=="demo":client.account_id=a.get("account_id");client.account_group="demo";break
-                if client.account_id:break
-            raw=await client.market.get_available_assets(client.account_id);assets=build_assets(client,raw)
-            STATE["assets"]=assets;STATE["status"]="live_read_only"
-            log.info("ALL_ASSETS_READY count=%d",len(assets))
-            for a in assets:
-                try:await client.market.subscribe_ticks(a["pair"])
-                except Exception as e:log.debug("TICK_SUBSCRIBE_FAILED %s %s",a["pair"],e)
-            await refresh_candles()
-            if not any(x.done() for x in []):pass
-            while True:await asyncio.sleep(30)
+                        if isinstance(a,dict) and a.get("group")=="demo":
+                            client.account_id=a.get("account_id")
+                            client.account_group="demo"
+                            break
+                if client.account_id:
+                    break
+
+            STATE["account_id"]=client.account_id
+            STATE["account_group"]="demo"
+            if not client.account_id:
+                raise RuntimeError("DEMO_ACCOUNT_ID_NOT_FOUND_FROM_AUTHENTICATED_SESSION")
+
+            changed=await sync_account_assets(client,client.account_id)
+            if not STATE["assets"]:
+                raise RuntimeError("AUTHENTICATED_ACCOUNT_RETURNED_NO_VISIBLE_ASSETS")
+
+            STATE["status"]="live_account_read_only"
+            log.info("ACCOUNT_ASSETS_READY count=%d changed=%s source=%s",len(STATE["assets"]),changed,STATE["feed_source"])
+
+            subscribed=set()
+            last_rescan=0.0
+            while True:
+                now=time.time()
+
+                # Re-scan the account-visible universe every minute.
+                if now-last_rescan>=60:
+                    changed=await sync_account_assets(client,client.account_id)
+                    if changed or not subscribed:
+                        for a in STATE["assets"]:
+                            p=a["pair"]
+                            if p in subscribed:
+                                continue
+                            try:
+                                await client.market.subscribe_ticks(p)
+                                subscribed.add(p)
+                            except Exception as e:
+                                log.debug("TICK_SUBSCRIBE_FAILED %s %s",p,e)
+                    last_rescan=now
+
+                await refresh_candles()
+                await asyncio.sleep(5)
+
         except Exception as e:
-            STATE["status"]="error";log.exception("MARKET_WORKER_ERROR %s",e);await asyncio.sleep(15)
+            STATE["status"]="error"
+            log.exception("MARKET_WORKER_ERROR %s",e)
+            await asyncio.sleep(15)
         finally:
-            try:await client.stop()
-            except Exception:pass
+            try:
+                await client.stop()
+            except Exception:
+                pass
             CLIENT=None
+
 
 async def health(reader,writer):
     try:
         await reader.read(2048)
-        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":True,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals)}).encode()
+        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":True,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals),"account_id":STATE["account_id"],"account_group":STATE["account_group"],"feed_source":STATE["feed_source"],"last_asset_sync":STATE["last_asset_sync"],"last_tick":STATE["last_tick"]}).encode()
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"+body);await writer.drain()
     finally:writer.close()
 
