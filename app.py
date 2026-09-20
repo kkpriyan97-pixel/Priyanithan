@@ -262,26 +262,104 @@ async def result_watch(key):
              rec["pair"],rec["result"],rec["exit_price"],verification,sent,rec["result"]=="LOSS")
 
 async def cycle_loop():
+    """
+    Continuous 5-minute scanning:
+      - exactly 3 full ALL-account-asset scans per 5-minute cycle
+      - a scan never stops because another asset has no setup
+      - a signal may be sent at most once per cycle
+      - no user-facing NO SIGNAL message is ever sent
+    """
     while True:
-        now=time.time();next_boundary=(int(now)//300+1)*300
-        target=next_boundary
-        start=target-40
-        await asyncio.sleep(max(0,start-time.time()))
-        cycle_id=target//300
-        BRAIN.start_cycle(int(cycle_id));STATE["cycle"]=int(cycle_id)
-        # Keep the 40-second window live: re-rank immediately before signal.
-        candidate=await final_candidate()
-        if candidate:
-            p=candidate["pair"];entry=STATE["prices"].get(p,(None,None))[0]
-            if entry is not None and BRAIN.can_send_cycle_signal():
-                ts=time.time();s=BRAIN.mark_signal_sent(pair=p,display_name=candidate["display_name"],direction=candidate["direction"],expiry_minutes=candidate["expiry_minutes"],entry_price=entry,entry_ts=ts,entry_candle_ts=candidate["entry_candle_ts"],strategy=candidate["strategy"],reason=candidate["reason"],confidence=candidate["confidence"])
-                key=f"{s.cycle_id}:{s.pair}:{s.entry_ts}"
-                target_dt=time.strftime("%H:%M:%S",time.localtime(target))
-                msg=f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • LIVE MARKET\n━━━━━━━━━━━━━━━━━━━━\n\n📊 ASSET: {s.display_name} ({s.pair})\n➡️ DIRECTION: {s.direction}\n\n🕒 SIGNAL: {time.strftime('%H:%M:%S',time.localtime(ts))} UAE\n🎯 TARGET: {target_dt} UAE\n⏳ SIGNAL COUNTDOWN: 00:40\n\n⏱️ EXPIRY: {s.expiry_minutes} MIN\n💰 ENTRY: {s.entry_price}\n\n📈 15M TREND: {s.trend_15m}\n🕯️ 1M STRUCTURE: {s.structure_1m}\n🧠 STRATEGY: {s.strategy}\n🎯 CONFIDENCE: {s.confidence}%\n🟢 ACCOUNT: DEMO\n\n🧠 {s.reason}\n━━━━━━━━━━━━━━━━━━━━"
-                await telegram(msg);asyncio.create_task(result_watch(key));log.info("FINAL_SIGNAL cycle=%s pair=%s direction=%s confidence=%s",cycle_id,p,s.direction,s.confidence)
-        else:log.info("NO_VALID_FINAL_SETUP cycle=%s",cycle_id)
-        # refresh full market evidence for the next cycle
-        await refresh_candles()
+        now=time.time()
+        next_boundary=(int(now)//300+1)*300
+        cycle_id=next_boundary//300
+        BRAIN.start_cycle(int(cycle_id))
+        STATE["cycle"]=int(cycle_id)
+        STATE["last_cycle"]=next_boundary
+
+        # Three full-universe scans distributed across the 5-minute window.
+        # The first scan is 40s before the checkpoint, then two more scans
+        # approximately 100s apart. Each scan refreshes EVERY account asset.
+        scan_targets=(next_boundary-40,next_boundary+100,next_boundary+200)
+
+        for scan_no,target_ts in enumerate(scan_targets,1):
+            await asyncio.sleep(max(0,target_ts-time.time()))
+
+            # Re-sync the authenticated account-visible universe before each
+            # scan so newly visible/removed assets are reflected immediately.
+            if CLIENT and STATE.get("account_id"):
+                try:
+                    await sync_account_assets(CLIENT,STATE["account_id"])
+                except Exception as e:
+                    log.warning("SCAN_ASSET_SYNC_FAILED cycle=%s scan=%d %s",cycle_id,scan_no,e)
+
+            # This is the mandatory ALL-ASSET scan. It must run even when a
+            # previous scan produced no candidate or already sent a signal.
+            await refresh_candles()
+            log.info(
+                "FULL_ASSET_SCAN cycle=%s scan=%d/3 assets=%d qualified=%d",
+                cycle_id,scan_no,len(STATE["assets"]),len(STATE["analyses"])
+            )
+
+            # Try to find a signal after every full scan. If none qualifies,
+            # remain silent and continue scanning; NEVER send "NO SIGNAL".
+            if not BRAIN.cycle_signal_sent:
+                candidate=await final_candidate()
+                if candidate:
+                    p=candidate["pair"]
+                    entry=STATE["prices"].get(p,(None,None))[0]
+                    if entry is not None and BRAIN.can_send_cycle_signal():
+                        ts=time.time()
+                        s=BRAIN.mark_signal_sent(
+                            pair=p,display_name=candidate["display_name"],
+                            direction=candidate["direction"],
+                            expiry_minutes=candidate["expiry_minutes"],
+                            entry_price=entry,entry_ts=ts,
+                            entry_candle_ts=candidate["entry_candle_ts"],
+                            strategy=candidate["strategy"],
+                            reason=candidate["reason"],
+                            confidence=candidate["confidence"]
+                        )
+                        key=f"{s.cycle_id}:{s.pair}:{s.entry_ts}"
+                        target_dt=time.strftime("%H:%M:%S",time.localtime(next_boundary))
+                        msg=(
+                            "━━━━━━━━━━━━━━━━━━━━\\n"
+                            "🎯 CANDICE AI • LIVE MARKET\\n"
+                            "━━━━━━━━━━━━━━━━━━━━\\n\\n"
+                            f"📊 ASSET: {s.display_name} ({s.pair})\\n"
+                            f"➡️ DIRECTION: {s.direction}\\n\\n"
+                            f"🕒 SIGNAL: {time.strftime('%H:%M:%S',time.localtime(ts))} UAE\\n"
+                            f"🎯 TARGET: {target_dt} UAE\\n"
+                            "⏳ SIGNAL COUNTDOWN: 00:40\\n\\n"
+                            f"⏱️ EXPIRY: {s.expiry_minutes} MIN\\n"
+                            f"💰 ENTRY: {s.entry_price}\\n\\n"
+                            f"📈 15M TREND: {s.trend_15m}\\n"
+                            f"🕯️ 1M STRUCTURE: {s.structure_1m}\\n"
+                            f"🧠 STRATEGY: {s.strategy}\\n"
+                            f"🎯 CONFIDENCE: {s.confidence}%\\n"
+                            "🟢 ACCOUNT: DEMO\\n\\n"
+                            f"🧠 {s.reason}\\n"
+                            "━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        await telegram(msg)
+                        asyncio.create_task(result_watch(key))
+                        log.info(
+                            "FINAL_SIGNAL cycle=%s scan=%d pair=%s direction=%s confidence=%s",
+                            cycle_id,scan_no,p,s.direction,s.confidence
+                        )
+                else:
+                    log.info(
+                        "SCAN_NO_QUALIFIED_SETUP cycle=%s scan=%d/3 assets=%d; continuing",
+                        cycle_id,scan_no,len(STATE["assets"])
+                    )
+            else:
+                log.info(
+                    "SCAN_CONTINUES_AFTER_SIGNAL cycle=%s scan=%d/3 assets=%d",
+                    cycle_id,scan_no,len(STATE["assets"])
+                )
+
+        # The loop immediately creates the next 5-minute cycle and repeats.
+        # There is deliberately no NO_SIGNAL Telegram output.
 
 async def market_worker():
     global CLIENT
