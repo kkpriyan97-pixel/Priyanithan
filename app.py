@@ -7,7 +7,7 @@ from brain_rules import BrainState,rank_signal_candidates
 from candice_brain import analyze_asset
 from ai_engine import snapshot_from_asset
 from ai_router import analyze_with_fallback
-from self_learning import self_learning_loop, learning_status, record_demo_result
+from self_learning import self_learning_loop, learning_status, record_demo_result, record_market_snapshot
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 log=logging.getLogger("candice")
@@ -325,6 +325,11 @@ async def refresh_candles():
                 price_ts=float(last.get("time",last.get("t",now)))+60
             except Exception:
                 price_ts=now
+
+        try:
+            record_market_snapshot(p, base, price, now)
+        except Exception as e:
+            log.debug("LEARNING_MARKET_SNAPSHOT_FAILED pair=%s error=%s",p,e)
 
         an=analyze_asset(a,base,price,now=now)
         if an:
