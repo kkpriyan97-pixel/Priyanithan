@@ -16,8 +16,10 @@ CLIENT=None
 LOCK=asyncio.Lock()
 LIVE_BARS={}
 CANDLE_FETCH_SEMAPHORE=asyncio.Semaphore(16)
+CANDLE_REFRESH_SECONDS=45
 TICK_STALE_SECONDS=75
 TIMING_TOLERANCE_SECONDS=1.5
+HISTORY_LAST_FETCH={}
 
 def pair_name(x):
     return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
@@ -194,7 +196,12 @@ async def refresh_candles(force_history=False):
         local=list(LIVE_BARS.get(p,[])[-120:])
         tick_ts=STATE["prices"].get(p,(None,None))[1]
         tick_fresh=tick_ts is not None and now-float(tick_ts)<=TICK_STALE_SECONDS
-        need_history=force_history or len(local)<60 or not tick_fresh
+        last_fetch=float(HISTORY_LAST_FETCH.get(p,0) or 0)
+        need_history=(
+            force_history
+            or len(local)<60
+            or (not tick_fresh and now-last_fetch>=CANDLE_REFRESH_SECONDS)
+        )
         if need_history:
             fetch_jobs[p]=asyncio.create_task(_fetch_history(p))
 
@@ -203,6 +210,7 @@ async def refresh_candles(force_history=False):
         for p,cs in zip(fetch_jobs,results):
             if isinstance(cs,list) and cs:
                 STATE["candles"][p]=list(cs[-120:])
+                HISTORY_LAST_FETCH[p]=time.time()
 
     qualified=0
     stale=0
