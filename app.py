@@ -362,6 +362,7 @@ async def _review_candidate(cycle_id,scan_no,x,eligible):
                 cycle_id,scan_no,x["pair"],brain_direction,ai_direction
             )
             return None
+        x["ai_review_candle_ts"]=x.get("entry_candle_ts")
         x.update({
             "confidence":int(d["confidence"]),
             "reason":d.get("reason") or x["reason"],
@@ -436,24 +437,40 @@ def select_cached_candidate(cycle_id):
         current=STATE["analyses"].get(pair)
         if not current:
             continue
-        # Brain may change after the pre-review; never send an obsolete direction.
+        # The technical brain must be current, while AI approval may come from the
+        # most recent pre-check. Do not require the AI-reviewed candle to remain
+        # identical because a new closed 1m candle normally appears before T-30.
         if str(current.get("direction","")).upper()!=str(x.get("direction","")).upper():
             log.info(
                 "FINAL_CACHE_STALE_DIRECTION cycle=%s pair=%s cached=%s current=%s; rejecting",
                 cycle_id,pair,x.get("direction"),current.get("direction")
             )
             continue
-        if str(current.get("entry_candle_ts"))!=str(x.get("entry_candle_ts")):
+
+        current_closed_ts=current.get("closed_1m_ts",current.get("entry_candle_ts"))
+        try:
+            current_closed_age=now-(float(current_closed_ts)+60)
+        except Exception:
+            current_closed_age=float("inf")
+        if current_closed_age>90:
             log.info(
-                "FINAL_CACHE_STALE_CANDLE cycle=%s pair=%s cached=%s current=%s; rejecting",
-                cycle_id,pair,x.get("entry_candle_ts"),current.get("entry_candle_ts")
+                "FINAL_CACHE_STALE_BRAIN cycle=%s pair=%s closed_ts=%s age=%.1f; rejecting",
+                cycle_id,pair,current_closed_ts,current_closed_age
             )
             continue
+
         asset=current_by_pair.get(pair)
         if not asset or asset.get("locked") or asset.get("locked_trading"):
             continue
+
         merged=current.copy()
         merged.update(x)
+        # Preserve the current technical-brain candle as the actual decision candle.
+        merged["entry_candle_ts"]=current.get("entry_candle_ts")
+        merged["closed_1m_ts"]=current.get("closed_1m_ts")
+        merged["closed_15m_ts"]=current.get("closed_15m_ts")
+        merged["decision_candle_closed"]=True
+        merged["brain_current_at_final"]=time.time()
         candidates.append(merged)
 
     ranked=rank_signal_candidates(candidates)
