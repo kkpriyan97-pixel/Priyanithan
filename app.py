@@ -7,6 +7,7 @@ from brain_rules import BrainState,rank_signal_candidates
 from candice_brain import analyze_asset
 from ai_engine import snapshot_from_asset
 from ai_router import analyze_with_fallback
+from self_learning import self_learning_loop, learning_status
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 log=logging.getLogger("candice")
@@ -878,11 +879,11 @@ async def market_worker():
 async def health(reader,writer):
     try:
         await reader.read(2048)
-        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":True,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals),"account_id":STATE["account_id"],"account_group":STATE["account_group"],"feed_source":STATE["feed_source"],"last_asset_sync":STATE["last_asset_sync"],"last_tick":STATE["last_tick"]}).encode()
+        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":True,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals),"account_id":STATE["account_id"],"account_group":STATE["account_group"],"feed_source":STATE["feed_source"],"last_asset_sync":STATE["last_asset_sync"],"last_tick":STATE["last_tick"],"self_learning":learning_status()},ensure_ascii=False).encode()
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"+body);await writer.drain()
     finally:writer.close()
 
 async def main():
     port=int(os.getenv("PORT","10000"));server=await asyncio.start_server(health,"0.0.0.0",port)
-    await asyncio.gather(market_worker(),cycle_loop(),server.serve_forever())
+    await asyncio.gather(market_worker(),cycle_loop(),self_learning_loop(),server.serve_forever())
 if __name__=="__main__":asyncio.run(main())
