@@ -20,6 +20,12 @@ CANDLE_REFRESH_SECONDS=45
 TICK_STALE_SECONDS=75
 TIMING_TOLERANCE_SECONDS=1.5
 HISTORY_LAST_FETCH={}
+HISTORY_CURSOR=0
+CYCLE_CANDIDATES={}
+CYCLE_REVIEW_TASKS={}
+SCAN_SYNC_TIMEOUT=6.0
+FINAL_CACHE_MAX_AGE=75.0
+AI_REVIEW_TIMEOUT=24.0
 
 def pair_name(x):
     return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
@@ -180,51 +186,77 @@ async def _fetch_history(pair):
         return None
     async with CANDLE_FETCH_SEMAPHORE:
         try:
-            return await CLIENT.market.get_candles(pair,size=60,count=120,solid=False)
+            return await asyncio.wait_for(
+                CLIENT.market.get_candles(pair,size=60,count=120,solid=False),
+                timeout=5.0,
+            )
         except Exception as e:
             log.warning("CANDLE_REFRESH_FAILED pair=%s %s",pair,e)
             return None
 
 
-async def refresh_candles(force_history=False):
-    """Refresh every account asset while never using a forming candle for brain decisions."""
+async def refresh_history_batch(limit=24,force=False):
+    """Refresh a bounded rotating batch so one scan can never block the 5-minute scheduler."""
+    global HISTORY_CURSOR
     assets=list(STATE["assets"])
+    if not assets:
+        return 0
+
     now=time.time()
-    fetch_jobs={}
-    for a in assets:
+    selected=[]
+    n=len(assets)
+    for offset in range(n):
+        idx=(HISTORY_CURSOR+offset)%n
+        a=assets[idx]
         p=a["pair"]
-        local=list(LIVE_BARS.get(p,[])[-120:])
+        local=LIVE_BARS.get(p,[])
         tick_ts=STATE["prices"].get(p,(None,None))[1]
         tick_fresh=tick_ts is not None and now-float(tick_ts)<=TICK_STALE_SECONDS
         last_fetch=float(HISTORY_LAST_FETCH.get(p,0) or 0)
-        need_history=(
-            force_history
-            or len(local)<60
-            or (not tick_fresh and now-last_fetch>=CANDLE_REFRESH_SECONDS)
+        missing=len(local)<60 and len(STATE["candles"].get(p,[]))<60
+        stale=(not tick_fresh and now-last_fetch>=CANDLE_REFRESH_SECONDS)
+        if force or missing or stale:
+            selected.append(a)
+            if len(selected)>=limit:
+                HISTORY_CURSOR=(idx+1)%n
+                break
+    if not selected:
+        HISTORY_CURSOR=(HISTORY_CURSOR+limit)%n
+        return 0
+
+    jobs={a["pair"]:asyncio.create_task(_fetch_history(a["pair"])) for a in selected}
+    results=await asyncio.gather(*jobs.values(),return_exceptions=True)
+    refreshed=0
+    for p,cs in zip(jobs,results):
+        if isinstance(cs,list) and cs:
+            STATE["candles"][p]=list(cs[-120:])
+            HISTORY_LAST_FETCH[p]=time.time()
+            refreshed+=1
+    if refreshed:
+        log.info(
+            "HISTORY_BATCH_REFRESH refreshed=%d requested=%d cursor=%d total_assets=%d",
+            refreshed,len(selected),HISTORY_CURSOR,len(assets)
         )
-        if need_history:
-            fetch_jobs[p]=asyncio.create_task(_fetch_history(p))
+    return refreshed
 
-    if fetch_jobs:
-        results=await asyncio.gather(*fetch_jobs.values(),return_exceptions=True)
-        for p,cs in zip(fetch_jobs,results):
-            if isinstance(cs,list) and cs:
-                STATE["candles"][p]=list(cs[-120:])
-                HISTORY_LAST_FETCH[p]=time.time()
 
+async def refresh_candles():
+    """Analyze the entire current account universe without doing network I/O."""
+    assets=list(STATE["assets"])
+    now=time.time()
     qualified=0
     stale=0
+
     for a in assets:
         p=a["pair"]
         local=list(LIVE_BARS.get(p,[])[-120:])
         base=STATE["candles"].get(p,[])
         if local:
-            # Live bars supersede equal timestamps from the API history.
             merged={str(x.get("time",x.get("t"))):x for x in base if isinstance(x,dict)}
             for bar in local:
                 merged[str(bar["time"])]=bar
             base=list(merged.values())
-            base.sort(key=lambda x: float(x.get("time",x.get("t",0)) or 0))
+            base.sort(key=lambda x:float(x.get("time",x.get("t",0)) or 0))
             base=base[-120:]
             STATE["candles"][p]=base
 
@@ -251,53 +283,132 @@ async def refresh_candles(force_history=False):
             stale+=1
 
     log.info(
-        "LIVE_ANALYSIS_REFRESH source=authenticated_account_scan assets=%d qualified=%d "
+        "LIVE_ANALYSIS_REFRESH source=current_account_state assets=%d qualified=%d "
         "ticks=%d stale=%d closed_only=1",
         len(assets),qualified,len(STATE["prices"]),stale
     )
 
 
-async def final_candidate():
-    BRAIN.prune_expired_cooldowns()
-    eligible=BRAIN.filter_candidates(STATE["assets"])
-    raw=[STATE["analyses"][a["pair"]].copy() for a in eligible if a["pair"] in STATE["analyses"]]
-    raw=rank_signal_candidates(raw)
-    if not raw:
+async def _review_candidate(cycle_id,scan_no,x,eligible):
+    cs=STATE["candles"].get(x["pair"],[])
+    price=STATE["prices"].get(x["pair"],(x.get("price"),None))[0]
+    asset=next(a for a in eligible if a["pair"]==x["pair"])
+    snap=snapshot_from_asset(asset,cs,price,time.time())
+    try:
+        d=await asyncio.wait_for(analyze_with_fallback(snap),timeout=AI_REVIEW_TIMEOUT)
+        if not d or int(d.get("confidence",0))<90:
+            return None
+        ai_direction=str(d.get("direction","")).upper()
+        brain_direction=str(x.get("direction","")).upper()
+        if ai_direction!=brain_direction:
+            log.info(
+                "AI_DIRECTION_MISMATCH cycle=%s scan=%d pair=%s brain=%s ai=%s; rejecting",
+                cycle_id,scan_no,x["pair"],brain_direction,ai_direction
+            )
+            return None
+        x.update({
+            "confidence":int(d["confidence"]),
+            "reason":d.get("reason") or x["reason"],
+            "ai_provider":d.get("provider"),
+            "ai_direction":ai_direction,
+            "decision_candle_closed":True,
+            "reviewed_at":time.time(),
+            "review_cycle":cycle_id,
+            "review_scan":scan_no,
+        })
+        return x
+    except Exception as e:
+        log.warning(
+            "AI_REVIEW_FAILED cycle=%s scan=%d pair=%s error=%s",
+            cycle_id,scan_no,x["pair"],e
+        )
         return None
 
-    async def review(x):
-        cs=STATE["candles"].get(x["pair"],[])
-        price=STATE["prices"].get(x["pair"],(x.get("price"),None))[0]
-        asset=next(a for a in eligible if a["pair"]==x["pair"])
-        snap=snapshot_from_asset(asset,cs,price,time.time())
-        try:
-            d=await analyze_with_fallback(snap)
-            if not d or int(d.get("confidence",0))<90:
-                return None
-            ai_direction=str(d.get("direction","")).upper()
-            brain_direction=str(x.get("direction","")).upper()
-            # AI is verification only: it may not rewrite Candice's direction.
-            if ai_direction!=brain_direction:
-                log.info(
-                    "AI_DIRECTION_MISMATCH pair=%s brain=%s ai=%s; rejecting",
-                    x["pair"],brain_direction,ai_direction
-                )
-                return None
-            x.update({
-                "confidence":int(d["confidence"]),
-                "reason":d.get("reason") or x["reason"],
-                "ai_provider":d.get("provider"),
-                "ai_direction":ai_direction,
-                "decision_candle_closed":True,
-            })
-            return x
-        except Exception as e:
-            log.warning("AI_REVIEW_FAILED pair=%s %s",x["pair"],e)
-            return None
 
-    reviewed=await asyncio.gather(*(review(x) for x in raw[:4]))
-    accepted=[x for x in reviewed if x is not None]
-    return rank_signal_candidates(accepted)[0] if accepted else None
+async def prepare_cycle_candidates(cycle_id,scan_no):
+    """Pre-compute AI-verified candidates before the T-30 final window."""
+    try:
+        eligible=BRAIN.filter_candidates(list(STATE["assets"]))
+        raw=[
+            STATE["analyses"][a["pair"]].copy()
+            for a in eligible
+            if a["pair"] in STATE["analyses"]
+        ]
+        raw=rank_signal_candidates(raw)[:4]
+        if not raw:
+            log.info(
+                "AI_REVIEW_CACHE_EMPTY cycle=%s scan=%d reason=no_brain_candidates",
+                cycle_id,scan_no
+            )
+            return
+
+        reviewed=await asyncio.gather(
+            *(_review_candidate(cycle_id,scan_no,x,eligible) for x in raw),
+            return_exceptions=True,
+        )
+        accepted=[x for x in reviewed if isinstance(x,dict)]
+        cache=CYCLE_CANDIDATES.setdefault(cycle_id,[])
+        cache.extend(accepted)
+        # Keep only the newest candidate per pair/candle.
+        unique={}
+        for x in cache:
+            unique[(x["pair"],str(x["entry_candle_ts"]))]=x
+        CYCLE_CANDIDATES[cycle_id]=list(unique.values())[-12:]
+
+        log.info(
+            "AI_REVIEW_CACHE cycle=%s scan=%d brain=%d accepted=%d cached=%d",
+            cycle_id,scan_no,len(raw),len(accepted),len(CYCLE_CANDIDATES[cycle_id])
+        )
+    except Exception as e:
+        log.exception(
+            "AI_REVIEW_CACHE_FAILED cycle=%s scan=%d error=%s",
+            cycle_id,scan_no,e
+        )
+
+
+def select_cached_candidate(cycle_id):
+    """Select a still-fresh AI-verified candidate without making a new network call."""
+    now=time.time()
+    candidates=[]
+    current_by_pair={a["pair"]:a for a in STATE["assets"]}
+
+    for x in CYCLE_CANDIDATES.get(cycle_id,[]):
+        reviewed_at=float(x.get("reviewed_at",0) or 0)
+        if now-reviewed_at>FINAL_CACHE_MAX_AGE:
+            continue
+        pair=x["pair"]
+        current=STATE["analyses"].get(pair)
+        if not current:
+            continue
+        # Brain may change after the pre-review; never send an obsolete direction.
+        if str(current.get("direction","")).upper()!=str(x.get("direction","")).upper():
+            log.info(
+                "FINAL_CACHE_STALE_DIRECTION cycle=%s pair=%s cached=%s current=%s; rejecting",
+                cycle_id,pair,x.get("direction"),current.get("direction")
+            )
+            continue
+        if str(current.get("entry_candle_ts"))!=str(x.get("entry_candle_ts")):
+            log.info(
+                "FINAL_CACHE_STALE_CANDLE cycle=%s pair=%s cached=%s current=%s; rejecting",
+                cycle_id,pair,x.get("entry_candle_ts"),current.get("entry_candle_ts")
+            )
+            continue
+        asset=current_by_pair.get(pair)
+        if not asset or asset.get("locked") or asset.get("locked_trading"):
+            continue
+        merged=current.copy()
+        merged.update(x)
+        candidates.append(merged)
+
+    ranked=rank_signal_candidates(candidates)
+    if ranked:
+        return ranked[0]
+
+    log.info(
+        "FINAL_CACHE_MISS cycle=%s cached=%d max_age=%ss",
+        cycle_id,len(CYCLE_CANDIDATES.get(cycle_id,[])),int(FINAL_CACHE_MAX_AGE)
+    )
+    return None
 
 async def result_watch(key):
     """Lock the real entry at the scheduled boundary, then verify its exact expiry candle."""
@@ -429,7 +540,11 @@ async def result_watch(key):
     )
 
 async def cycle_loop():
-    """Continuous 5-minute scan with three full scans and an exact 30-second final entry."""
+    """
+    Deterministic 5-minute scheduler:
+      T-180, T-120, T-60 = full-universe analysis snapshots
+      T-30 = signal emission only; never block on candle/history/AI network work
+    """
     while True:
         now=time.time()
         next_boundary=(int(now)//300+1)*300
@@ -437,57 +552,88 @@ async def cycle_loop():
         BRAIN.start_cycle(int(cycle_id))
         STATE["cycle"]=int(cycle_id)
         STATE["last_cycle"]=next_boundary
+        CYCLE_CANDIDATES.pop(cycle_id-2,None)
 
-        # Full account scans happen before the final entry window.
         scan_targets=(next_boundary-180,next_boundary-120,next_boundary-60)
 
         for scan_no,target_ts in enumerate(scan_targets,1):
             await asyncio.sleep(max(0,target_ts-time.time()))
-            if CLIENT and STATE.get("account_id"):
-                try:
-                    await sync_account_assets(CLIENT,STATE["account_id"])
-                except Exception as e:
-                    log.warning("SCAN_ASSET_SYNC_FAILED cycle=%s scan=%d %s",cycle_id,scan_no,e)
-
-            await refresh_candles(force_history=(scan_no==1))
+            scan_started=time.time()
             log.info(
-                "FULL_ASSET_SCAN cycle=%s scan=%d/3 assets=%d qualified=%d",
-                cycle_id,scan_no,len(STATE["assets"]),len(STATE["analyses"])
+                "CYCLE_SCAN_START cycle=%s scan=%d/3 target=%d lag=%.3f",
+                cycle_id,scan_no,target_ts,scan_started-target_ts
             )
 
-        # Final decision is locked to exactly 30 seconds before the 5-minute boundary.
+            if CLIENT and STATE.get("account_id"):
+                try:
+                    await asyncio.wait_for(
+                        sync_account_assets(CLIENT,STATE["account_id"]),
+                        timeout=SCAN_SYNC_TIMEOUT,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "SCAN_ASSET_SYNC_BOUNDED cycle=%s scan=%d error=%s",
+                        cycle_id,scan_no,e
+                    )
+
+            # No candle API/network wait here. The background market worker feeds state.
+            await refresh_candles()
+            log.info(
+                "FULL_ASSET_SCAN cycle=%s scan=%d/3 assets=%d qualified=%d duration=%.3f",
+                cycle_id,scan_no,len(STATE["assets"]),len(STATE["analyses"]),
+                time.time()-scan_started
+            )
+
+            # AI verification starts now and runs independently of the scheduler.
+            task=asyncio.create_task(prepare_cycle_candidates(cycle_id,scan_no))
+            CYCLE_REVIEW_TASKS.setdefault(cycle_id,[]).append(task)
+
         final_target=next_boundary-30
         await asyncio.sleep(max(0,final_target-time.time()))
-        lead=next_boundary-time.time()
+
+        # Give only already-running review tasks a tiny completion window.
+        pending=CYCLE_REVIEW_TASKS.get(cycle_id,[])
+        if pending:
+            remaining=max(0,final_target+1.0-time.time())
+            if remaining:
+                await asyncio.gather(*pending,return_exceptions=True)
+
+        actual=time.time()
+        lead=next_boundary-actual
         log.info(
             "FINAL_TIMING_CHECK cycle=%s target=%d actual=%.3f lead=%.3f",
-            cycle_id,final_target,time.time(),lead
+            cycle_id,final_target,actual,lead
         )
-        if not (30-TIMING_TOLERANCE_SECONDS <= lead <= 30+TIMING_TOLERANCE_SECONDS):
-            log.warning("FINAL_TIMING_REJECT cycle=%s lead=%.3f",cycle_id,lead)
-            continue
 
-        candidate=await final_candidate()
+        candidate=select_cached_candidate(cycle_id)
         if not candidate:
-            log.info("SCAN_NO_QUALIFIED_SETUP cycle=%s final_window=1/1",cycle_id)
+            log.info(
+                "FINAL_NO_SIGNAL cycle=%s reason=no_fresh_ai_verified_candidate",
+                cycle_id
+            )
             continue
 
         p=candidate["pair"]
         entry_data=STATE["prices"].get(p,(candidate.get("price"),candidate.get("price_ts")))
         entry=entry_data[0]
         entry_ts=entry_data[1]
+
+        # For an unsubscribed asset, use its most recent market state only as reference.
         if entry is None:
-            log.warning("FINAL_SIGNAL_NO_ENTRY_PRICE cycle=%s pair=%s",cycle_id,p)
-            continue
-        if entry_ts is not None and time.time()-float(entry_ts)>45:
             log.warning(
-                "FINAL_SIGNAL_STALE_PRICE cycle=%s pair=%s age=%.1f",
-                cycle_id,p,time.time()-float(entry_ts)
+                "FINAL_SIGNAL_NO_REFERENCE_PRICE cycle=%s pair=%s",
+                cycle_id,p
+            )
+            continue
+        if entry_ts is not None and actual-float(entry_ts)>45:
+            log.warning(
+                "FINAL_SIGNAL_STALE_REFERENCE cycle=%s pair=%s age=%.1f",
+                cycle_id,p,actual-float(entry_ts)
             )
             continue
 
         try:
-            ts=time.time()
+            ts=actual
             s=BRAIN.mark_signal_sent(
                 pair=p,
                 display_name=candidate["display_name"],
@@ -506,7 +652,10 @@ async def cycle_loop():
                 decision_candle_closed=candidate.get("decision_candle_closed",True),
             )
         except Exception as e:
-            log.warning("FINAL_SIGNAL_REJECTED cycle=%s pair=%s error=%s",cycle_id,p,e)
+            log.warning(
+                "FINAL_SIGNAL_REJECTED cycle=%s pair=%s error=%s",
+                cycle_id,p,e
+            )
             continue
 
         key=f"{s.cycle_id}:{s.pair}:{s.entry_ts}"
@@ -577,34 +726,62 @@ async def market_worker():
             if not STATE["assets"]:
                 raise RuntimeError("AUTHENTICATED_ACCOUNT_RETURNED_NO_VISIBLE_ASSETS")
 
-            # Seed a full 120-minute 1m history window for every account-visible asset.
-            await refresh_candles(force_history=True)
+            # Background rotation seeds the full account universe without blocking the cycle scheduler.
+            await refresh_candles()
 
             STATE["status"]="live_account_read_only"
             log.info("ACCOUNT_ASSETS_READY count=%d changed=%s source=%s",len(STATE["assets"]),changed,STATE["feed_source"])
 
             subscribed=set()
             last_rescan=0.0
+            last_history_refresh=0.0
+            history_seed_done=False
+
             while True:
                 now=time.time()
 
-                # Re-scan the account-visible universe every minute.
                 if now-last_rescan>=60:
                     changed=await sync_account_assets(client,client.account_id)
                     if changed or not subscribed:
-                        for a in STATE["assets"]:
+                        # Subscribe in parallel with a bounded concurrency; failures are isolated per asset.
+                        sem=asyncio.Semaphore(8)
+
+                        async def subscribe_one(a):
                             p=a["pair"]
                             if p in subscribed:
-                                continue
-                            try:
-                                await client.market.subscribe_ticks(p)
-                                subscribed.add(p)
-                            except Exception as e:
-                                log.debug("TICK_SUBSCRIBE_FAILED %s %s",p,e)
+                                return
+                            async with sem:
+                                try:
+                                    await asyncio.wait_for(
+                                        client.market.subscribe_ticks(p),
+                                        timeout=4.0,
+                                    )
+                                    subscribed.add(p)
+                                except Exception as e:
+                                    log.debug("TICK_SUBSCRIBE_FAILED pair=%s error=%s",p,e)
+
+                        await asyncio.gather(
+                            *(subscribe_one(a) for a in list(STATE["assets"])),
+                            return_exceptions=True,
+                        )
                     last_rescan=now
+                    log.info(
+                        "ACCOUNT_SCAN_ROTATION assets=%d subscribed=%d",
+                        len(STATE["assets"]),len(subscribed)
+                    )
+
+                # Rotate candle-history refreshes in small batches; never block the 5-minute scheduler.
+                if not history_seed_done or now-last_history_refresh>=10:
+                    await refresh_history_batch(
+                        limit=24,
+                        force=not history_seed_done,
+                    )
+                    last_history_refresh=now
+                    history_seed_done=True
 
                 await refresh_candles()
                 await asyncio.sleep(5)
+
 
         except Exception as e:
             STATE["status"]="error"
