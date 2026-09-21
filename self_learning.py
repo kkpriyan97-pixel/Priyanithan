@@ -340,8 +340,7 @@ class LearningDB:
                 title TEXT,
                 fingerprint TEXT,
                 content_chars INTEGER NOT NULL DEFAULT 0,
-                http_status INTEGER,
-                PRIMARY KEY(url)
+                http_status INTEGER
             );
             CREATE TABLE IF NOT EXISTS method_evidence(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -613,7 +612,6 @@ class SelfLearningEngine:
                     domain=_domain(target)
                     if domain in {"google.com","googleusercontent.com","duckduckgo.com","bing.com"}:
                         continue
-                    self.db.add_source(target,language)
                     self._enqueue(target,language,"search")
                     found+=1
                 if found:
