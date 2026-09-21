@@ -21,6 +21,7 @@ TICK_STALE_SECONDS=75
 TIMING_TOLERANCE_SECONDS=1.5
 HISTORY_LAST_FETCH={}
 HISTORY_CURSOR=0
+HISTORY_SEED_SEEN=set()
 CYCLE_CANDIDATES={}
 CYCLE_REVIEW_TASKS={}
 SCAN_SYNC_TIMEOUT=6.0
@@ -224,6 +225,9 @@ async def refresh_history_batch(limit=24,force=False):
         HISTORY_CURSOR=(HISTORY_CURSOR+limit)%n
         return 0
 
+    # Always advance so a full-account seed/rotation cannot get stuck on one slice.
+    HISTORY_CURSOR=(HISTORY_CURSOR+len(selected))%n
+
     jobs={a["pair"]:asyncio.create_task(_fetch_history(a["pair"])) for a in selected}
     results=await asyncio.gather(*jobs.values(),return_exceptions=True)
     refreshed=0
@@ -231,6 +235,7 @@ async def refresh_history_batch(limit=24,force=False):
         if isinstance(cs,list) and cs:
             STATE["candles"][p]=list(cs[-120:])
             HISTORY_LAST_FETCH[p]=time.time()
+            HISTORY_SEED_SEEN.add(p)
             refreshed+=1
     if refreshed:
         log.info(
@@ -592,11 +597,23 @@ async def cycle_loop():
         await asyncio.sleep(max(0,final_target-time.time()))
 
         # Give only already-running review tasks a tiny completion window.
-        pending=CYCLE_REVIEW_TASKS.get(cycle_id,[])
+        pending=[
+            task for task in CYCLE_REVIEW_TASKS.get(cycle_id,[])
+            if not task.done()
+        ]
         if pending:
             remaining=max(0,final_target+1.0-time.time())
             if remaining:
-                await asyncio.gather(*pending,return_exceptions=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending,return_exceptions=True),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "FINAL_AI_GRACE_EXPIRED cycle=%s pending=%d; using completed cache",
+                        cycle_id,len(pending)
+                    )
 
         actual=time.time()
         lead=next_boundary-actual
@@ -771,13 +788,21 @@ async def market_worker():
                     )
 
                 # Rotate candle-history refreshes in small batches; never block the 5-minute scheduler.
-                if not history_seed_done or now-last_history_refresh>=10:
-                    await refresh_history_batch(
-                        limit=24,
-                        force=not history_seed_done,
+                if not history_seed_done:
+                    await refresh_history_batch(limit=24,force=True)
+                    history_seed_done=(
+                        bool(STATE["assets"])
+                        and len(HISTORY_SEED_SEEN) >= len(STATE["assets"])
                     )
+                    if history_seed_done:
+                        log.info(
+                            "HISTORY_SEED_COMPLETE assets=%d",
+                            len(STATE["assets"])
+                        )
                     last_history_refresh=now
-                    history_seed_done=True
+                elif now-last_history_refresh>=10:
+                    await refresh_history_batch(limit=24,force=False)
+                    last_history_refresh=now
 
                 await refresh_candles()
                 await asyncio.sleep(5)
