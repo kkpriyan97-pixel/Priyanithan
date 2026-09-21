@@ -15,6 +15,9 @@ STATE={"status":"starting","assets":[],"prices":{},"candles":{},"analyses":{},"r
 CLIENT=None
 LOCK=asyncio.Lock()
 LIVE_BARS={}
+CANDLE_FETCH_SEMAPHORE=asyncio.Semaphore(16)
+TICK_STALE_SECONDS=75
+TIMING_TOLERANCE_SECONDS=1.5
 
 def pair_name(x):
     return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
@@ -169,22 +172,81 @@ async def on_tick(message):
                 pass
 
 
-async def refresh_candles():
-    """Analyze local 1-minute candles built directly from the authenticated live tick feed."""
-    assets=STATE["assets"]
+async def _fetch_history(pair):
+    """Fetch a fresh authenticated 1-minute candle window for one account asset."""
+    if not CLIENT:
+        return None
+    async with CANDLE_FETCH_SEMAPHORE:
+        try:
+            return await CLIENT.market.get_candles(pair,size=60,count=120,solid=False)
+        except Exception as e:
+            log.warning("CANDLE_REFRESH_FAILED pair=%s %s",pair,e)
+            return None
+
+
+async def refresh_candles(force_history=False):
+    """Refresh every account asset while never using a forming candle for brain decisions."""
+    assets=list(STATE["assets"])
+    now=time.time()
+    fetch_jobs={}
     for a in assets:
         p=a["pair"]
-        cs=LIVE_BARS.get(p,[])
-        if cs:
-            STATE["candles"][p]=list(cs[-120:])
-        price=STATE["prices"].get(p,(None,None))[0]
-        an=analyze_asset(a,STATE["candles"].get(p,[]),price)
+        local=list(LIVE_BARS.get(p,[])[-120:])
+        tick_ts=STATE["prices"].get(p,(None,None))[1]
+        tick_fresh=tick_ts is not None and now-float(tick_ts)<=TICK_STALE_SECONDS
+        need_history=force_history or len(local)<60 or not tick_fresh
+        if need_history:
+            fetch_jobs[p]=asyncio.create_task(_fetch_history(p))
+
+    if fetch_jobs:
+        results=await asyncio.gather(*fetch_jobs.values(),return_exceptions=True)
+        for p,cs in zip(fetch_jobs,results):
+            if isinstance(cs,list) and cs:
+                STATE["candles"][p]=list(cs[-120:])
+
+    qualified=0
+    stale=0
+    for a in assets:
+        p=a["pair"]
+        local=list(LIVE_BARS.get(p,[])[-120:])
+        base=STATE["candles"].get(p,[])
+        if local:
+            # Live bars supersede equal timestamps from the API history.
+            merged={str(x.get("time",x.get("t"))):x for x in base if isinstance(x,dict)}
+            for bar in local:
+                merged[str(bar["time"])]=bar
+            base=list(merged.values())
+            base.sort(key=lambda x: float(x.get("time",x.get("t",0)) or 0))
+            base=base[-120:]
+            STATE["candles"][p]=base
+
+        price,price_ts=STATE["prices"].get(p,(None,None))
+        if price is None and base:
+            last=base[-1]
+            price=last.get("close",last.get("c"))
+            try:
+                price_ts=float(last.get("time",last.get("t",now)))+60
+            except Exception:
+                price_ts=now
+
+        an=analyze_asset(a,base,price,now=now)
         if an:
             an["profitability"]=a["profitability"]
+            an["price_ts"]=price_ts
             STATE["analyses"][p]=an
+            qualified+=1
         else:
             STATE["analyses"].pop(p,None)
-    log.info("LIVE_ANALYSIS_REFRESH source=local_1m_bars assets=%d qualified=%d ticks=%d",len(assets),len(STATE["analyses"]),len(STATE["prices"]))
+
+        closed_ts=an.get("closed_1m_ts") if an else None
+        if closed_ts is None or now-(float(closed_ts)+60)>90:
+            stale+=1
+
+    log.info(
+        "LIVE_ANALYSIS_REFRESH source=authenticated_account_scan assets=%d qualified=%d "
+        "ticks=%d stale=%d closed_only=1",
+        len(assets),qualified,len(STATE["prices"]),stale
+    )
 
 
 async def final_candidate():
@@ -192,56 +254,107 @@ async def final_candidate():
     eligible=BRAIN.filter_candidates(STATE["assets"])
     raw=[STATE["analyses"][a["pair"]].copy() for a in eligible if a["pair"] in STATE["analyses"]]
     raw=rank_signal_candidates(raw)
-    if not raw:return None
-    # AI reviews the strongest technical candidates; fallback provider is automatic.
-    reviewed=[]
-    for x in raw[:8]:
+    if not raw:
+        return None
+
+    async def review(x):
         cs=STATE["candles"].get(x["pair"],[])
         price=STATE["prices"].get(x["pair"],(x.get("price"),None))[0]
-        snap=snapshot_from_asset(next(a for a in eligible if a["pair"]==x["pair"]),cs,price,time.time())
+        asset=next(a for a in eligible if a["pair"]==x["pair"])
+        snap=snapshot_from_asset(asset,cs,price,time.time())
         try:
             d=await analyze_with_fallback(snap)
-            if d and int(d.get("confidence",0))>=90:
-                x.update({"confidence":int(d["confidence"]),"reason":d.get("reason") or x["reason"],"ai_provider":d.get("provider")});reviewed.append(x)
-        except Exception as e:log.warning("AI_REVIEW_FAILED pair=%s %s",x["pair"],e)
-    return rank_signal_candidates(reviewed)[0] if reviewed else None
+            if not d or int(d.get("confidence",0))<90:
+                return None
+            ai_direction=str(d.get("direction","")).upper()
+            brain_direction=str(x.get("direction","")).upper()
+            # AI is verification only: it may not rewrite Candice's direction.
+            if ai_direction!=brain_direction:
+                log.info(
+                    "AI_DIRECTION_MISMATCH pair=%s brain=%s ai=%s; rejecting",
+                    x["pair"],brain_direction,ai_direction
+                )
+                return None
+            x.update({
+                "confidence":int(d["confidence"]),
+                "reason":d.get("reason") or x["reason"],
+                "ai_provider":d.get("provider"),
+                "ai_direction":ai_direction,
+                "decision_candle_closed":True,
+            })
+            return x
+        except Exception as e:
+            log.warning("AI_REVIEW_FAILED pair=%s %s",x["pair"],e)
+            return None
+
+    reviewed=await asyncio.gather(*(review(x) for x in raw[:4]))
+    accepted=[x for x in reviewed if x is not None]
+    return rank_signal_candidates(accepted)[0] if accepted else None
 
 async def result_watch(key):
-    """Finalize a signal reliably after expiry and never silently drop a result."""
+    """Verify the first fully closed 1m candle that contains the intended expiry."""
     s=BRAIN.active_signals.get(key)
     if not s:
         log.warning("RESULT_WATCH_MISSING key=%s",key)
         return
-    wait=max(0,s.expiry_minutes*60-(time.time()-s.entry_ts))
-    if wait: await asyncio.sleep(wait)
 
-    # Refresh candles and retry. The old code checked one in-memory tick once;
-    # when that tick was absent at expiry it returned without sending a result.
+    expiry_ts=s.entry_ts+s.expiry_minutes*60
+    minute_start=int(expiry_ts//60)*60
+    expiry_close_ts=minute_start if abs(expiry_ts-minute_start)<0.001 else minute_start+60
+
+    await asyncio.sleep(max(0,expiry_close_ts-time.time())+1.0)
+
+    target_candle_start=expiry_close_ts-60
     price=None
-    verification="candle-closed"
-    for attempt in range(6):
+    target_bar=None
+
+    for attempt in range(15):
         try:
             if CLIENT:
-                cs=await CLIENT.market.get_candles(s.pair,size=5,count=5)
+                cs=await CLIENT.market.get_candles(s.pair,size=60,count=5,solid=True)
                 if cs:
-                    STATE["candles"][s.pair]=cs
-                    closed=cs[-2] if len(cs)>=2 else cs[-1]
-                    price=closed.get("close",closed.get("c"))
-                    if price is not None:
-                        price=float(price)
-                        break
+                    normalized=[]
+                    for raw in cs:
+                        if not isinstance(raw,dict):
+                            continue
+                        try:
+                            ts=float(raw.get("time",raw.get("t")))
+                            if ts>20_000_000_000:
+                                ts/=1000
+                            ts=int(ts//60)*60
+                        except Exception:
+                            continue
+                        normalized.append((ts,raw))
+                    for ts,raw in normalized:
+                        if ts==target_candle_start:
+                            target_bar=raw
+                            break
+                    if target_bar is None:
+                        # Never classify from an earlier candle.
+                        closed=[(ts,raw) for ts,raw in normalized if ts+60<=time.time()]
+                        exact_or_later=[item for item in closed if item[0]>=target_candle_start]
+                        if exact_or_later:
+                            target_bar=max(exact_or_later,key=lambda x:x[0])[1]
+                            target_candle_start=max(ts for ts,raw in exact_or_later)
+                    if target_bar is not None:
+                        price=target_bar.get("close",target_bar.get("c"))
+                        if price is not None:
+                            price=float(price)
+                            break
         except Exception as e:
-            log.warning("RESULT_CANDLE_READ_FAILED pair=%s attempt=%d %s",s.pair,attempt+1,e)
-        tick=STATE["prices"].get(s.pair,(None,None))[0]
-        if tick is not None:
-            price=float(tick)
-            verification="tick-fallback"
-            break
+            log.warning(
+                "RESULT_CANDLE_READ_FAILED pair=%s attempt=%d target=%d %s",
+                s.pair,attempt+1,target_candle_start,e
+            )
         await asyncio.sleep(2)
 
     if price is None:
-        log.error("RESULT_NOT_VERIFIED pair=%s key=%s entry=%s",s.pair,key,s.entry_price)
+        log.error(
+            "RESULT_NOT_VERIFIED pair=%s key=%s entry=%s expiry_ts=%d target_candle=%d",
+            s.pair,key,s.entry_price,int(expiry_ts),target_candle_start
+        )
         return
+
     try:
         rec=BRAIN.finish_signal(key,price)
     except Exception:
@@ -255,20 +368,18 @@ async def result_watch(key):
         f"━━━━━━━━━━━━━━━━━━━━\n\n📈 {label}\n\n"
         f"➡️ {rec['direction']}\n\n💰 Entry: {rec['entry_price']}\n"
         f"🏁 Exit: {rec['exit_price']}\n\n⏱️ Duration: {rec['expiry_minutes']} MIN\n"
-        f"🔎 Verification: {verification}\n\n{icon} {rec['result']}\n\n"
+        f"🔎 Verification: candle-closed\n\n{icon} {rec['result']}\n\n"
         f"⚠️ RESULT ONLY — AUTO TRADE OFF\n━━━━━━━━━━━━━━━━━━━━"
     )
-    log.info("RESULT_SENT pair=%s result=%s exit=%s verification=%s telegram=%s cooldown=%s",
-             rec["pair"],rec["result"],rec["exit_price"],verification,sent,rec["result"]=="LOSS")
+    log.info(
+        "RESULT_SENT pair=%s result=%s exit=%s verification=candle-closed "
+        "expiry_ts=%d verification_candle=%d telegram=%s cooldown=%s",
+        rec["pair"],rec["result"],rec["exit_price"],int(expiry_ts),target_candle_start,
+        sent,rec["result"]=="LOSS"
+    )
 
 async def cycle_loop():
-    """
-    Continuous 5-minute scanning:
-      - exactly 3 full ALL-account-asset scans per 5-minute cycle
-      - a scan never stops because another asset has no setup
-      - a signal may be sent at most once per cycle
-      - no user-facing NO SIGNAL message is ever sent
-    """
+    """Continuous 5-minute scan with three full scans and an exact 30-second final entry."""
     while True:
         now=time.time()
         next_boundary=(int(now)//300+1)*300
@@ -277,89 +388,104 @@ async def cycle_loop():
         STATE["cycle"]=int(cycle_id)
         STATE["last_cycle"]=next_boundary
 
-        # Three full-universe scans distributed across the 5-minute window.
-        # The first scan is 40s before the checkpoint, then two more scans
-        # approximately 100s apart. Each scan refreshes EVERY account asset.
-        scan_targets=(next_boundary-40,next_boundary+100,next_boundary+200)
+        # Full account scans happen before the final entry window.
+        scan_targets=(next_boundary-180,next_boundary-120,next_boundary-60)
 
         for scan_no,target_ts in enumerate(scan_targets,1):
             await asyncio.sleep(max(0,target_ts-time.time()))
-
-            # Re-sync the authenticated account-visible universe before each
-            # scan so newly visible/removed assets are reflected immediately.
             if CLIENT and STATE.get("account_id"):
                 try:
                     await sync_account_assets(CLIENT,STATE["account_id"])
                 except Exception as e:
                     log.warning("SCAN_ASSET_SYNC_FAILED cycle=%s scan=%d %s",cycle_id,scan_no,e)
 
-            # This is the mandatory ALL-ASSET scan. It must run even when a
-            # previous scan produced no candidate or already sent a signal.
-            await refresh_candles()
+            await refresh_candles(force_history=(scan_no==1))
             log.info(
                 "FULL_ASSET_SCAN cycle=%s scan=%d/3 assets=%d qualified=%d",
                 cycle_id,scan_no,len(STATE["assets"]),len(STATE["analyses"])
             )
 
-            # Try to find a signal after every full scan. If none qualifies,
-            # remain silent and continue scanning; NEVER send "NO SIGNAL".
-            if not BRAIN.cycle_signal_sent:
-                candidate=await final_candidate()
-                if candidate:
-                    p=candidate["pair"]
-                    entry=STATE["prices"].get(p,(None,None))[0]
-                    if entry is not None and BRAIN.can_send_cycle_signal():
-                        ts=time.time()
-                        s=BRAIN.mark_signal_sent(
-                            pair=p,display_name=candidate["display_name"],
-                            direction=candidate["direction"],
-                            expiry_minutes=candidate["expiry_minutes"],
-                            entry_price=entry,entry_ts=ts,
-                            entry_candle_ts=candidate["entry_candle_ts"],
-                            strategy=candidate["strategy"],
-                            reason=candidate["reason"],
-                            confidence=candidate["confidence"]
-                        )
-                        key=f"{s.cycle_id}:{s.pair}:{s.entry_ts}"
-                        target_dt=time.strftime("%H:%M:%S",time.localtime(next_boundary))
-                        msg=(
-                            "━━━━━━━━━━━━━━━━━━━━\\n"
-                            "🎯 CANDICE AI • LIVE MARKET\\n"
-                            "━━━━━━━━━━━━━━━━━━━━\\n\\n"
-                            f"📊 ASSET: {s.display_name} ({s.pair})\\n"
-                            f"➡️ DIRECTION: {s.direction}\\n\\n"
-                            f"🕒 SIGNAL: {time.strftime('%H:%M:%S',time.localtime(ts))} UAE\\n"
-                            f"🎯 TARGET: {target_dt} UAE\\n"
-                            "⏳ SIGNAL COUNTDOWN: 00:40\\n\\n"
-                            f"⏱️ EXPIRY: {s.expiry_minutes} MIN\\n"
-                            f"💰 ENTRY: {s.entry_price}\\n\\n"
-                            f"📈 15M TREND: {s.trend_15m}\\n"
-                            f"🕯️ 1M STRUCTURE: {s.structure_1m}\\n"
-                            f"🧠 STRATEGY: {s.strategy}\\n"
-                            f"🎯 CONFIDENCE: {s.confidence}%\\n"
-                            "🟢 ACCOUNT: DEMO\\n\\n"
-                            f"🧠 {s.reason}\\n"
-                            "━━━━━━━━━━━━━━━━━━━━"
-                        )
-                        await telegram(msg)
-                        asyncio.create_task(result_watch(key))
-                        log.info(
-                            "FINAL_SIGNAL cycle=%s scan=%d pair=%s direction=%s confidence=%s",
-                            cycle_id,scan_no,p,s.direction,s.confidence
-                        )
-                else:
-                    log.info(
-                        "SCAN_NO_QUALIFIED_SETUP cycle=%s scan=%d/3 assets=%d; continuing",
-                        cycle_id,scan_no,len(STATE["assets"])
-                    )
-            else:
-                log.info(
-                    "SCAN_CONTINUES_AFTER_SIGNAL cycle=%s scan=%d/3 assets=%d",
-                    cycle_id,scan_no,len(STATE["assets"])
-                )
+        # Final decision is locked to exactly 30 seconds before the 5-minute boundary.
+        final_target=next_boundary-30
+        await asyncio.sleep(max(0,final_target-time.time()))
+        lead=next_boundary-time.time()
+        log.info(
+            "FINAL_TIMING_CHECK cycle=%s target=%d actual=%.3f lead=%.3f",
+            cycle_id,final_target,time.time(),lead
+        )
+        if not (30-TIMING_TOLERANCE_SECONDS <= lead <= 30+TIMING_TOLERANCE_SECONDS):
+            log.warning("FINAL_TIMING_REJECT cycle=%s lead=%.3f",cycle_id,lead)
+            continue
 
-        # The loop immediately creates the next 5-minute cycle and repeats.
-        # There is deliberately no NO_SIGNAL Telegram output.
+        candidate=await final_candidate()
+        if not candidate:
+            log.info("SCAN_NO_QUALIFIED_SETUP cycle=%s final_window=1/1",cycle_id)
+            continue
+
+        p=candidate["pair"]
+        entry_data=STATE["prices"].get(p,(candidate.get("price"),candidate.get("price_ts")))
+        entry=entry_data[0]
+        entry_ts=entry_data[1]
+        if entry is None:
+            log.warning("FINAL_SIGNAL_NO_ENTRY_PRICE cycle=%s pair=%s",cycle_id,p)
+            continue
+        if entry_ts is not None and time.time()-float(entry_ts)>45:
+            log.warning(
+                "FINAL_SIGNAL_STALE_PRICE cycle=%s pair=%s age=%.1f",
+                cycle_id,p,time.time()-float(entry_ts)
+            )
+            continue
+
+        try:
+            ts=time.time()
+            s=BRAIN.mark_signal_sent(
+                pair=p,
+                display_name=candidate["display_name"],
+                direction=candidate["direction"],
+                expiry_minutes=candidate["expiry_minutes"],
+                entry_price=entry,
+                entry_ts=ts,
+                entry_candle_ts=candidate["entry_candle_ts"],
+                strategy=candidate["strategy"],
+                reason=candidate["reason"],
+                confidence=candidate["confidence"],
+                pattern=candidate.get("pattern",""),
+                trend_15m=candidate.get("trend_15m",""),
+                structure_1m=candidate.get("structure_1m",""),
+                decision_candle_closed=candidate.get("decision_candle_closed",True),
+            )
+        except Exception as e:
+            log.warning("FINAL_SIGNAL_REJECTED cycle=%s pair=%s error=%s",cycle_id,p,e)
+            continue
+
+        key=f"{s.cycle_id}:{s.pair}:{s.entry_ts}"
+        target_dt=time.strftime("%H:%M:%S",time.localtime(next_boundary))
+        msg=(
+            "━━━━━━━━━━━━━━━━━━━━\\n"
+            "🎯 CANDICE AI • LIVE MARKET\\n"
+            "━━━━━━━━━━━━━━━━━━━━\\n\\n"
+            f"📊 ASSET: {s.display_name} ({s.pair})\\n"
+            f"➡️ DIRECTION: {s.direction}\\n\\n"
+            f"🕒 SIGNAL: {time.strftime('%H:%M:%S',time.localtime(ts))} UAE\\n"
+            f"🎯 TARGET: {target_dt} UAE\\n"
+            "⏳ SIGNAL COUNTDOWN: 00:30\\n\\n"
+            f"⏱️ EXPIRY: {s.expiry_minutes} MIN\\n"
+            f"💰 ENTRY: {s.entry_price}\\n\\n"
+            f"📈 15M TREND: {s.trend_15m}\\n"
+            f"🕯️ 1M STRUCTURE: {s.structure_1m}\\n"
+            f"🧠 STRATEGY: {s.strategy}\\n"
+            f"🎯 CONFIDENCE: {s.confidence}%\\n"
+            "🟢 ACCOUNT: DEMO\\n\\n"
+            f"🧠 {s.reason}\\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
+        sent=await telegram(msg)
+        log.info(
+            "FINAL_SIGNAL cycle=%s pair=%s direction=%s confidence=%s "
+            "entry_candle=%s lead=%.3f telegram=%s",
+            cycle_id,p,s.direction,s.confidence,s.entry_candle_ts,lead,sent
+        )
+        asyncio.create_task(result_watch(key))
 
 async def market_worker():
     global CLIENT
@@ -399,6 +525,9 @@ async def market_worker():
             changed=await sync_account_assets(client,client.account_id)
             if not STATE["assets"]:
                 raise RuntimeError("AUTHENTICATED_ACCOUNT_RETURNED_NO_VISIBLE_ASSETS")
+
+            # Seed a full 120-minute 1m history window for every account-visible asset.
+            await refresh_candles(force_history=True)
 
             STATE["status"]="live_account_read_only"
             log.info("ACCOUNT_ASSETS_READY count=%d changed=%s source=%s",len(STATE["assets"]),changed,STATE["feed_source"])
