@@ -129,17 +129,69 @@ async def on_asset_update(message):
     log.info("ACCOUNT_ASSET_FEED_UPDATE event=183 visible=%d",len(STATE["assets"]))
 
 
-async def telegram(text):
-    token=os.getenv("TELEGRAM_BOT_TOKEN","").strip();chat=os.getenv("TELEGRAM_CHAT_ID","").strip()
+async def telegram(text,attempts=3):
+    token=os.getenv("TELEGRAM_BOT_TOKEN","").strip()
+    chat=os.getenv("TELEGRAM_CHAT_ID","").strip()
     if not token or not chat:
         log.warning("TELEGRAM_NOT_CONFIGURED")
         return False
-    try:
-        async with httpx.AsyncClient(timeout=8) as h:
-            r=await h.post(f"https://api.telegram.org/bot{token}/sendMessage",json={"chat_id":chat,"text":text})
-            r.raise_for_status();return True
-    except Exception as e:
-        log.warning("TELEGRAM_SEND_FAILED %s",e);return False
+
+    for attempt in range(1,attempts+1):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0,connect=2.0)) as h:
+                r=await h.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id":chat,"text":text},
+                )
+                r.raise_for_status()
+                log.info("TELEGRAM_DELIVERED attempt=%d",attempt)
+                return True
+        except Exception as e:
+            log.warning(
+                "TELEGRAM_SEND_FAILED attempt=%d/%d error=%s",
+                attempt,attempts,e
+            )
+            if attempt<attempts:
+                await asyncio.sleep(0.5*attempt)
+    return False
+
+
+def reference_price_for(pair,candidate,now=None):
+    """Return the freshest non-empty reference without requiring a live tick subscription."""
+    now=time.time() if now is None else float(now)
+    tick=STATE["prices"].get(pair)
+    if tick and tick[0] is not None:
+        try:
+            age=now-float(tick[1])
+            if age<=120:
+                return float(tick[0]),"live-tick",age
+        except Exception:
+            pass
+
+    bars=STATE["candles"].get(pair,[])
+    if bars:
+        try:
+            normalized=[]
+            for raw in bars:
+                if not isinstance(raw,dict):
+                    continue
+                ts=float(raw.get("time",raw.get("t")))
+                if ts>20_000_000_000:
+                    ts/=1000
+                close=raw.get("close",raw.get("c"))
+                if close is not None:
+                    normalized.append((int(ts//60)*60,float(close)))
+            closed=[x for x in normalized if x[0]+60<=now-1]
+            if closed:
+                ts,price=max(closed,key=lambda x:x[0])
+                return price,"closed-candle",max(0,now-(ts+60))
+        except Exception:
+            pass
+
+    fallback=candidate.get("price")
+    if fallback is not None:
+        return float(fallback),"candidate-cache",0
+    return None,"none",None
 
 def _tick_timestamp(ts):
     try:
@@ -613,21 +665,23 @@ async def cycle_loop():
             continue
 
         p=candidate["pair"]
-        entry_data=STATE["prices"].get(p,(candidate.get("price"),candidate.get("price_ts")))
-        entry=entry_data[0]
-        entry_ts=entry_data[1]
-
-        # For an unsubscribed asset, use its most recent market state only as reference.
+        entry,entry_source,entry_age=reference_price_for(p,candidate,actual)
+        log.info(
+            "FINAL_REFERENCE cycle=%s pair=%s source=%s age=%s price=%s",
+            cycle_id,p,entry_source,
+            f"{entry_age:.1f}" if entry_age is not None else "n/a",
+            entry,
+        )
         if entry is None:
             log.warning(
                 "FINAL_SIGNAL_NO_REFERENCE_PRICE cycle=%s pair=%s",
                 cycle_id,p
             )
             continue
-        if entry_ts is not None and actual-float(entry_ts)>120:
+        if entry_source!="live-tick" and entry_age is not None and entry_age>180:
             log.warning(
-                "FINAL_SIGNAL_STALE_REFERENCE cycle=%s pair=%s age=%.1f max=120",
-                cycle_id,p,actual-float(entry_ts)
+                "FINAL_SIGNAL_STALE_REFERENCE cycle=%s pair=%s source=%s age=%.1f max=180",
+                cycle_id,p,entry_source,entry_age
             )
             continue
 
@@ -678,11 +732,14 @@ async def cycle_loop():
             f"🧠 {s.reason}\\n"
             "━━━━━━━━━━━━━━━━━━━━"
         )
-        sent=await telegram(msg)
+        sent=await telegram(msg,attempts=3)
         log.info(
             "FINAL_SIGNAL cycle=%s pair=%s direction=%s confidence=%s "
-            "entry_candle=%s lead=%.3f telegram=%s",
-            cycle_id,p,s.direction,s.confidence,s.entry_candle_ts,lead,sent
+            "entry_candle=%s lead=%.3f reference_source=%s reference_age=%s telegram=%s",
+            cycle_id,p,s.direction,s.confidence,s.entry_candle_ts,lead,
+            entry_source,
+            f"{entry_age:.1f}" if entry_age is not None else "n/a",
+            sent
         )
         asyncio.create_task(result_watch(key))
 
