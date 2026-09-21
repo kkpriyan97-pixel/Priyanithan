@@ -715,5 +715,8 @@ LEARNING_ENGINE=SelfLearningEngine()
 def learning_status() -> dict:
     return LEARNING_ENGINE.status()
 
+def record_demo_result(method_id: str, result: str) -> None:
+    LEARNING_ENGINE.record_demo_result(method_id, result)
+
 async def self_learning_loop() -> None:
     await LEARNING_ENGINE.loop()
