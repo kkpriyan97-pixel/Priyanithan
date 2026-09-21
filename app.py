@@ -596,29 +596,11 @@ async def cycle_loop():
         final_target=next_boundary-30
         await asyncio.sleep(max(0,final_target-time.time()))
 
-        # Give only already-running review tasks a tiny completion window.
-        pending=[
-            task for task in CYCLE_REVIEW_TASKS.get(cycle_id,[])
-            if not task.done()
-        ]
-        if pending:
-            remaining=max(0,final_target+1.0-time.time())
-            if remaining:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(*pending,return_exceptions=True),
-                        timeout=remaining,
-                    )
-                except asyncio.TimeoutError:
-                    log.warning(
-                        "FINAL_AI_GRACE_EXPIRED cycle=%s pending=%d; using completed cache",
-                        cycle_id,len(pending)
-                    )
-
-        actual=time.time()
+        # ZERO network waits in the final window. Use only already-completed AI reviews.\n        actual=time.time()
         lead=next_boundary-actual
         log.info(
-            "FINAL_TIMING_CHECK cycle=%s target=%d actual=%.3f lead=%.3f",
+            "FINAL_TIMING_CHECK cycle=%s target=%d actual=%.3f lead=%.3f "
+            "network_wait=0",
             cycle_id,final_target,actual,lead
         )
 
@@ -642,9 +624,9 @@ async def cycle_loop():
                 cycle_id,p
             )
             continue
-        if entry_ts is not None and actual-float(entry_ts)>45:
+        if entry_ts is not None and actual-float(entry_ts)>120:
             log.warning(
-                "FINAL_SIGNAL_STALE_REFERENCE cycle=%s pair=%s age=%.1f",
+                "FINAL_SIGNAL_STALE_REFERENCE cycle=%s pair=%s age=%.1f max=120",
                 cycle_id,p,actual-float(entry_ts)
             )
             continue
