@@ -21,6 +21,7 @@ import os
 import re
 import sqlite3
 import time
+from datetime import datetime, timezone
 from collections import defaultdict
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse, urlunparse
@@ -40,6 +41,7 @@ MAX_PAGE_BYTES = int(os.getenv("LEARNING_MAX_PAGE_BYTES", "700000"))
 DB_PATH = os.getenv("LEARNING_DB_PATH", "candice_learning.sqlite3")
 STATE_JSON = os.getenv("LEARNING_STATE_JSON", "candice_learning_state.json")
 USER_AGENT = "CANDICE-M1-ResearchBot/1.0"
+DEFAULT_LEARNING_START_UTC = "2026-09-21T20:52:37+00:00"
 
 LANGUAGE_QUERIES = {
     "en": [
@@ -453,8 +455,16 @@ class LearningDB:
 class SelfLearningEngine:
     def __init__(self) -> None:
         self.db=LearningDB(DB_PATH)
-        self.started_at=float(self.db.get_meta("started_at", str(time.time())))
-        self.db.set_meta("started_at", str(self.started_at))
+        stored=self.db.get_meta("started_at","").strip()
+        if stored:
+            self.started_at=float(stored)
+        else:
+            start_text=os.getenv("LEARNING_START_UTC",DEFAULT_LEARNING_START_UTC).strip()
+            try:
+                self.started_at=datetime.fromisoformat(start_text.replace("Z","+00:00")).astimezone(timezone.utc).timestamp()
+            except Exception:
+                self.started_at=time.time()
+            self.db.set_meta("started_at",str(self.started_at))
         self.robot_cache: dict[str, tuple[float, RobotFileParser | None]]={}
         self.queue: asyncio.Queue[tuple[str,str,str]] = asyncio.Queue()
         self.enqueued=set()
