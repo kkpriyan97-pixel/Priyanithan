@@ -271,7 +271,6 @@ async def refresh_history_batch(limit=24,force=False):
         if force or missing or stale:
             selected.append(a)
             if len(selected)>=limit:
-                HISTORY_CURSOR=(idx+1)%n
                 break
     if not selected:
         HISTORY_CURSOR=(HISTORY_CURSOR+limit)%n
