@@ -7,7 +7,7 @@ COOLDOWN_SECONDS=900;MIN_CONFIDENCE=90;CYCLE_SECONDS=300
 def utc_now():return datetime.now(timezone.utc).timestamp()
 @dataclass
 class ActiveSignal:
-    cycle_id:int;pair:str;display_name:str;direction:str;expiry_minutes:int;entry_price:float;entry_ts:float;entry_candle_ts:Any;strategy:str="";reason:str="";confidence:int=0;pattern:str="";trend_15m:str="";structure_1m:str=""
+    cycle_id:int;pair:str;display_name:str;direction:str;expiry_minutes:int;entry_price:float;entry_ts:float;scheduled_entry_ts:float;entry_candle_ts:Any;strategy:str="";reason:str="";confidence:int=0;pattern:str="";trend_15m:str="";structure_1m:str=""
 @dataclass
 class BrainState:
     cycle_id:int=0;cycle_signal_sent:bool=False;sent_keys:set[tuple[str,str]]=field(default_factory=set);cooldown_until:dict[str,float]=field(default_factory=dict);active_signals:dict[str,ActiveSignal]=field(default_factory=dict);last_result:dict[str,Any]|None=None
@@ -31,7 +31,7 @@ class BrainState:
         key=self.duplicate_key(kw["pair"],kw["entry_candle_ts"])
         if key in self.sent_keys:raise RuntimeError("Duplicate asset/entry candle")
         self.sent_keys.add(key);self.cycle_signal_sent=True
-        s=ActiveSignal(cycle_id=self.cycle_id,pair=str(kw["pair"]),display_name=str(kw["display_name"]),direction=str(kw["direction"]).upper(),expiry_minutes=int(kw["expiry_minutes"]),entry_price=float(kw["entry_price"]),entry_ts=float(kw["entry_ts"]),entry_candle_ts=kw["entry_candle_ts"],strategy=str(kw.get("strategy","")),reason=str(kw.get("reason","")),confidence=int(kw.get("confidence",0)),pattern=str(kw.get("pattern","")),trend_15m=str(kw.get("trend_15m","")),structure_1m=str(kw.get("structure_1m","")))
+        s=ActiveSignal(cycle_id=self.cycle_id,pair=str(kw["pair"]),display_name=str(kw["display_name"]),direction=str(kw["direction"]).upper(),expiry_minutes=int(kw["expiry_minutes"]),entry_price=float(kw["entry_price"]),entry_ts=float(kw["entry_ts"]),scheduled_entry_ts=float(kw["scheduled_entry_ts"]),entry_candle_ts=kw["entry_candle_ts"],strategy=str(kw.get("strategy","")),reason=str(kw.get("reason","")),confidence=int(kw.get("confidence",0)),pattern=str(kw.get("pattern","")),trend_15m=str(kw.get("trend_15m","")),structure_1m=str(kw.get("structure_1m","")))
         self.active_signals[f"{s.cycle_id}:{s.pair}:{s.entry_ts}"]=s
         return s
     @staticmethod
@@ -42,7 +42,7 @@ class BrainState:
         raise ValueError("Invalid direction")
     def finish_signal(self,key,exit_price,result_ts=None):
         s=self.active_signals.pop(key);result=self.classify_result(s.direction,s.entry_price,float(exit_price));now=utc_now() if result_ts is None else float(result_ts)
-        rec={"cycle_id":s.cycle_id,"pair":s.pair,"display_name":s.display_name,"direction":s.direction,"expiry_minutes":s.expiry_minutes,"entry_price":s.entry_price,"exit_price":float(exit_price),"entry_ts":s.entry_ts,"result_ts":now,"strategy":s.strategy,"pattern":s.pattern,"trend_15m":s.trend_15m,"structure_1m":s.structure_1m,"reason":s.reason,"confidence":s.confidence,"result":result}
+        rec={"cycle_id":s.cycle_id,"pair":s.pair,"display_name":s.display_name,"direction":s.direction,"expiry_minutes":s.expiry_minutes,"entry_price":s.entry_price,"exit_price":float(exit_price),"entry_ts":s.entry_ts,"scheduled_entry_ts":s.scheduled_entry_ts,"result_ts":now,"strategy":s.strategy,"pattern":s.pattern,"trend_15m":s.trend_15m,"structure_1m":s.structure_1m,"reason":s.reason,"confidence":s.confidence,"result":result}
         if result=="LOSS":self.cooldown_until[s.pair]=now+COOLDOWN_SECONDS
         self.last_result=rec;return rec
     def prune_expired_cooldowns(self,now=None):
