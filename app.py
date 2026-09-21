@@ -7,7 +7,7 @@ from brain_rules import BrainState,rank_signal_candidates
 from candice_brain import analyze_asset
 from ai_engine import snapshot_from_asset
 from ai_router import analyze_with_fallback
-from self_learning import self_learning_loop, learning_status
+from self_learning import self_learning_loop, learning_status, record_demo_result
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 log=logging.getLogger("candice")
@@ -595,6 +595,21 @@ async def result_watch(key):
     except Exception:
         log.exception("RESULT_FINALIZE_FAILED pair=%s key=%s",s.pair,key)
         return
+
+    # Feed demo outcomes into the isolated learning database. This does not
+    # modify live signal direction; it only builds evidence for future review.
+    method_id={
+        "TREND_FOLLOWING":"trend_following",
+        "PULLBACK":"pullback_retest",
+        "BREAKOUT":"breakout",
+        "MEAN_REVERSION":"rejection_reversal",
+    }.get(str(rec.get("strategy","")).upper())
+    if method_id:
+        record_demo_result(method_id,rec["result"])
+        log.info(
+            "SELF_LEARNING_DEMO_FEEDBACK pair=%s method=%s result=%s",
+            rec["pair"],method_id,rec["result"]
+        )
 
     label=f"{rec['display_name']} ({rec['pair']})"
     icon={"WIN":"🟢","LOSS":"🔴","TIE":"🟡"}[rec["result"]]
