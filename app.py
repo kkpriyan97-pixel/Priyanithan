@@ -300,28 +300,79 @@ async def final_candidate():
     return rank_signal_candidates(accepted)[0] if accepted else None
 
 async def result_watch(key):
-    """Verify the first fully closed 1m candle that contains the intended expiry."""
+    """Lock the real entry at the scheduled boundary, then verify its exact expiry candle."""
     s=BRAIN.active_signals.get(key)
     if not s:
         log.warning("RESULT_WATCH_MISSING key=%s",key)
         return
 
-    expiry_ts=s.entry_ts+s.expiry_minutes*60
-    minute_start=int(expiry_ts//60)*60
-    expiry_close_ts=minute_start if abs(expiry_ts-minute_start)<0.001 else minute_start+60
+    scheduled_entry_ts=float(s.scheduled_entry_ts)
+    await asyncio.sleep(max(0,scheduled_entry_ts-time.time()))
 
+    # Capture the actual price at the scheduled entry boundary.
+    actual_entry=None
+    for attempt in range(10):
+        tick=STATE["prices"].get(s.pair)
+        if tick and tick[0] is not None and tick[1] is not None:
+            tick_price=float(tick[0])
+            tick_ts=float(tick[1])
+            if scheduled_entry_ts-0.5 <= tick_ts <= scheduled_entry_ts+5.0:
+                actual_entry=tick_price
+                log.info(
+                    "ENTRY_LOCKED pair=%s scheduled_entry=%d actual_entry=%s tick_ts=%.3f",
+                    s.pair,int(scheduled_entry_ts),actual_entry,tick_ts
+                )
+                break
+        await asyncio.sleep(0.5)
+
+    # If the exact boundary tick was missed, use the scheduled candle open only.
+    if actual_entry is None and CLIENT:
+        try:
+            cs=await CLIENT.market.get_candles(
+                s.pair,size=60,count=5,solid=False,end_time=int(scheduled_entry_ts)+2
+            )
+            if cs:
+                for raw in cs:
+                    if not isinstance(raw,dict):
+                        continue
+                    try:
+                        ts=float(raw.get("time",raw.get("t")))
+                        if ts>20_000_000_000:
+                            ts/=1000
+                        ts=int(ts//60)*60
+                    except Exception:
+                        continue
+                    if ts==int(scheduled_entry_ts):
+                        op=raw.get("open",raw.get("o"))
+                        if op is not None:
+                            actual_entry=float(op)
+                            log.info(
+                                "ENTRY_LOCKED_FALLBACK pair=%s scheduled_entry=%d actual_entry=%s source=candle-open",
+                                s.pair,int(scheduled_entry_ts),actual_entry
+                            )
+                        break
+        except Exception as e:
+            log.warning("ENTRY_CANDLE_OPEN_FAILED pair=%s %s",s.pair,e)
+
+    if actual_entry is None:
+        log.error(
+            "RESULT_NOT_VERIFIED pair=%s key=%s reason=actual-entry-price-missing scheduled_entry=%d",
+            s.pair,key,int(scheduled_entry_ts)
+        )
+        return
+
+    s.entry_price=actual_entry
+
+    expiry_close_ts=scheduled_entry_ts+s.expiry_minutes*60
+    target_candle_start=scheduled_entry_ts+(s.expiry_minutes-1)*60
     await asyncio.sleep(max(0,expiry_close_ts-time.time())+1.0)
 
-    target_candle_start=expiry_close_ts-60
-    price=None
-    target_bar=None
-
+    exit_price=None
     for attempt in range(15):
         try:
             if CLIENT:
                 cs=await CLIENT.market.get_candles(s.pair,size=60,count=5,solid=True)
                 if cs:
-                    normalized=[]
                     for raw in cs:
                         if not isinstance(raw,dict):
                             continue
@@ -332,39 +383,30 @@ async def result_watch(key):
                             ts=int(ts//60)*60
                         except Exception:
                             continue
-                        normalized.append((ts,raw))
-                    for ts,raw in normalized:
-                        if ts==target_candle_start:
-                            target_bar=raw
-                            break
-                    if target_bar is None:
-                        # Never classify from an earlier candle.
-                        closed=[(ts,raw) for ts,raw in normalized if ts+60<=time.time()]
-                        exact_or_later=[item for item in closed if item[0]>=target_candle_start]
-                        if exact_or_later:
-                            target_bar=max(exact_or_later,key=lambda x:x[0])[1]
-                            target_candle_start=max(ts for ts,raw in exact_or_later)
-                    if target_bar is not None:
-                        price=target_bar.get("close",target_bar.get("c"))
-                        if price is not None:
-                            price=float(price)
-                            break
+                        if ts==int(target_candle_start):
+                            close=raw.get("close",raw.get("c"))
+                            if close is not None:
+                                exit_price=float(close)
+                                break
+                    if exit_price is not None:
+                        break
         except Exception as e:
             log.warning(
                 "RESULT_CANDLE_READ_FAILED pair=%s attempt=%d target=%d %s",
-                s.pair,attempt+1,target_candle_start,e
+                s.pair,attempt+1,int(target_candle_start),e
             )
         await asyncio.sleep(2)
 
-    if price is None:
+    if exit_price is None:
         log.error(
-            "RESULT_NOT_VERIFIED pair=%s key=%s entry=%s expiry_ts=%d target_candle=%d",
-            s.pair,key,s.entry_price,int(expiry_ts),target_candle_start
+            "RESULT_NOT_VERIFIED pair=%s key=%s reason=exact-expiry-candle-missing "
+            "scheduled_entry=%d expiry_close=%d verification_candle=%d",
+            s.pair,key,int(scheduled_entry_ts),int(expiry_close_ts),int(target_candle_start)
         )
         return
 
     try:
-        rec=BRAIN.finish_signal(key,price)
+        rec=BRAIN.finish_signal(key,exit_price)
     except Exception:
         log.exception("RESULT_FINALIZE_FAILED pair=%s key=%s",s.pair,key)
         return
@@ -380,10 +422,10 @@ async def result_watch(key):
         f"⚠️ RESULT ONLY — AUTO TRADE OFF\n━━━━━━━━━━━━━━━━━━━━"
     )
     log.info(
-        "RESULT_SENT pair=%s result=%s exit=%s verification=candle-closed "
-        "expiry_ts=%d verification_candle=%d telegram=%s cooldown=%s",
-        rec["pair"],rec["result"],rec["exit_price"],int(expiry_ts),target_candle_start,
-        sent,rec["result"]=="LOSS"
+        "RESULT_SENT pair=%s result=%s entry=%s exit=%s verification=candle-closed "
+        "scheduled_entry=%d verification_candle=%d telegram=%s cooldown=%s",
+        rec["pair"],rec["result"],rec["entry_price"],rec["exit_price"],
+        int(scheduled_entry_ts),int(target_candle_start),sent,rec["result"]=="LOSS"
     )
 
 async def cycle_loop():
@@ -453,6 +495,7 @@ async def cycle_loop():
                 expiry_minutes=candidate["expiry_minutes"],
                 entry_price=entry,
                 entry_ts=ts,
+                scheduled_entry_ts=float(next_boundary),
                 entry_candle_ts=candidate["entry_candle_ts"],
                 strategy=candidate["strategy"],
                 reason=candidate["reason"],
@@ -478,7 +521,7 @@ async def cycle_loop():
             f"🎯 TARGET: {target_dt} UAE\\n"
             "⏳ SIGNAL COUNTDOWN: 00:30\\n\\n"
             f"⏱️ EXPIRY: {s.expiry_minutes} MIN\\n"
-            f"💰 ENTRY: {s.entry_price}\\n\\n"
+            f"💰 REFERENCE: {entry}\\n\\n"
             f"📈 15M TREND: {s.trend_15m}\\n"
             f"🕯️ 1M STRUCTURE: {s.structure_1m}\\n"
             f"🧠 STRATEGY: {s.strategy}\\n"
