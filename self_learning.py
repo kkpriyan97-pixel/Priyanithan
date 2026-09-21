@@ -1,13 +1,15 @@
-"""15-day multilingual trading research + own-strategy learning layer.
+"""Autonomous multilingual M1 research + forward-only candle-learning engine.
 
-This module is deliberately separated from the live Candice technical brain.
-It discovers and reads public educational/research pages, extracts M1-related
-methods/evidence, de-duplicates sources, stores them in SQLite, and produces
-a candidate own-strategy library.
-
-Web claims are treated as evidence, never as proof of profitability. Only
-demo-validated methods can become eligible for future strategy promotion.
-No order execution, login, or broker automation is performed here.
+Research is isolated from the live Candice technical brain. It:
+* discovers public trading material across many languages and additional languages
+  detected from page text/scripts;
+* targets at least 10,000 unique domains over 15 days, while respecting robots.txt;
+* de-duplicates URLs and near-duplicate content;
+* extracts methods, triggers, filters, failure modes and technology references;
+* treats marketing/profit claims as claims, never as proof;
+* learns a next-1-minute direction model only from information available before
+  the next candle exists, then validates it when that candle closes;
+* keeps research candidates separate from live signal generation and never trades.
 """
 from __future__ import annotations
 
@@ -21,712 +23,585 @@ import os
 import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+import unicodedata
 from collections import defaultdict
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
 import httpx
 
-log = logging.getLogger("candice.learning")
+log=logging.getLogger("candice.learning")
 
-LEARNING_DAYS = 15
-TARGET_SITES = 10_000
-TARGET_DAILY = math.ceil(TARGET_SITES / LEARNING_DAYS)
-MAX_CONCURRENCY = int(os.getenv("LEARNING_MAX_CONCURRENCY", "6"))
-REQUEST_TIMEOUT = float(os.getenv("LEARNING_REQUEST_TIMEOUT", "10"))
-RUN_INTERVAL_SECONDS = int(os.getenv("LEARNING_RUN_INTERVAL", "900"))
-MAX_PAGE_BYTES = int(os.getenv("LEARNING_MAX_PAGE_BYTES", "700000"))
-DB_PATH = os.getenv("LEARNING_DB_PATH", "candice_learning.sqlite3")
-STATE_JSON = os.getenv("LEARNING_STATE_JSON", "candice_learning_state.json")
-USER_AGENT = "CANDICE-M1-ResearchBot/1.0"
-DEFAULT_LEARNING_START_UTC = "2026-09-21T20:52:37+00:00"
+LEARNING_DAYS=15
+TARGET_SITES=10_000
+TARGET_DAILY=math.ceil(TARGET_SITES/LEARNING_DAYS)
+MAX_CONCURRENCY=max(4,int(os.getenv("LEARNING_MAX_CONCURRENCY","16")))
+REQUEST_TIMEOUT=float(os.getenv("LEARNING_REQUEST_TIMEOUT","8"))
+RUN_INTERVAL_SECONDS=max(60,int(os.getenv("LEARNING_RUN_INTERVAL","120")))
+MAX_PAGE_BYTES=int(os.getenv("LEARNING_MAX_PAGE_BYTES","800000"))
+DB_PATH=os.getenv("LEARNING_DB_PATH","candice_learning.sqlite3")
+STATE_JSON=os.getenv("LEARNING_STATE_JSON","candice_learning_state.json")
+USER_AGENT=os.getenv("LEARNING_USER_AGENT","CANDICE-M1-ResearchBot/2.0")
+DEFAULT_LEARNING_START_UTC="2026-09-21T20:52:37+00:00"
 
-LANGUAGE_QUERIES = {
-    "en": [
-        "1 minute scalping strategy price action EMA RSI VWAP breakout retest",
-        "M1 trading strategy candlestick market structure momentum",
-        "one minute trading setup higher timeframe confirmation",
-        "1 minute scalping false signals volatility session filter",
-    ],
-    "es": [
-        "estrategia scalping 1 minuto acción del precio EMA RSI VWAP",
-        "estrategia trading M1 velas estructura de mercado",
-        "scalping un minuto confirmación temporal superior",
-    ],
-    "pt": [
-        "estratégia scalping 1 minuto ação do preço EMA RSI VWAP",
-        "estratégia M1 velas estrutura de mercado momentum",
-        "scalping um minuto confirmação timeframe superior",
-    ],
-    "fr": [
-        "stratégie scalping 1 minute price action EMA RSI VWAP",
-        "trading M1 chandeliers structure de marché",
-        "scalping une minute confirmation unité de temps supérieure",
-    ],
-    "de": [
-        "1 Minute Scalping Strategie Price Action EMA RSI VWAP",
-        "M1 Trading Strategie Kerzen Marktstruktur Momentum",
-        "Skalping 1 Minute höherer Zeitrahmen Bestätigung",
-    ],
-    "ru": [
-        "стратегия скальпинга 1 минута price action EMA RSI VWAP",
-        "торговля M1 свечи структура рынка импульс",
-        "скальпинг 1 минута подтверждение старшего таймфрейма",
-    ],
-    "zh": [
-        "1分钟 剥头皮 交易策略 价格行为 EMA RSI VWAP",
-        "M1 交易 K线 市场结构 动量 策略",
-        "1分钟 交易 高时间框架 确认",
-    ],
-    "ja": [
-        "1分足 スキャルピング 手法 プライスアクション EMA RSI VWAP",
-        "M1 トレード ローソク足 市場構造 モメンタム",
-        "1分足 上位足 確認 スキャルピング",
-    ],
-    "ko": [
-        "1분봉 스캘핑 전략 가격행동 EMA RSI VWAP",
-        "M1 매매 캔들 시장구조 모멘텀",
-        "1분 스캘핑 상위 시간봉 확인",
-    ],
-    "ar": [
-        "استراتيجية سكالبينج دقيقة واحدة حركة السعر EMA RSI VWAP",
-        "تداول M1 شموع هيكل السوق زخم",
-        "سكالبينج دقيقة واحدة تأكيد الإطار الزمني الأعلى",
-    ],
-    "hi": [
-        "1 मिनट स्कैल्पिंग रणनीति प्राइस एक्शन EMA RSI VWAP",
-        "M1 ट्रेडिंग कैंडल मार्केट स्ट्रक्चर मोमेंटम",
-        "1 मिनट स्कैल्पिंग उच्च टाइमफ्रेम पुष्टि",
-    ],
-    "tr": [
-        "1 dakikalık scalping stratejisi fiyat hareketi EMA RSI VWAP",
-        "M1 işlem mum formasyonu piyasa yapısı momentum",
-        "1 dakika scalping üst zaman dilimi onayı",
-    ],
-    "id": [
-        "strategi scalping 1 menit price action EMA RSI VWAP",
-        "trading M1 candlestick struktur pasar momentum",
-        "scalping satu menit konfirmasi timeframe lebih tinggi",
-    ],
-    "vi": [
-        "chiến lược scalping 1 phút price action EMA RSI VWAP",
-        "giao dịch M1 nến cấu trúc thị trường động lượng",
-        "scalping 1 phút xác nhận khung thời gian lớn",
-    ],
-    "th": [
-        "กลยุทธ์ scalping 1 นาที price action EMA RSI VWAP",
-        "เทรด M1 แท่งเทียน โครงสร้างตลาด โมเมนตัม",
-        "scalping 1 นาที ยืนยันกรอบเวลาที่สูงกว่า",
-    ],
-    "it": [
-        "strategia scalping 1 minuto price action EMA RSI VWAP",
-        "trading M1 candele struttura di mercato momentum",
-        "scalping 1 minuto conferma timeframe superiore",
-    ],
-}
+# 24 major language packs + language-agnostic Unicode/script detection.
+LANGUAGE_QUERIES={
+"en":["1 minute trading strategy next candle prediction","M1 scalping candlestick price action market structure",
+      "one minute breakout pullback retest EMA RSI VWAP","1 minute trading false signals volatility session filter"],
+"es":["estrategia trading 1 minuto siguiente vela predicción","scalping M1 velas acción del precio estructura mercado",
+      "ruptura retroceso retesteo EMA RSI VWAP 1 minuto","falsas señales volatilidad sesiones scalping"],
+"pt":["estratégia de trading 1 minuto previsão próxima vela","scalping M1 velas ação do preço estrutura de mercado",
+      "rompimento pullback reteste EMA RSI VWAP 1 minuto","sinais falsos volatilidade sessão scalping"],
+"fr":["stratégie trading 1 minute prédiction prochaine bougie","scalping M1 chandeliers action des prix structure marché",
+      "cassure pullback retest EMA RSI VWAP 1 minute","faux signaux volatilité session scalping"],
+"de":["1 Minuten Trading Strategie nächste Kerze Vorhersage","M1 Scalping Kerzen Preisaktion Marktstruktur",
+      "Ausbruch Pullback Retest EMA RSI VWAP 1 Minute","Fehlsignale Volatilität Sitzung Scalping"],
+"it":["strategia trading 1 minuto previsione prossima candela","scalping M1 candele price action struttura mercato",
+      "breakout pullback retest EMA RSI VWAP 1 minuto","falsi segnali volatilità sessione scalping"],
+"nl":["1 minuut trading strategie volgende candle voorspelling","M1 scalping candlesticks price action marktstructuur",
+      "breakout pullback retest EMA RSI VWAP 1 minuut","valse signalen volatiliteit sessie scalping"],
+"ru":["торговая стратегия 1 минута прогноз следующей свечи","скальпинг M1 свечи прайс экшен структура рынка",
+      "пробой откат ретест EMA RSI VWAP 1 минута","ложные сигналы волатильность сессия скальпинг"],
+"uk":["стратегія трейдингу 1 хвилина прогноз наступної свічки","скальпінг M1 свічки прайс екшен структура ринку",
+      "пробій відкат ретест EMA RSI VWAP 1 хвилина","хибні сигнали волатильність сесія"],
+"pl":["strategia trading 1 minuta prognoza następnej świecy","scalping M1 świece price action struktura rynku",
+      "wybicie pullback retest EMA RSI VWAP 1 minuta","fałszywe sygnały zmienność sesja"],
+"tr":["1 dakika işlem stratejisi sonraki mum tahmini","M1 scalping mum fiyat hareketi piyasa yapısı",
+      "kırılım geri çekilme retest EMA RSI VWAP 1 dakika","sahte sinyal volatilite seans"],
+"ar":["استراتيجية تداول دقيقة واحدة توقع الشمعة التالية","سكالبينغ M1 شموع حركة السعر هيكل السوق",
+      "اختراق تصحيح إعادة اختبار EMA RSI VWAP دقيقة واحدة","إشارات كاذبة تقلب جلسات"],
+"fa":["استراتژی معامله یک دقیقه پیش بینی کندل بعدی","اسکالپ M1 کندل پرایس اکشن ساختار بازار",
+      "بریک اوت پولبک ریتست EMA RSI VWAP یک دقیقه","سیگنال کاذب نوسان سشن"],
+"hi":["1 मिनट ट्रेडिंग रणनीति अगली कैंडल भविष्यवाणी","M1 स्कैल्पिंग कैंडल प्राइस एक्शन मार्केट स्ट्रक्चर",
+      "ब्रेकआउट पुलबैक रिटेस्ट EMA RSI VWAP 1 मिनट","फॉल्स सिग्नल वोलैटिलिटी सेशन"],
+"bn":["১ মিনিট ট্রেডিং কৌশল পরের ক্যান্ডেল পূর্বাভাস","M1 স্ক্যাল্পিং ক্যান্ডেল প্রাইস অ্যাকশন মার্কেট স্ট্রাকচার",
+      "ব্রেকআউট পুলব্যাক রিটেস্ট EMA RSI VWAP","ফলস সিগন্যাল ভোলাটিলিটি সেশন"],
+"ur":["ایک منٹ ٹریڈنگ حکمت عملی اگلی کینڈل پیشگوئی","M1 اسکیلپنگ کینڈل پرائس ایکشن مارکیٹ اسٹرکچر",
+      "بریک آؤٹ پل بیک ری ٹیسٹ EMA RSI VWAP","غلط سگنلز اتار چڑھاؤ سیشن"],
+"zh":["1分钟 交易策略 下一根K线预测","M1 交易 K线 价格行为 市场结构",
+      "突破 回踩 重测 EMA RSI VWAP 1分钟","虚假信号 波动率 交易时段"],
+"ja":["1分足 トレード 次のローソク足 予測","M1 スキャルピング ローソク足 プライスアクション 市場構造",
+      "ブレイクアウト 押し目 リテスト EMA RSI VWAP 1分足","ダマシ ボラティリティ セッション"],
+"ko":["1분봉 트레이딩 전략 다음 캔들 예측","M1 스캘핑 캔들 가격행동 시장구조",
+      "돌파 되돌림 리테스트 EMA RSI VWAP 1분","가짜 신호 변동성 세션"],
+"vi":["chiến lược giao dịch 1 phút dự đoán nến tiếp theo","scalping M1 nến hành động giá cấu trúc thị trường",
+      "breakout pullback retest EMA RSI VWAP 1 phút","tín hiệu giả biến động phiên"],
+"th":["กลยุทธ์เทรด 1 นาที คาดการณ์แท่งถัดไป","สเกลป์ M1 แท่งเทียน price action โครงสร้างตลาด",
+      "breakout pullback retest EMA RSI VWAP 1 นาที","สัญญาณหลอก ความผันผวน session"],
+"id":["strategi trading 1 menit prediksi candle berikutnya","scalping M1 candlestick price action struktur pasar",
+      "breakout pullback retest EMA RSI VWAP 1 menit","sinyal palsu volatilitas sesi"],
+"ms":["strategi dagangan 1 minit ramalan candle seterusnya","scalping M1 candlestick price action struktur pasaran",
+      "breakout pullback retest EMA RSI VWAP 1 minit","isyarat palsu volatiliti sesi"],
+"he":["אסטרטגיית מסחר דקה אחת חיזוי נר הבא","סקאלפינג M1 נרות price action מבנה שוק",
+      "פריצה pullback retest EMA RSI VWAP דקה","איתותים שגויים תנודתיות סשן"],
+"el":["στρατηγική trading 1 λεπτού πρόβλεψη επόμενου κεριού","M1 scalping κεριά price action δομή αγοράς",
+      "breakout pullback retest EMA RSI VWAP 1 λεπτό","ψευδή σήματα μεταβλητότητα συνεδρία"]}
 
-METHOD_TERMS = {
-    "trend_following": [
-        "trend following", "trend-following", "ema alignment", "moving average alignment",
-        "tendance", "tendencia", "trendfolge", "трендовая торговля", "趋势交易", "トレンドフォロー",
-    ],
-    "pullback_retest": [
-        "pullback", "retest", "pull-back", "retest breakout", "reteste", "pullback entry",
-        "ретест", "откат", "回踩", "押し目", "되돌림", "retoma",
-    ],
-    "breakout": [
-        "breakout", "break-out", "range breakout", "opening range", "cassure", "ruptura",
-        "ausbruch", "пробой", "突破", "ブレイクアウト", "돌파",
-    ],
-    "rejection_reversal": [
-        "rejection", "reversal", "pin bar", "engulfing", "mean reversion", "reversal candle",
-        "rechazo", "reversão", "rejet", "umkehr", "разворот", "反转", "反発",
-    ],
-    "vwap_momentum": [
-        "vwap", "volume weighted average price", "momentum", "volume spike", "activity spike",
-        "volume weighted", "волатильность", "成交量", "モメンタム",
-    ],
-    "rsi_divergence": [
-        "rsi divergence", "divergence rsi", "divergencia rsi", "divergence RSI",
-        "дивергенция rsi", "rsi 背离", "rsi ダイバージェンス",
-    ],
-    "bollinger_mean_reversion": [
-        "bollinger", "bollinger bands", "band touch", "band reversal",
-        "bandes de bollinger", "bandas de bollinger", "боллинджер", "布林带",
-    ],
-    "market_structure": [
-        "market structure", "higher high", "lower low", "hh hl", "lh ll", "support resistance",
-        "structure de marché", "estructura de mercado", "marktstruktur", "структура рынка",
-        "市场结构", "市場構造",
-    ],
-}
+METHOD_LIBRARY={
+"trend_following":["trend following","trend-following","ema alignment","moving average alignment","adx","supertrend"],
+"pullback_retest":["pullback","retest","retest breakout","reteste","recoil","回踩","押し目"],
+"breakout":["breakout","range breakout","opening range","breakout retest","rupture","пробой","突破"],
+"rejection_reversal":["rejection","reversal","pin bar","engulfing","mean reversion","shooting star","hammer","反转","разворот"],
+"vwap_momentum":["vwap","volume weighted average price","momentum","volume spike","成交量","モメンタム"],
+"rsi_divergence":["rsi divergence","divergence rsi","divergencia rsi","дивергенция rsi","背离"],
+"bollinger_mean_reversion":["bollinger","bollinger bands","band touch","band reversal","布林带"],
+"market_structure":["market structure","higher high","lower low","hh hl","lh ll","support resistance","liquidity sweep","order block"],
+"microstructure":["order flow","footprint","market profile","volume profile","bid ask","delta","tape reading"],
+"volatility_regime":["atr","volatility","range expansion","range contraction","squeeze","volatility compression"],
+"session_timing":["london session","new york session","asian session","session open","opening range","market open"],
+"momentum_oscillator":["macd","stochastic","cci","mfi","obv","roc","rate of change"],
+"trend_indicators":["ichimoku","heikin ashi","parabolic sar","keltner channel","donchian channel"],
+"advanced_models":["machine learning","deep learning","random forest","xgboost","lstm","transformer","reinforcement learning","kalman filter","hidden markov","fourier","wavelet"],
+"pattern_recognition":["harmonic","chart pattern","triangle","flag","wedge","double top","double bottom","head and shoulders"],
+"risk_filtering":["risk management","position sizing","stop loss","take profit","no trade","filter","drawdown"],
+"statistical_validation":["backtest","walk forward","out of sample","out-of-sample","monte carlo","bootstrap","expectancy","sample size"]}
 
-QUALITY_HINTS = {
-    "edu": 1.0,
-    "gov": 1.0,
-    "org": 0.8,
-    "edu.au": 1.0,
-    "ac.uk": 1.0,
-    "tradingview.com": 0.65,
-    "cmegroup.com": 0.9,
-    "investor.gov": 1.0,
-    "sec.gov": 1.0,
-    "ig.com": 0.7,
-    "oanda.com": 0.7,
-    "babypips.com": 0.55,
-}
+ALL_TERMS=set(t.lower() for vs in METHOD_LIBRARY.values() for t in vs)
 
-MARKETING_PATTERNS = re.compile(
-    r"(90\\s*%|95\\s*%|99\\s*%|guaranteed|guarantee|guaranteed profit|"
-    r"profit every day|sure win|no loss|稳赚|稳赚不赔|100\\s*% win|"
-    r"ganancia garantizada|lucro garantido|profit garanti|гарантированн)",
-    re.I,
-)
-
+QUALITY_HINTS={"cmegroup.com":.92,"sec.gov":1.0,"investor.gov":1.0,"tradingview.com":.68,"oanda.com":.72,"ig.com":.72,
+"babypips.com":.58,"forex.com":.70,"fidelity.com":.78,"schwab.com":.78,"investopedia.com":.62}
+MARKETING_PATTERNS=re.compile(
+r"(90\s*%|95\s*%|99\s*%|100\s*%|guaranteed|guarantee|guaranteed profit|profit every day|sure win|no loss|稳赚|稳赚不赔|"
+r"ganancia garantizada|lucro garantido|profit garanti|гарантированн|garantizado|garantido)",re.I)
+SEARCH_HOSTS={"google.com","googleusercontent.com","duckduckgo.com","bing.com","search.yahoo.com"}
 
 class PageParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.title_parts: list[str] = []
-        self.text_parts: list[str] = []
-        self.links: list[tuple[str, str]] = []
-        self._title = False
-        self._skip = 0
-        self._anchor: str | None = None
-        self._anchor_text: list[str] = []
-        self._capture = {"p", "h1", "h2", "h3", "li", "article", "section", "title"}
+        self.title_parts=[]; self.text_parts=[]; self.links=[]
+        self._title=False; self._skip=0; self._anchor=None; self._anchor_text=[]
+        self._capture={"p","h1","h2","h3","h4","li","article","section","title","td","th"}
+    def handle_starttag(self,tag,attrs):
+        tag=tag.lower(); attrs=dict(attrs)
+        if tag in {"script","style","noscript","svg","canvas"}: self._skip+=1; return
+        if tag=="title": self._title=True
+        if tag=="a" and not self._skip and attrs.get("href"):
+            self._anchor=attrs["href"]; self._anchor_text=[]
+    def handle_endtag(self,tag):
+        tag=tag.lower()
+        if tag in {"script","style","noscript","svg","canvas"}:
+            self._skip=max(0,self._skip-1); return
+        if tag=="title": self._title=False
+        if tag=="a" and self._anchor:
+            self.links.append((self._anchor," ".join(self._anchor_text).strip()))
+            self._anchor=None; self._anchor_text=[]
+    def handle_data(self,data):
+        if self._skip:return
+        s=" ".join(data.split())
+        if not s:return
+        if self._title:self.title_parts.append(s)
+        if self._anchor is not None:self._anchor_text.append(s)
+        self.text_parts.append(s)
 
-    def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        attrs = dict(attrs)
-        if tag in {"script", "style", "noscript", "svg", "canvas"}:
-            self._skip += 1
-            return
-        if tag == "title":
-            self._title = True
-        if tag == "a" and self._skip == 0:
-            href = attrs.get("href")
-            if href:
-                self._anchor = href
-                self._anchor_text = []
+def _clean_url(raw,base=None):
+    if not raw:return None
+    if base:raw=urljoin(base,raw)
+    raw=html.unescape(str(raw).strip())
+    if raw.startswith("//"):raw="https:"+raw
+    p=urlparse(raw)
+    if p.scheme not in {"http","https"} or not p.netloc:return None
+    host=(p.hostname or "").lower()
+    if not host or host=="localhost" or host.endswith(".local"):return None
+    q={k:v for k,v in parse_qs(p.query).items() if not k.lower().startswith(("utm_","fbclid","gclid"))}
+    query="&".join(f"{k}={quote_plus(v[0])}" for k,v in sorted(q.items()))
+    return urlunparse((p.scheme,host,p.path or "/", "",query,""))
 
-    def handle_endtag(self, tag):
-        tag = tag.lower()
-        if tag in {"script", "style", "noscript", "svg", "canvas"}:
-            self._skip = max(0, self._skip - 1)
-            return
-        if tag == "title":
-            self._title = False
-        if tag == "a" and self._anchor:
-            label = " ".join(self._anchor_text).strip()
-            self.links.append((self._anchor, label))
-            self._anchor = None
-            self._anchor_text = []
+def _unwrap_search_href(href):
+    href=html.unescape(href or "")
+    p=urlparse(href)
+    q=parse_qs(p.query)
+    for k in ("uddg","url","target","q"):
+        v=q.get(k)
+        if v and urlparse(v[0]).scheme in {"http","https"}:return v[0]
+    return href
 
-    def handle_data(self, data):
-        if self._skip:
-            return
-        s = " ".join(data.split())
-        if not s:
-            return
-        if self._title:
-            self.title_parts.append(s)
-        if self._anchor is not None:
-            self._anchor_text.append(s)
-        if any(piece in s.lower() for piece in (
-            "1 minute", "1-minute", "m1", "scalp", "scalping", "price action",
-            "ema", "rsi", "vwap", "bollinger", "candlestick", "breakout",
-            "pullback", "retest", "market structure", "support", "resistance",
-        )):
-            self.text_parts.append(s)
+def _domain(url):return (urlparse(url).hostname or "").lower().removeprefix("www.")
 
+def _source_quality(domain):
+    d=_domain("https://"+domain) if "://" not in domain else _domain(domain)
+    if d in QUALITY_HINTS:return QUALITY_HINTS[d]
+    if d.endswith(".gov") or d.endswith(".edu") or d.endswith(".ac.uk"):return 1.0
+    if d.endswith(".org"):return .76
+    if d.endswith(".edu.au"):return 1.0
+    return .45
 
-def _clean_url(raw: str, base: str | None = None) -> str | None:
-    if base:
-        raw = urljoin(base, raw)
-    raw = html.unescape(raw.strip())
-    if raw.startswith("//"):
-        raw = "https:" + raw
-    p = urlparse(raw)
-    if p.scheme not in {"http", "https"} or not p.netloc:
-        return None
-    bad = {"javascript:", "mailto:", "tel:"}
-    if p.scheme + ":" in bad:
-        return None
-    host = p.hostname.lower() if p.hostname else ""
-    if not host or host == "localhost" or host.endswith(".local"):
-        return None
-    path = p.path or "/"
-    # Remove tracking parameters; retain normal query parameters.
-    q = {k: v for k, v in parse_qs(p.query).items() if not k.lower().startswith(("utm_", "fbclid"))}
-    query = "&".join(f"{k}={quote_plus(v[0])}" for k, v in sorted(q.items()))
-    return urlunparse((p.scheme, host, path, "", query, ""))
+def _script_language(text):
+    counts=defaultdict(int)
+    for ch in text[:8000]:
+        n=unicodedata.name(ch,"")
+        if "ARABIC" in n:counts["ar"]+=1
+        elif "CYRILLIC" in n:counts["ru"]+=1
+        elif "HEBREW" in n:counts["he"]+=1
+        elif "GREEK" in n:counts["el"]+=1
+        elif "DEVANAGARI" in n:counts["hi"]+=1
+        elif "BENGALI" in n:counts["bn"]+=1
+        elif "THAI" in n:counts["th"]+=1
+        elif "HANGUL" in n:counts["ko"]+=1
+        elif any(x in n for x in ("CJK","HIRAGANA","KATAKANA")):counts["zh" if "CJK" in n else "ja"]+=1
+    return max(counts,key=counts.get) if counts else "en"
 
+def _normalize_text(text):
+    return re.sub(r"\s+"," "," ".join(text.split())).strip()
 
-def _domain(url: str) -> str:
-    host = urlparse(url).hostname or ""
-    return host.lower().removeprefix("www.")
+def _fingerprint(text):
+    return hashlib.sha256(_normalize_text(text).lower()[:20000].encode("utf-8","ignore")).hexdigest()
 
+def _simhash(text):
+    words=re.findall(r"\w+",_normalize_text(text).lower(),re.UNICODE)
+    if not words:return "0"
+    vec=[0]*64
+    for w in words[:2500]:
+        h=int(hashlib.blake2b(w.encode("utf-8","ignore"),digest_size=8).hexdigest(),16)
+        for i in range(64):vec[i]+=1 if (h>>i)&1 else -1
+    out=sum((1<<i) for i,v in enumerate(vec) if v>=0)
+    return f"{out:016x}"
 
-def _source_quality(domain: str) -> float:
-    d = domain.lower()
-    if d in QUALITY_HINTS:
-        return QUALITY_HINTS[d]
-    if d.endswith(".gov") or d.endswith(".edu"):
-        return 1.0
-    if d.endswith(".org"):
-        return 0.75
-    return 0.45
+def _hamming(a,b):
+    try:return (int(a,16)^int(b,16)).bit_count()
+    except Exception:return 64
 
+def _nearby_evidence(text,hits):
+    sentences=re.split(r"(?<=[.!?。！？])\s+",text)
+    out=[]
+    for s in sentences:
+        ls=s.lower()
+        if any(h in ls for h in hits) and 20<=len(s)<=1200:out.append(s.strip())
+    return out[:8]
 
-def _content_fingerprint(text: str) -> str:
-    normalized = re.sub(r"\\s+", " ", text.lower()).strip()
-    return hashlib.sha256(normalized[:12000].encode("utf-8", "ignore")).hexdigest()
-
-
-def _extract_candidates(text: str, title: str, url: str) -> list[dict]:
-    lower = text.lower()
-    out = []
-    for method_id, terms in METHOD_TERMS.items():
-        hits = [t for t in terms if t in lower]
-        if not hits:
-            continue
-        sentences = re.split(r"(?<=[.!?。！？])\\s+", text)
-        matched = []
-        for s in sentences:
-            ls = s.lower()
-            if any(t in ls for t in hits):
-                matched.append(s.strip())
-        matched = [s for s in matched if 25 <= len(s) <= 900][:6]
-        specificity = min(1.0, (len(hits) / 3.0) + (0.2 if "1-minute" in lower or "1 minute" in lower or "m1" in lower else 0))
-        promo_penalty = 0.35 if MARKETING_PATTERNS.search(text) else 0.0
-        evidence_score = max(0.0, min(1.0, _source_quality(_domain(url)) * 0.7 + specificity * 0.3 - promo_penalty))
-        if matched:
-            out.append({
-                "method_id": method_id,
-                "title": title[:240],
-                "url": url,
-                "domain": _domain(url),
-                "matched_terms": hits[:12],
-                "evidence": matched,
-                "source_quality": round(_source_quality(_domain(url)), 3),
-                "evidence_score": round(evidence_score, 3),
-                "marketing_claim_flag": bool(promo_penalty),
-            })
+def _extract_evidence(text,title,url,language):
+    low=text.lower(); out=[]
+    for method_id,terms in METHOD_LIBRARY.items():
+        hits=[t for t in terms if t in low]
+        if not hits:continue
+        evidence=_nearby_evidence(text,hits)
+        if not evidence:continue
+        mflag=bool(MARKETING_PATTERNS.search(text))
+        specificity=min(1.0,0.15*len(hits)+0.25*int(any(x in low for x in ("1 minute","1-minute","m1","1min","1分","دقيقة واحدة","1 minuto"))))
+        score=max(0,min(1,_source_quality(_domain(url))*.65+specificity*.35-(.30 if mflag else 0)))
+        claim=re.findall(r"(?:\d{2,3}(?:\.\d+)?\s*%\s*(?:win|accuracy|profit|winrate|taux|rentabilidad|acerto|taxa))",text,re.I)[:5]
+        out.append({"method_id":method_id,"title":title[:240],"url":url,"domain":_domain(url),"language":language,
+                    "matched_terms":hits[:20],"evidence":evidence,"source_quality":round(_source_quality(_domain(url)),3),
+                    "evidence_score":round(score,3),"marketing_claim_flag":mflag,"claimed_performance":claim})
     return out
 
-
 class LearningDB:
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(
-            """
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS sources(
-                domain TEXT PRIMARY KEY,
-                first_seen REAL NOT NULL,
-                last_seen REAL NOT NULL,
-                language TEXT,
-                homepage TEXT,
-                pages_scanned INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS pages(
-                url TEXT PRIMARY KEY,
-                domain TEXT NOT NULL,
-                fetched_at REAL NOT NULL,
-                title TEXT,
-                fingerprint TEXT,
-                content_chars INTEGER NOT NULL DEFAULT 0,
-                http_status INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS method_evidence(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                method_id TEXT NOT NULL,
-                url TEXT NOT NULL,
-                domain TEXT NOT NULL,
-                evidence_score REAL NOT NULL,
-                evidence_json TEXT NOT NULL,
-                marketing_claim_flag INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL,
-                UNIQUE(method_id, url)
-            );
-            CREATE TABLE IF NOT EXISTS demo_results(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                method_id TEXT NOT NULL,
-                result TEXT NOT NULL,
-                created_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_evidence_method ON method_evidence(method_id);
-            """
-        )
+    def __init__(self,path):
+        self.path=path
+        self.conn=sqlite3.connect(path,check_same_thread=False)
+        self.conn.row_factory=sqlite3.Row
+        self.conn.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sources(domain TEXT PRIMARY KEY,first_seen REAL,last_seen REAL,language TEXT,homepage TEXT,pages_scanned INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS pages(url TEXT PRIMARY KEY,domain TEXT NOT NULL,fetched_at REAL,title TEXT,fingerprint TEXT,simhash TEXT,content_chars INTEGER DEFAULT 0,http_status INTEGER,language TEXT);
+        CREATE TABLE IF NOT EXISTS method_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,method_id TEXT NOT NULL,url TEXT NOT NULL,domain TEXT NOT NULL,
+          language TEXT,evidence_score REAL NOT NULL,evidence_json TEXT NOT NULL,marketing_claim_flag INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,
+          UNIQUE(method_id,url));
+        CREATE TABLE IF NOT EXISTS demo_results(id INTEGER PRIMARY KEY AUTOINCREMENT,method_id TEXT NOT NULL,result TEXT NOT NULL,created_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS candle_forecasts(
+          pair TEXT NOT NULL,prediction_ts INTEGER NOT NULL,target_ts INTEGER NOT NULL,direction TEXT NOT NULL,probability REAL NOT NULL,
+          feature_json TEXT NOT NULL,result TEXT,created_at REAL NOT NULL,PRIMARY KEY(pair,prediction_ts));
+        CREATE TABLE IF NOT EXISTS model_weights(name TEXT PRIMARY KEY,weight REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS research_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,started_at REAL,finished_at REAL,discovered INTEGER,fetched INTEGER,evidence INTEGER,errors INTEGER);
+        CREATE INDEX IF NOT EXISTS idx_evidence_method ON method_evidence(method_id);
+        CREATE INDEX IF NOT EXISTS idx_forecast_pair ON candle_forecasts(pair);
+        """)
         self.conn.commit()
-
-    def get_meta(self, key: str, default: str = "") -> str:
-        row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-        return str(row["value"]) if row else default
-
-    def set_meta(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value),
-        )
-        self.conn.commit()
-
-    def add_source(self, url: str, language: str) -> bool:
-        domain = _domain(url)
-        now = time.time()
-        row = self.conn.execute("SELECT domain FROM sources WHERE domain=?", (domain,)).fetchone()
+    def meta(self,k,d=""):
+        r=self.conn.execute("SELECT value FROM meta WHERE key=?",(k,)).fetchone();return str(r["value"]) if r else d
+    def set_meta(self,k,v):
+        self.conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(k,str(v)));self.conn.commit()
+    def add_source(self,url,language):
+        d=_domain(url);now=time.time()
+        row=self.conn.execute("SELECT domain FROM sources WHERE domain=?",(d,)).fetchone()
         if row:
-            self.conn.execute("UPDATE sources SET last_seen=?, language=COALESCE(language,?), homepage=COALESCE(homepage,?) WHERE domain=?",
-                              (now, language, url, domain))
-            self.conn.commit()
-            return False
-        self.conn.execute("INSERT INTO sources(domain,first_seen,last_seen,language,homepage) VALUES(?,?,?,?,?)",
-                          (domain, now, now, language, url))
-        self.conn.commit()
-        return True
+            self.conn.execute("UPDATE sources SET last_seen=?,language=COALESCE(language,?),homepage=COALESCE(homepage,?) WHERE domain=?",(now,language,url,d))
+            self.conn.commit();return False
+        self.conn.execute("INSERT INTO sources(domain,first_seen,last_seen,language,homepage) VALUES(?,?,?,?,?)",(d,now,now,language,url));self.conn.commit();return True
+    def source_count(self):return int(self.conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0])
+    def pages_count(self):return int(self.conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0])
+    def page_seen(self,u):return self.conn.execute("SELECT 1 FROM pages WHERE url=?",(u,)).fetchone() is not None
+    def near_duplicate(self,sh,limit=5):
+        rows=self.conn.execute("SELECT simhash FROM pages WHERE simhash IS NOT NULL ORDER BY fetched_at DESC LIMIT 5000").fetchall()
+        return any(_hamming(sh,r["simhash"])<=limit for r in rows)
+    def save_page(self,url,title,fp,sh,chars,status,language):
+        d=_domain(url);now=time.time()
+        self.conn.execute("""INSERT OR REPLACE INTO pages(url,domain,fetched_at,title,fingerprint,simhash,content_chars,http_status,language)
+          VALUES(?,?,?,?,?,?,?,?,?)""",(url,d,now,title,fp,sh,chars,status,language))
+        self.conn.execute("UPDATE sources SET pages_scanned=pages_scanned+1,last_seen=? WHERE domain=?",(now,d));self.conn.commit()
+    def save_evidence(self,item):
+        self.conn.execute("""INSERT OR IGNORE INTO method_evidence
+          (method_id,url,domain,language,evidence_score,evidence_json,marketing_claim_flag,created_at)
+          VALUES(?,?,?,?,?,?,?,?)""",(item["method_id"],item["url"],item["domain"],item["language"],item["evidence_score"],
+          json.dumps(item,ensure_ascii=False),int(item["marketing_claim_flag"]),time.time()));self.conn.commit()
+    def method_rows(self):
+        return self.conn.execute("""SELECT method_id,COUNT(DISTINCT domain) domains,AVG(evidence_score) avg_score,
+          SUM(CASE WHEN marketing_claim_flag=0 THEN 1 ELSE 0 END) clean_evidence FROM method_evidence GROUP BY method_id
+          ORDER BY domains DESC,avg_score DESC""").fetchall()
+    def add_demo(self,method_id,result):
+        result=str(result).upper()
+        if result in {"WIN","LOSS","TIE"}:
+            self.conn.execute("INSERT INTO demo_results(method_id,result,created_at) VALUES(?,?,?)",(method_id,result,time.time()));self.conn.commit()
+    def demo_stats(self,method_id):
+        rows=self.conn.execute("SELECT result,COUNT(*) n FROM demo_results WHERE method_id=? GROUP BY result",(method_id,)).fetchall()
+        d={r["result"]:int(r["n"]) for r in rows};total=sum(d.values())
+        return {"samples":total,"wins":d.get("WIN",0),"losses":d.get("LOSS",0),"ties":d.get("TIE",0),"win_rate":round(100*d.get("WIN",0)/max(1,total),2)}
+    def forecast_stats(self):
+        r=self.conn.execute("""SELECT COUNT(*) n,SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) wins,
+          SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) losses FROM candle_forecasts WHERE result IS NOT NULL""").fetchone()
+        n=int(r["n"] or 0);w=int(r["wins"] or 0);l=int(r["losses"] or 0)
+        return {"samples":n,"wins":w,"losses":l,"accuracy":round(100*w/max(1,w+l),2)}
+    def pair_forecast_stats(self,pair):
+        r=self.conn.execute("""SELECT COUNT(*) n,SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) wins
+          FROM candle_forecasts WHERE pair=? AND result IS NOT NULL""",(pair,)).fetchone()
+        n=int(r["n"] or 0);w=int(r["wins"] or 0);return {"samples":n,"wins":w,"accuracy":round(100*w/max(1,n),2)}
+    def load_weights(self):
+        rows=self.conn.execute("SELECT name,weight FROM model_weights").fetchall()
+        return {r["name"]:float(r["weight"]) for r in rows}
+    def save_weights(self,w):
+        self.conn.executemany("INSERT INTO model_weights(name,weight) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET weight=excluded.weight",
+                              list(w.items()));self.conn.commit()
 
-    def source_count(self) -> int:
-        return int(self.conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0])
-
-    def pages_count(self) -> int:
-        return int(self.conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0])
-
-    def page_seen(self, url: str) -> bool:
-        return self.conn.execute("SELECT 1 FROM pages WHERE url=?", (url,)).fetchone() is not None
-
-    def save_page(self, url: str, title: str, fingerprint: str, chars: int, status: int) -> None:
-        self.conn.execute(
-            "INSERT OR REPLACE INTO pages(url,domain,fetched_at,title,fingerprint,content_chars,http_status) VALUES(?,?,?,?,?,?,?)",
-            (url, _domain(url), time.time(), title, fingerprint, chars, status),
-        )
-        self.conn.execute("UPDATE sources SET pages_scanned=pages_scanned+1,last_seen=? WHERE domain=?",
-                          (time.time(), _domain(url)))
-        self.conn.commit()
-
-    def save_evidence(self, item: dict) -> None:
-        self.conn.execute(
-            """INSERT OR IGNORE INTO method_evidence
-            (method_id,url,domain,evidence_score,evidence_json,marketing_claim_flag,created_at)
-            VALUES(?,?,?,?,?,?,?)""",
-            (item["method_id"], item["url"], item["domain"], item["evidence_score"],
-             json.dumps(item, ensure_ascii=False), int(item["marketing_claim_flag"]), time.time()),
-        )
-        self.conn.commit()
-
-    def method_rows(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            """SELECT method_id,
-                      COUNT(DISTINCT domain) AS domains,
-                      AVG(evidence_score) AS avg_score,
-                      SUM(CASE WHEN marketing_claim_flag=0 THEN 1 ELSE 0 END) AS clean_evidence
-               FROM method_evidence
-               GROUP BY method_id
-               ORDER BY domains DESC, avg_score DESC"""
-        ).fetchall()
-
-    def add_demo_result(self, method_id: str, result: str) -> None:
-        result = result.upper()
-        if result not in {"WIN", "LOSS", "TIE"}:
-            return
-        self.conn.execute("INSERT INTO demo_results(method_id,result,created_at) VALUES(?,?,?)",
-                          (method_id, result, time.time()))
-        self.conn.commit()
-
-    def demo_stats(self, method_id: str) -> dict:
-        rows = self.conn.execute(
-            "SELECT result,COUNT(*) n FROM demo_results WHERE method_id=? GROUP BY result",
-            (method_id,),
-        ).fetchall()
-        d={r["result"]:int(r["n"]) for r in rows}
-        total=sum(d.values())
-        return {"samples":total,"wins":d.get("WIN",0),"losses":d.get("LOSS",0),"ties":d.get("TIE",0),
-                "win_rate":round(100*d.get("WIN",0)/max(1,total),2)}
-
-    def close(self) -> None:
-        self.conn.close()
-
+class ForwardCandleModel:
+    """Online logistic model. Features are computed only from candles at t; label is candle t+1."""
+    NAMES=("bias","ret1","ret3","ret5","body","range","upper_wick","lower_wick","close_pos","ema_gap","rsi_gap","atr_ratio","range_ratio","streak")
+    def __init__(self,db):self.db=db;self.w={n:0.0 for n in self.NAMES};self.w.update(db.load_weights())
+    @staticmethod
+    def _ema(vals,n):
+        if not vals:return 0.0
+        k=2/(n+1);e=vals[0]
+        for x in vals[1:]:e=x*k+e*(1-k)
+        return e
+    @staticmethod
+    def _rsi(vals,n=14):
+        if len(vals)<n+1:return 50.0
+        gains=[];losses=[]
+        for a,b in zip(vals[-n-1:-1],vals[-n:]):
+            d=b-a;gains.append(max(0,d));losses.append(max(0,-d))
+        ag=sum(gains)/n;al=sum(losses)/n
+        return 100 if al==0 else 100-(100/(1+ag/al))
+    @staticmethod
+    def features(cs):
+        if len(cs)<20:return None
+        c=cs[-1];cl=[float(x["close"]) for x in cs];px=max(abs(c["close"]),1e-9)
+        rng=max(c["high"]-c["low"],1e-9);body=(c["close"]-c["open"])/rng
+        upper=(c["high"]-max(c["open"],c["close"]))/rng;lower=(min(c["open"],c["close"])-c["low"])/rng
+        close_pos=((c["close"]-c["low"])/rng)*2-1
+        ema9=ForwardCandleModel._ema(cl[-40:],9);ema21=ForwardCandleModel._ema(cl[-40:],21)
+        atr=sum(max(x["high"]-x["low"],abs(x["high"]-cs[i-1]["close"]),abs(x["low"]-cs[i-1]["close"])) for i,x in enumerate(cs[-14:],start=len(cs)-14) if i>0)/14
+        ret1=(cl[-1]/cl[-2]-1) if cl[-2] else 0;ret3=(cl[-1]/cl[-4]-1) if cl[-4] else 0;ret5=(cl[-1]/cl[-6]-1) if cl[-6] else 0
+        ranges=[max(x["high"]-x["low"],1e-9) for x in cs[-20:]]
+        med=sorted(ranges)[len(ranges)//2]
+        s=0
+        for i in range(len(cl)-1,0,-1):
+            if (cl[i]>cl[i-1])==(cl[-1]>cl[-2]):s+=1
+            else:break
+        return {"bias":1.0,"ret1":ret1*100,"ret3":ret3*100,"ret5":ret5*100,"body":body,"range":rng/px*100,
+                "upper_wick":upper,"lower_wick":lower,"close_pos":close_pos,"ema_gap":(ema9-ema21)/px*100,
+                "rsi_gap":(ForwardCandleModel._rsi(cl)-50)/50,"atr_ratio":atr/px*100,"range_ratio":rng/max(med,1e-9),"streak":min(s,6)/6}
+    def predict(self,features):
+        z=sum(self.w.get(k,0)*v for k,v in features.items());z=max(-8,min(8,z));p=1/(1+math.exp(-z));return ("UP" if p>=.5 else "DOWN",p)
+    def update(self,features,label,lr=.04):
+        y=1.0 if label=="UP" else 0.0;d=y-self.predict(features)[1]
+        for k,v in features.items():self.w[k]=self.w.get(k,0)+lr*d*v
+        self.db.save_weights(self.w)
 
 class SelfLearningEngine:
-    def __init__(self) -> None:
-        self.db=LearningDB(DB_PATH)
-        stored=self.db.get_meta("started_at","").strip()
-        if stored:
-            self.started_at=float(stored)
+    def __init__(self):
+        self.db=LearningDB(DB_PATH);stored=self.db.meta("started_at","").strip()
+        if stored:self.started_at=float(stored)
         else:
-            start_text=os.getenv("LEARNING_START_UTC",DEFAULT_LEARNING_START_UTC).strip()
-            try:
-                self.started_at=datetime.fromisoformat(start_text.replace("Z","+00:00")).astimezone(timezone.utc).timestamp()
-            except Exception:
-                self.started_at=time.time()
-            self.db.set_meta("started_at",str(self.started_at))
-        self.robot_cache: dict[str, tuple[float, RobotFileParser | None]]={}
-        self.queue: asyncio.Queue[tuple[str,str,str]] = asyncio.Queue()
+            raw=os.getenv("LEARNING_START_UTC",DEFAULT_LEARNING_START_UTC).strip()
+            try:self.started_at=datetime.fromisoformat(raw.replace("Z","+00:00")).astimezone(timezone.utc).timestamp()
+            except Exception:self.started_at=time.time()
+            self.db.set_meta("started_at",self.started_at)
+        self.model=ForwardCandleModel(self.db)
+        self.robot_cache={}
+        self.queue=asyncio.Queue()
         self.enqueued=set()
-        self.metrics={"discovered":0,"fetched":0,"errors":0,"evidence":0,"runs":0}
+        self.last_market_ts={}
+        self.pending_forecasts={}
+        self.metrics={"discovered":0,"fetched":0,"errors":0,"evidence":0,"runs":0,"searches":0,"deduped":0}
+        self.lang_counts=defaultdict(int)
 
-    def day(self) -> int:
-        elapsed=max(0,time.time()-self.started_at)
-        return min(LEARNING_DAYS, int(elapsed//86400)+1)
-
-    def stage(self) -> str:
-        stages=[
-            "M1 foundations + market structure",
-            "candlesticks + price action",
-            "EMA/RSI/MACD/Stochastic",
-            "VWAP/ATR/volatility",
-            "breakout + retest",
-            "pullback + continuation",
-            "reversal + divergence",
-            "support/resistance + liquidity",
-            "session + timing behaviour",
-            "false signals + no-trade filters",
-            "cross-method comparison",
-            "asset/session specialization",
-            "demo-result validation",
-            "own-strategy synthesis",
-            "final consolidation + audit",
-        ]
+    def day(self):
+        return min(LEARNING_DAYS,max(1,int(max(0,time.time()-self.started_at)//86400)+1))
+    def stage(self):
+        stages=["M1 foundation + structure","candlesticks + next-candle behaviour","EMA/RSI/MACD/Stochastic",
+                "VWAP/ATR/volatility regimes","breakout + retest","pullback + continuation","reversal + divergence",
+                "support/resistance + liquidity","session + timing","false signals + no-trade filters",
+                "microstructure + volume","advanced indicator combinations","AI/ML + statistical methods",
+                "walk-forward/demo validation","own-strategy synthesis + final audit"]
         return stages[self.day()-1]
-
-    def status(self) -> dict:
-        domains=self.db.source_count()
-        pages=self.db.pages_count()
-        return {
-            "enabled": os.getenv("SELF_LEARNING_ENABLED","true").strip().lower()!="false",
-            "program_day": self.day(),
-            "program_total_days": LEARNING_DAYS,
-            "stage": self.stage(),
-            "target_sites": TARGET_SITES,
-            "unique_sites": domains,
-            "progress_pct": round(100*domains/TARGET_SITES,2),
-            "daily_target": TARGET_DAILY,
-            "pages_scanned": pages,
-            "queue_depth": self.queue.qsize(),
-            "metrics": dict(self.metrics),
-        }
-
-    def _enqueue(self, url: str, language: str, source: str) -> None:
+    def status(self):
+        domains=self.db.source_count(); remaining=max(0,TARGET_SITES-domains)
+        hours_left=max(1,(LEARNING_DAYS-(self.day()-1))*24)
+        return {"enabled":os.getenv("SELF_LEARNING_ENABLED","true").strip().lower()!="false",
+                "program_day":self.day(),"program_total_days":LEARNING_DAYS,"stage":self.stage(),
+                "target_sites":TARGET_SITES,"unique_sites":domains,"sites_remaining":remaining,
+                "progress_pct":round(100*domains/TARGET_SITES,2),"daily_target":TARGET_DAILY,
+                "required_sites_per_hour":round(remaining/hours_left,1),"pages_scanned":self.db.pages_count(),
+                "queue_depth":self.queue.qsize(),"languages_seen":dict(sorted(self.lang_counts.items(),key=lambda x:-x[1])[:24]),
+                "next_candle_model":self.db.forecast_stats(),"metrics":dict(self.metrics)}
+    def _enqueue(self,url,language,origin,priority=0):
         u=_clean_url(url)
-        if not u:
-            return
-        key=u+"|"+language
-        if key in self.enqueued or self.db.page_seen(u):
-            return
+        if not u or self.db.page_seen(u):return
+        key=u
+        if key in self.enqueued:return
         self.enqueued.add(key)
-        try:
-            self.queue.put_nowait((u,language,source))
-            self.metrics["discovered"]+=1
-        except asyncio.QueueFull:
-            pass
-
-    async def _robots_ok(self, url: str) -> bool:
-        domain=_domain(url)
-        now=time.time()
-        cached=self.robot_cache.get(domain)
+        try:self.queue.put_nowait((u,language,origin,priority));self.metrics["discovered"]+=1
+        except asyncio.QueueFull:pass
+    async def _robots_ok(self,url):
+        d=_domain(url);now=time.time();cached=self.robot_cache.get(d)
         if cached and now-cached[0]<21600:
-            rp=cached[1]
-            return True if rp is None else rp.can_fetch(USER_AGENT,url)
-        robots_url=f"https://{domain}/robots.txt"
+            rp=cached[1];return True if rp is None else rp.can_fetch(USER_AGENT,url)
         rp=RobotFileParser()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0,connect=3.0),headers={"User-Agent":USER_AGENT},follow_redirects=True) as client:
-                r=await client.get(robots_url)
-                if r.status_code>=400:
-                    rp=None
-                else:
-                    rp.parse(r.text.splitlines())
-        except Exception:
-            rp=None
-        self.robot_cache[domain]=(now,rp)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5,connect=3),headers={"User-Agent":USER_AGENT},follow_redirects=True) as c:
+                r=await c.get(f"https://{d}/robots.txt")
+                if r.status_code>=400:rp=None
+                else:rp.parse(r.text.splitlines())
+        except Exception:rp=None
+        self.robot_cache[d]=(now,rp)
         return True if rp is None else rp.can_fetch(USER_AGENT,url)
-
-    async def _fetch_text(self, client:httpx.AsyncClient,url:str) -> tuple[str,str,int, list[tuple[str,str]]]:
-        r=await client.get(url,headers={"User-Agent":USER_AGENT,"Accept":"text/html,application/xhtml+xml"},follow_redirects=True)
-        r.raise_for_status()
-        ctype=r.headers.get("content-type","").lower()
-        if "text/html" not in ctype and "application/xhtml" not in ctype:
-            return "","",r.status_code,[]
-        raw=r.content[:MAX_PAGE_BYTES]
-        text_content=raw.decode(r.encoding or "utf-8","ignore")
-        parser=PageParser()
-        parser.feed(text_content)
-        title=" ".join(parser.title_parts).strip()
-        body=" ".join(parser.text_parts).strip()
-        return title,body,r.status_code,parser.links
-
-    async def _crawl_one(self, item:tuple[str,str,str]) -> None:
-        url,language,origin=item
-        if not await self._robots_ok(url):
-            return
+    async def _fetch(self,url):
+        async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT,connect=4),follow_redirects=True,
+                                     headers={"User-Agent":USER_AGENT,"Accept":"text/html,application/xhtml+xml"}) as c:
+            r=await c.get(url);r.raise_for_status()
+            ctype=r.headers.get("content-type","").lower()
+            if "html" not in ctype:return "","",r.status_code,[]
+            parser=PageParser();parser.feed(r.content[:MAX_PAGE_BYTES].decode(r.encoding or "utf-8","ignore"))
+            return _normalize_text(" ".join(parser.text_parts))," ".join(parser.title_parts).strip(),r.status_code,parser.links
+    async def _crawl_one(self,item):
+        url,lang,origin,_=item
+        if not await self._robots_ok(url):return
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT,connect=4.0)) as client:
-                title,body,status,links=await self._fetch_text(client,url)
-            if not body:
-                return
-            fp=_content_fingerprint(body)
-            self.db.save_page(url,title,fp,len(body),status)
-            self.db.add_source(url,language)
-            self.metrics["fetched"]+=1
-            for evidence in _extract_candidates(body,title,url):
-                self.db.save_evidence(evidence)
-                self.metrics["evidence"]+=1
-
-            # Limited same-site expansion. This discovers more pages without
-            # allowing one domain to dominate the 10,000-site target.
-            base_domain=_domain(url)
+            body,title,status,links=await self._fetch(url)
+            if len(body)<120:return
+            detected=_script_language(body) if lang in {"unknown","auto"} else lang
+            fp=_fingerprint(body);sh=_simhash(body)
+            self.db.add_source(url,detected)
+            if self.db.near_duplicate(sh) and self.db.pages_count()>100:
+                self.metrics["deduped"]+=1
+            else:
+                self.db.save_page(url,title,fp,sh,len(body),status,detected)
+                self.metrics["fetched"]+=1
+                self.lang_counts[detected]+=1
+                for e in _extract_evidence(body,title,url,detected):
+                    self.db.save_evidence(e);self.metrics["evidence"]+=1
+            # Sitemap and focused same-domain expansion.
+            d=_domain(url);path=urlparse(url).path.lower()
+            if path in {"/",""} or path.endswith("home"):
+                for sm in (f"https://{d}/sitemap.xml",f"https://{d}/sitemap_index.xml"):
+                    self._enqueue(sm,detected,"sitemap")
             added=0
             for href,label in links:
-                if added>=3:
-                    break
-                target=_clean_url(href,url)
-                if not target or _domain(target)!=base_domain:
-                    continue
-                path=urlparse(target).path.lower()
-                if any(x in path for x in ("/login","/signup","/register","/account","/checkout")):
-                    continue
-                if not any(k in (target+" "+label).lower() for k in (
-                    "scalp","strategy","1-minute","1minute","m1","price-action","candlestick",
-                    "ema","rsi","vwap","breakout","pullback","retest","market-structure"
-                )):
-                    continue
-                self._enqueue(target,language,"internal")
-                added+=1
+                if added>=5:break
+                target=_clean_url(_unwrap_search_href(href),url)
+                if not target or _domain(target)!=d:continue
+                t=(target+" "+label).lower()
+                if any(x in t for x in ("/login","/signup","/register","/account","/checkout")):continue
+                if any(k in t for k in ("m1","1-minute","1minute","scalp","candle","candlestick","price-action",
+                                        "market-structure","breakout","pullback","retest","next-candle","forecast",
+                                        "ema","rsi","vwap","bollinger","atr","order-flow","volume-profile")):
+                    self._enqueue(target,detected,"internal");added+=1
         except Exception as e:
-            self.metrics["errors"]+=1
-            log.debug("LEARNING_FETCH_FAILED url=%s error=%s",url,e)
-
-    async def _discover_query(self, query:str,language:str) -> int:
-        found=0
-        engines=[
-            f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
-            f"https://www.google.com/search?q={quote_plus(query)}&num=20",
+            self.metrics["errors"]+=1;log.debug("LEARNING_FETCH_FAILED url=%s error=%s",url,e)
+    async def _search(self,query,language):
+        self.metrics["searches"]+=1
+        endpoints=[
+            "https://html.duckduckgo.com/html/?q="+quote_plus(query),
+            "https://www.google.com/search?q="+quote_plus(query)+"&num=20",
+            "https://www.bing.com/search?q="+quote_plus(query),
         ]
-        for endpoint in engines:
+        for endpoint in endpoints:
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0,connect=4.0),headers={"User-Agent":USER_AGENT},follow_redirects=True) as client:
-                    r=await client.get(endpoint)
-                if r.status_code>=400:
-                    continue
-                parser=PageParser()
-                parser.feed(r.text)
-                for href,label in parser.links:
-                    target=_clean_url(href)
-                    if not target:
-                        continue
-                    domain=_domain(target)
-                    if domain in {"google.com","googleusercontent.com","duckduckgo.com","bing.com"}:
-                        continue
-                    self._enqueue(target,language,"search")
-                    found+=1
-                if found:
-                    break
+                async with httpx.AsyncClient(timeout=httpx.Timeout(8,connect=4),headers={"User-Agent":USER_AGENT},follow_redirects=True) as c:
+                    r=await c.get(endpoint)
+                if r.status_code>=400:continue
+                p=PageParser();p.feed(r.text)
+                found=0
+                for href,label in p.links:
+                    target=_clean_url(_unwrap_search_href(href))
+                    if not target:continue
+                    d=_domain(target)
+                    if not d or d in SEARCH_HOSTS:continue
+                    self._enqueue(target,language,"search");found+=1
+                if found:return found
             except Exception as e:
-                self.metrics["errors"]+=1
-                log.debug("LEARNING_SEARCH_FAILED engine=%s query=%s error=%s",endpoint,query,e)
-        return found
-
-    def synthesize(self) -> dict:
+                self.metrics["errors"]+=1;log.debug("LEARNING_SEARCH_FAILED query=%s %s",query,e)
+        return 0
+    def _queries(self):
+        methods=list(METHOD_LIBRARY)
+        # Query families intentionally emphasize pre-candle / forward-only research.
+        suffixes=["backtest","out of sample","walk forward","next candle","M1","1 minute"]
+        allq=[]
+        for lang,base in LANGUAGE_QUERIES.items():
+            for q in base:
+                allq.append((q,lang))
+            for m in methods[0:10]:
+                label=m.replace("_"," ")
+                allq.append((f"{q if base else ''} {label} next candle backtest",lang))
+        # Deterministic rotation avoids repeating the same first pages forever.
+        return allq
+    async def _discover(self):
+        qs=self._queries();n=len(qs)
+        start=(self.metrics["runs"]*11+self.day()*7)%max(1,n)
+        chosen=[]
+        # 12 queries/run across languages; adaptive when far behind target.
+        batch=12 if self.db.source_count()<TARGET_SITES else 4
+        for i in range(min(batch,n)):
+            item=qs[(start+i)%n]
+            if item not in chosen:chosen.append(item)
+        found=await asyncio.gather(*(self._search(q,l) for q,l in chosen),return_exceptions=True)
+        return sum(int(x) for x in found if isinstance(x,int))
+    def _market_normalize(self,candles):
+        out=[]
+        for c in candles or []:
+            if not isinstance(c,dict):continue
+            try:
+                t=float(c.get("time",c.get("t")));o=float(c.get("open",c.get("o")));h=float(c.get("high",c.get("h")))
+                lo=float(c.get("low",c.get("l")));cl=float(c.get("close",c.get("c")))
+                if t>20_000_000_000:t/=1000
+                out.append({"time":int(t//60)*60,"open":o,"high":h,"low":lo,"close":cl})
+            except Exception:continue
+        uniq={x["time"]:x for x in out};return [uniq[k] for k in sorted(uniq)]
+    def record_market_snapshot(self,pair,candles,price=None,timestamp=None):
+        cs=self._market_normalize(candles)
+        if len(cs)<25:return
+        now=time.time() if timestamp is None else float(timestamp)
+        latest=cs[-1];ts=int(latest["time"])
+        if self.last_market_ts.get(pair)==ts:return
+        self.last_market_ts[pair]=ts
+        # First close of a new candle settles the prediction made before it existed.
+        pending=self.pending_forecasts.get(pair)
+        if pending and int(pending["target_ts"])==ts:
+            actual="UP" if latest["close"]>pending["anchor_close"] else "DOWN" if latest["close"]<pending["anchor_close"] else "TIE"
+            result="WIN" if actual==pending["direction"] else "LOSS" if actual in {"UP","DOWN"} else "TIE"
+            self.db.conn.execute("UPDATE candle_forecasts SET result=? WHERE pair=? AND prediction_ts=?",
+                                 (result,pair,pending["prediction_ts"]));self.db.conn.commit()
+            if result=="WIN":self.model.update(pending["features"],actual)
+            elif result=="LOSS":self.model.update(pending["features"],actual)
+            self.pending_forecasts.pop(pair,None)
+        anchor=cs[:-0] if False else cs
+        f=self.model.features(anchor)
+        if not f:return
+        direction,p=self.model.predict(f)
+        pred_ts=int(latest["time"]);target_ts=pred_ts+60
+        try:
+            self.db.conn.execute("""INSERT OR IGNORE INTO candle_forecasts
+              (pair,prediction_ts,target_ts,direction,probability,feature_json,created_at)
+              VALUES(?,?,?,?,?,?,?)""",(pair,pred_ts,target_ts,direction,float(p),json.dumps(f),now))
+            self.db.conn.commit()
+            self.pending_forecasts[pair]={"prediction_ts":pred_ts,"target_ts":target_ts,"direction":direction,
+                                          "probability":p,"features":f,"anchor_close":float(latest["close"])}
+        except Exception as e:log.debug("FORECAST_STORE_FAILED pair=%s %s",pair,e)
+    def synthesize(self):
         methods=[]
         for row in self.db.method_rows():
             stats=self.db.demo_stats(row["method_id"])
-            # Web evidence is never treated as profitability proof. Candidate
-            # promotion requires independent sources plus demo validation.
-            eligible_web=int(row["domains"])>=3 and float(row["avg_score"])>=0.55 and int(row["clean_evidence"])>=3
-            demo_validated=stats["samples"]>=20 and stats["win_rate"]>50.0
-            methods.append({
-                "method_id":row["method_id"],
-                "independent_domains":int(row["domains"]),
-                "avg_evidence_score":round(float(row["avg_score"]),3),
-                "clean_evidence":int(row["clean_evidence"]),
-                "demo":stats,
-                "status":"DEMO_VALIDATED" if demo_validated else ("RESEARCH_CANDIDATE" if eligible_web else "WATCH"),
-                "active_live_brain":False,
-            })
-        result={
-            "program":{
-                "days":LEARNING_DAYS,
-                "target_sites":TARGET_SITES,
-                "started_at":self.started_at,
-                "day":self.day(),
-                "stage":self.stage(),
-            },
-            "rules":{
-                "web_claims_are_not_proof":True,
-                "minimum_independent_domains":3,
-                "demo_samples_for_promotion":20,
-                "auto_trade":False,
-            },
-            "methods":methods,
-            "status":self.status(),
-        }
+            web_ok=int(row["domains"])>=5 and float(row["avg_score"])>=.55 and int(row["clean_evidence"])>=5
+            methods.append({"method_id":row["method_id"],"independent_domains":int(row["domains"]),
+                            "avg_evidence_score":round(float(row["avg_score"]),3),"clean_evidence":int(row["clean_evidence"]),
+                            "demo":stats,"status":"RESEARCH_CANDIDATE" if web_ok else "WATCH","active_live_brain":False})
+        fs=self.db.forecast_stats()
+        own= "WATCH" if fs["samples"]<100 else ("FORWARD_VALIDATED_CANDIDATE" if fs["accuracy"]>=55 else "REJECT_AND_RESEARCH")
+        result={"program":{"days":LEARNING_DAYS,"target_sites":TARGET_SITES,"started_at":self.started_at,
+                           "day":self.day(),"stage":self.stage()},
+                "rules":{"web_claims_are_not_proof":True,"forward_only_labels":True,"no_future_leakage":True,
+                         "minimum_independent_domains":5,"forecast_samples_for_candidate":100,"auto_trade":False},
+                "next_candle_model":{"status":own,"stats":fs,"features":list(ForwardCandleModel.NAMES)},
+                "methods":methods,"status":self.status()}
         tmp=STATE_JSON+".tmp"
-        with open(tmp,"w",encoding="utf-8") as f:
-            json.dump(result,f,ensure_ascii=False,indent=2)
-        os.replace(tmp,STATE_JSON)
-        return result
-
-    async def run_once(self) -> dict:
-        self.metrics["runs"]+=1
-        # Adaptive discovery: near the requested 15-day rate, favor search;
-        # once the queue is healthy, spend cycles on evidence extraction.
-        current=self.db.source_count()
-        remaining=max(0,TARGET_SITES-current)
-        hours_left=max(1,(LEARNING_DAYS-(self.day()-1))*24)
-        target_per_hour=max(8,math.ceil(remaining/hours_left))
-
-        languages=list(LANGUAGE_QUERIES)
-        # deterministic rotation by program day and run count
-        start=(self.day()*3+self.metrics["runs"])%len(languages)
-        chosen=[languages[(start+i)%len(languages)] for i in range(min(6,len(languages)))]
-        per_lang=max(1,min(4,math.ceil(target_per_hour/40)))
-        for lang in chosen:
-            qs=LANGUAGE_QUERIES[lang]
-            offset=(self.metrics["runs"]+self.day())%len(qs)
-            for j in range(min(per_lang,len(qs))):
-                await self._discover_query(qs[(offset+j)%len(qs)],lang)
-
+        with open(tmp,"w",encoding="utf-8") as f:json.dump(result,f,ensure_ascii=False,indent=2)
+        os.replace(tmp,STATE_JSON);return result
+    async def run_once(self):
+        self.metrics["runs"]+=1;started=time.time()
+        found=await self._discover()
         workers=[]
         while not self.queue.empty() and len(workers)<MAX_CONCURRENCY*2:
             workers.append(asyncio.create_task(self._crawl_one(await self.queue.get())))
-        if workers:
-            await asyncio.gather(*workers,return_exceptions=True)
-
-        snapshot=self.synthesize()
-        log.info(
-            "SELF_LEARNING_PROGRESS day=%d stage=%s sites=%d/%d pages=%d evidence=%d queue=%d",
-            self.day(),self.stage(),self.db.source_count(),TARGET_SITES,
-            self.db.pages_count(),len(snapshot["methods"]),self.queue.qsize()
-        )
-        return snapshot
-
-    async def loop(self) -> None:
+        if workers:await asyncio.gather(*workers,return_exceptions=True)
+        snap=self.synthesize()
+        self.db.conn.execute("INSERT INTO research_runs(started_at,finished_at,discovered,fetched,evidence,errors) VALUES(?,?,?,?,?,?)",
+                             (started,time.time(),found,self.metrics["fetched"],self.metrics["evidence"],self.metrics["errors"]));self.db.conn.commit()
+        log.info("SELF_LEARNING_PROGRESS day=%d stage=%s sites=%d/%d pages=%d evidence=%d queue=%d next1m=%s",
+                 self.day(),self.stage(),self.db.source_count(),TARGET_SITES,self.db.pages_count(),
+                 len(snap["methods"]),self.queue.qsize(),snap["next_candle_model"])
+        return snap
+    async def loop(self):
         if os.getenv("SELF_LEARNING_ENABLED","true").strip().lower()=="false":
-            log.info("SELF_LEARNING_DISABLED")
-            return
+            log.info("SELF_LEARNING_DISABLED");return
         while True:
-            try:
-                await self.run_once()
-            except Exception:
-                log.exception("SELF_LEARNING_RUN_FAILED")
+            try:await self.run_once()
+            except Exception:log.exception("SELF_LEARNING_RUN_FAILED")
             await asyncio.sleep(RUN_INTERVAL_SECONDS)
-
-    def record_demo_result(self, method_id:str,result:str) -> None:
-        self.db.add_demo_result(method_id,result)
-
+    def record_demo_result(self,method_id,result):self.db.add_demo(method_id,result)
 
 LEARNING_ENGINE=SelfLearningEngine()
-
-def learning_status() -> dict:
-    return LEARNING_ENGINE.status()
-
-def record_demo_result(method_id: str, result: str) -> None:
-    LEARNING_ENGINE.record_demo_result(method_id, result)
-
-async def self_learning_loop() -> None:
-    await LEARNING_ENGINE.loop()
+def learning_status():return LEARNING_ENGINE.status()
+def record_demo_result(method_id,result):LEARNING_ENGINE.record_demo_result(method_id,result)
+def record_market_snapshot(pair,candles,price=None,timestamp=None):LEARNING_ENGINE.record_market_snapshot(pair,candles,price,timestamp)
+async def self_learning_loop():await LEARNING_ENGINE.loop()
