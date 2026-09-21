@@ -29,6 +29,8 @@ class BrainState:
         key=self.duplicate_key(kw["pair"],kw["entry_candle_ts"])
         if key in self.sent_keys:raise RuntimeError("Duplicate asset/entry candle")
         self.sent_keys.add(key);self.cycle_signal_sent=True
+        if not kw.get("decision_candle_closed", True):
+            raise ValueError("Signal requires a fully closed 1m decision candle")
         s=ActiveSignal(cycle_id=self.cycle_id,pair=str(kw["pair"]),display_name=str(kw["display_name"]),direction=str(kw["direction"]).upper(),expiry_minutes=int(kw["expiry_minutes"]),entry_price=float(kw["entry_price"]),entry_ts=float(kw["entry_ts"]),entry_candle_ts=kw["entry_candle_ts"],strategy=str(kw.get("strategy","")),reason=str(kw.get("reason","")),confidence=int(kw.get("confidence",0)),pattern=str(kw.get("pattern","")),trend_15m=str(kw.get("trend_15m","")),structure_1m=str(kw.get("structure_1m","")))
         self.active_signals[f"{s.cycle_id}:{s.pair}:{s.entry_ts}"]=s
         return s
