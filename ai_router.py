@@ -169,6 +169,22 @@ def _cooldown(name: str, seconds: float | None = None) -> None:
 
 def _prompt(snapshot: MarketSnapshot) -> str:
     request = build_ai_request(snapshot)
+    # The technical brain keeps its full 120-candle history locally. The AI is
+    # only a verification layer, so send a compact recent window to reduce
+    # token pressure and make 429s less likely without changing brain logic.
+    candles = request.get("market", {}).get("candles", [])
+    compact = []
+    for c in candles[-36:]:
+        if not isinstance(c, dict):
+            continue
+        compact.append({
+            "t": c.get("time", c.get("t")),
+            "o": c.get("open", c.get("o")),
+            "h": c.get("high", c.get("h")),
+            "l": c.get("low", c.get("l")),
+            "c": c.get("close", c.get("c")),
+        })
+    request["market"]["candles"] = compact
     return (
         "You are Candice Brain's verification layer. Analyze only supplied live "
         "OHLC/market evidence. Do not invent data. Return JSON only: direction "
