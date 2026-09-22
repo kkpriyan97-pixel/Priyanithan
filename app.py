@@ -905,7 +905,7 @@ async def market_worker():
                         len(STATE["assets"]),len(subscribed)
                     )
 
-                # Rotate candle-history refreshes in small batches; never block the 5-minute scheduler.
+                # Rotate candle-history refreshes in small batches; never block the 3-minute scheduler.
                 if not history_seed_done:
                     await refresh_history_batch(limit=24,force=True)
                     history_seed_done=(
