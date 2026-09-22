@@ -659,8 +659,8 @@ async def result_watch(key):
 
 async def cycle_loop():
     """
-    Deterministic 5-minute scheduler:
-      T-180, T-120, T-60 = full-universe analysis snapshots
+    Deterministic 3-minute scheduler:
+      T-120, T-90, T-60 = full-universe analysis snapshots
       T-30 = signal emission only; never block on candle/history/AI network work
     """
     while True:
