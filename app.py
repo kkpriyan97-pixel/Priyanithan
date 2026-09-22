@@ -698,7 +698,14 @@ async def cycle_loop():
                     )
 
             # No candle API/network wait here. The background market worker feeds state.
-            await refresh_candles()
+            try:
+                await refresh_candles()
+            except Exception as e:
+                # One bad asset/candle must never terminate the deterministic cycle loop.
+                log.exception(
+                    "CYCLE_ANALYSIS_ISOLATED_FAILURE cycle=%s scan=%d error=%s",
+                    cycle_id,scan_no,e
+                )
             log.info(
                 "FULL_ASSET_SCAN cycle=%s scan=%d/3 assets=%d qualified=%d duration=%.3f",
                 cycle_id,scan_no,len(STATE["assets"]),len(STATE["analyses"]),
