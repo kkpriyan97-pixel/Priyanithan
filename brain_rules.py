@@ -1,9 +1,9 @@
-"""Candice Brain state: one final signal per 5-minute cycle, overlapping result tracking."""
+"""Candice Brain state: one final signal per 3-minute cycle, overlapping result tracking."""
 from __future__ import annotations
 from dataclasses import dataclass,field
 from datetime import datetime,timezone
 from typing import Any
-COOLDOWN_SECONDS=900;MIN_CONFIDENCE=90;CYCLE_SECONDS=300
+COOLDOWN_SECONDS=900;MIN_CONFIDENCE=90;CYCLE_SECONDS=180
 def utc_now():return datetime.now(timezone.utc).timestamp()
 @dataclass
 class ActiveSignal:
@@ -51,4 +51,33 @@ class BrainState:
             if float(u)<=now:self.cooldown_until.pop(p,None)
 def rank_signal_candidates(candidates):
     q=[x for x in candidates if int(x.get("confidence") or 0)>=MIN_CONFIDENCE and str(x.get("direction","")).upper() in {"UP","DOWN"}]
-    return sorted(q,key=lambda x:(int(x.get("confidence") or 0),float(x.get("market_quality") or 0),int(x.get("profitability") or 0)),reverse=True)
+    try:
+        from validated_knowledge import knowledge_for_method
+    except Exception:
+        knowledge_for_method=None
+
+    for x in q:
+        x["validated_knowledge_weight"]=0.0
+        x["validated_knowledge_version"]=0
+        if knowledge_for_method:
+            method_id={
+                "TREND_FOLLOWING":"trend_following",
+                "PULLBACK":"pullback_retest",
+                "BREAKOUT":"breakout",
+                "MEAN_REVERSION":"rejection_reversal",
+            }.get(str(x.get("strategy","")).upper(),"")
+            if method_id:
+                k=knowledge_for_method(method_id)
+                if k:
+                    x["validated_knowledge_weight"]=max(0.0,min(1.0,float(k.get("weight",0.0))))
+                    x["validated_knowledge_version"]=int(k.get("version",0))
+    return sorted(
+        q,
+        key=lambda x:(
+            int(x.get("confidence") or 0),
+            float(x.get("market_quality") or 0),
+            int(x.get("profitability") or 0),
+            float(x.get("validated_knowledge_weight") or 0),
+        ),
+        reverse=True,
+    )
