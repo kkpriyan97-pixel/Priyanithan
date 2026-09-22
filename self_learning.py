@@ -266,9 +266,33 @@ class LearningDB:
           pair TEXT NOT NULL,prediction_ts INTEGER NOT NULL,target_ts INTEGER NOT NULL,direction TEXT NOT NULL,probability REAL NOT NULL,
           feature_json TEXT NOT NULL,result TEXT,created_at REAL NOT NULL,PRIMARY KEY(pair,prediction_ts));
         CREATE TABLE IF NOT EXISTS model_weights(name TEXT PRIMARY KEY,weight REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS strategy_candidates(
+          method_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          practice_started_at REAL,
+          practice_until REAL,
+          human_accepted_at REAL,
+          last_demo_at REAL,
+          last_error_learning_at REAL,
+          updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS validated_knowledge(
+          knowledge_id TEXT PRIMARY KEY,
+          method_id TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          weight REAL NOT NULL,
+          entry_conditions_json TEXT NOT NULL,
+          no_trade_conditions_json TEXT NOT NULL,
+          error_filters_json TEXT NOT NULL,
+          human_accepted_at REAL NOT NULL,
+          created_at REAL NOT NULL,
+          UNIQUE(method_id,version)
+        );
         CREATE TABLE IF NOT EXISTS research_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,started_at REAL,finished_at REAL,discovered INTEGER,fetched INTEGER,evidence INTEGER,errors INTEGER);
         CREATE INDEX IF NOT EXISTS idx_evidence_method ON method_evidence(method_id);
         CREATE INDEX IF NOT EXISTS idx_forecast_pair ON candle_forecasts(pair);
+        CREATE INDEX IF NOT EXISTS idx_validated_method ON validated_knowledge(method_id,status,version);
         """)
         self.conn.commit()
     def meta(self,k,d=""):
@@ -310,6 +334,124 @@ class LearningDB:
         rows=self.conn.execute("SELECT result,COUNT(*) n FROM demo_results WHERE method_id=? GROUP BY result",(method_id,)).fetchall()
         d={r["result"]:int(r["n"]) for r in rows};total=sum(d.values())
         return {"samples":total,"wins":d.get("WIN",0),"losses":d.get("LOSS",0),"ties":d.get("TIE",0),"win_rate":round(100*d.get("WIN",0)/max(1,total),2)}
+
+    def ensure_candidate(self,method_id):
+        mid=str(method_id)
+        now=time.time()
+        row=self.conn.execute("SELECT method_id,status FROM strategy_candidates WHERE method_id=?",(mid,)).fetchone()
+        if row:return str(row["status"])
+        self.conn.execute(
+            "INSERT INTO strategy_candidates(method_id,status,updated_at) VALUES(?,?,?)",
+            (mid,"DISCOVERED",now),
+        )
+        self.conn.commit()
+        return "DISCOVERED"
+
+    def candidate(self,method_id):
+        return self.conn.execute(
+            "SELECT * FROM strategy_candidates WHERE method_id=?",(str(method_id),)
+        ).fetchone()
+
+    def start_practice(self,method_id,started_at=None):
+        now=time.time() if started_at is None else float(started_at)
+        row=self.candidate(method_id)
+        if row and str(row["status"]) in {"VALIDATED","REJECTED"}:
+            raise ValueError("Candidate is not eligible for a new practice cycle")
+        until=now+2*60*60
+        self.conn.execute(
+            """INSERT INTO strategy_candidates(method_id,status,practice_started_at,practice_until,updated_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(method_id) DO UPDATE SET
+                 status='PRACTICE',practice_started_at=excluded.practice_started_at,
+                 practice_until=excluded.practice_until,updated_at=excluded.updated_at""",
+            (str(method_id),"PRACTICE",now,until,now),
+        )
+        self.conn.commit()
+        return True
+
+    def refresh_candidate_state(self,method_id,now=None):
+        now=time.time() if now is None else float(now)
+        row=self.candidate(method_id)
+        if not row:return None
+        status=str(row["status"])
+        until=float(row["practice_until"] or 0)
+        if status=="PRACTICE" and until and now>=until:
+            self.conn.execute(
+                "UPDATE strategy_candidates SET status='AWAITING_HUMAN_ACCEPT',updated_at=? WHERE method_id=?",
+                (now,str(method_id)),
+            )
+            self.conn.commit()
+            row=self.candidate(method_id)
+        return row
+
+    def human_accept(self,method_id,accepted_at=None):
+        now=time.time() if accepted_at is None else float(accepted_at)
+        row=self.refresh_candidate_state(method_id,now)
+        if not row or str(row["status"])!="AWAITING_HUMAN_ACCEPT":
+            raise ValueError("Human ACCEPT requires completed 2-hour demo practice")
+        self.conn.execute(
+            "UPDATE strategy_candidates SET status='HUMAN_ACCEPTED',human_accepted_at=?,updated_at=? WHERE method_id=?",
+            (now,now,str(method_id)),
+        )
+        self.conn.commit()
+        return True
+
+    def mark_error_learning(self,method_id,learned_at=None):
+        now=time.time() if learned_at is None else float(learned_at)
+        row=self.candidate(method_id)
+        if not row or str(row["status"])!="HUMAN_ACCEPTED":
+            raise ValueError("Error learning requires Human ACCEPT")
+        self.conn.execute(
+            "UPDATE strategy_candidates SET last_error_learning_at=?,updated_at=? WHERE method_id=?",
+            (now,now,str(method_id)),
+        )
+        self.conn.commit()
+        return True
+
+    def promote_validated_knowledge(self,method_id,entry_conditions,no_trade_conditions,error_filters,weight,created_at=None):
+        now=time.time() if created_at is None else float(created_at)
+        row=self.candidate(method_id)
+        if not row or str(row["status"])!="HUMAN_ACCEPTED":
+            raise ValueError("Validation requires Human ACCEPT after the 2-hour practice window")
+        if not row["last_error_learning_at"]:
+            raise ValueError("Validation requires error learning")
+        stats=self.demo_stats(method_id)
+        if stats["samples"]<1:
+            raise ValueError("Validation requires demo result data")
+        mid=str(method_id)
+        previous=self.conn.execute(
+            "SELECT COALESCE(MAX(version),0) v FROM validated_knowledge WHERE method_id=?",(mid,)
+        ).fetchone()
+        version=int(previous["v"] or 0)+1
+        knowledge_id=f"{mid}:v{version}"
+        bounded_weight=max(0.0,min(1.0,float(weight)))
+        self.conn.execute(
+            """INSERT INTO validated_knowledge(
+                 knowledge_id,method_id,version,status,weight,
+                 entry_conditions_json,no_trade_conditions_json,error_filters_json,
+                 human_accepted_at,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                knowledge_id,mid,version,"VALIDATED",bounded_weight,
+                json.dumps(entry_conditions,ensure_ascii=False,sort_keys=True),
+                json.dumps(no_trade_conditions,ensure_ascii=False,sort_keys=True),
+                json.dumps(error_filters,ensure_ascii=False,sort_keys=True),
+                float(row["human_accepted_at"]),now,
+            ),
+        )
+        self.conn.execute(
+            "UPDATE strategy_candidates SET status='VALIDATED',updated_at=? WHERE method_id=?",
+            (now,mid),
+        )
+        self.conn.commit()
+        return knowledge_id
+
+    def latest_validated(self,method_id):
+        return self.conn.execute(
+            """SELECT * FROM validated_knowledge
+               WHERE method_id=? AND status='VALIDATED'
+               ORDER BY version DESC LIMIT 1""",(str(method_id),)
+        ).fetchone()
     def forecast_stats(self):
         r=self.conn.execute("""SELECT COUNT(*) n,SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) wins,
           SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) losses FROM candle_forecasts WHERE result IS NOT NULL""").fetchone()
@@ -410,6 +552,8 @@ class SelfLearningEngine:
                 "progress_pct":round(100*domains/TARGET_SITES,2),"daily_target":TARGET_DAILY,
                 "required_sites_per_hour":round(remaining/hours_left,1),"pages_scanned":self.db.pages_count(),
                 "queue_depth":self.queue.qsize(),"languages_seen":dict(sorted(self.lang_counts.items(),key=lambda x:-x[1])[:24]),
+                "validated_knowledge":int(self.db.conn.execute("SELECT COUNT(*) FROM validated_knowledge WHERE status='VALIDATED'").fetchone()[0]),
+                "strategy_candidates":int(self.db.conn.execute("SELECT COUNT(*) FROM strategy_candidates").fetchone()[0]),
                 "next_candle_model":self.db.forecast_stats(),"metrics":dict(self.metrics)}
     def _enqueue(self,url,language,origin,priority=0):
         u=_clean_url(url)
@@ -592,9 +736,25 @@ class SelfLearningEngine:
         for row in self.db.method_rows():
             stats=self.db.demo_stats(row["method_id"])
             web_ok=int(row["domains"])>=5 and float(row["avg_score"])>=.55 and int(row["clean_evidence"])>=5
-            methods.append({"method_id":row["method_id"],"independent_domains":int(row["domains"]),
-                            "avg_evidence_score":round(float(row["avg_score"]),3),"clean_evidence":int(row["clean_evidence"]),
-                            "demo":stats,"status":"RESEARCH_CANDIDATE" if web_ok else "WATCH","active_live_brain":False})
+            mid=str(row["method_id"])
+            if web_ok:
+                self.db.ensure_candidate(mid)
+                candidate=self.db.refresh_candidate_state(mid)
+                validated=self.db.latest_validated(mid)
+                status=str(candidate["status"]) if candidate else "DISCOVERED"
+            else:
+                validated=self.db.latest_validated(mid)
+                status="WATCH"
+            methods.append({
+                "method_id":mid,
+                "independent_domains":int(row["domains"]),
+                "avg_evidence_score":round(float(row["avg_score"]),3),
+                "clean_evidence":int(row["clean_evidence"]),
+                "demo":stats,
+                "status":"VALIDATED" if validated else status,
+                "active_live_brain":bool(validated),
+                "validated_version":int(validated["version"]) if validated else 0,
+            })
         fs=self.db.forecast_stats()
         own= "WATCH" if fs["samples"]<100 else ("FORWARD_VALIDATED_CANDIDATE" if fs["accuracy"]>=55 else "REJECT_AND_RESEARCH")
         result={"program":{"days":LEARNING_DAYS,"target_sites":TARGET_SITES,"started_at":self.started_at,
@@ -627,10 +787,27 @@ class SelfLearningEngine:
             try:await self.run_once()
             except Exception:log.exception("SELF_LEARNING_RUN_FAILED")
             await asyncio.sleep(RUN_INTERVAL_SECONDS)
-    def record_demo_result(self,method_id,result):self.db.add_demo(method_id,result)
+    def record_demo_result(self,method_id,result):
+        mid=str(method_id)
+        self.db.add_demo(mid,result)
+        row=self.db.candidate(mid)
+        now=time.time()
+        if row:
+            self.db.conn.execute(
+                "UPDATE strategy_candidates SET last_demo_at=?,updated_at=? WHERE method_id=?",
+                (now,now,mid),
+            )
+            self.db.conn.commit()
 
 LEARNING_ENGINE=SelfLearningEngine()
 def learning_status():return LEARNING_ENGINE.status()
 def record_demo_result(method_id,result):LEARNING_ENGINE.record_demo_result(method_id,result)
+def start_demo_practice(method_id):return LEARNING_ENGINE.db.start_practice(method_id)
+def human_accept_candidate(method_id):return LEARNING_ENGINE.db.human_accept(method_id)
+def mark_error_learning(method_id):return LEARNING_ENGINE.db.mark_error_learning(method_id)
+def promote_validated_knowledge(method_id,entry_conditions,no_trade_conditions,error_filters,weight):
+    return LEARNING_ENGINE.db.promote_validated_knowledge(
+        method_id,entry_conditions,no_trade_conditions,error_filters,weight
+    )
 def record_market_snapshot(pair,candles,price=None,timestamp=None):LEARNING_ENGINE.record_market_snapshot(pair,candles,price,timestamp)
 async def self_learning_loop():await LEARNING_ENGINE.loop()
