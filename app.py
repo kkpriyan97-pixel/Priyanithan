@@ -28,6 +28,7 @@ CYCLE_REVIEW_TASKS={}
 SCAN_SYNC_TIMEOUT=6.0
 FINAL_CACHE_MAX_AGE=75.0
 AI_REVIEW_TIMEOUT=24.0
+MAX_REVIEW_TASKS_PER_CYCLE=12
 
 def pair_name(x):
     return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
@@ -429,6 +430,29 @@ async def prepare_cycle_candidates(cycle_id,scan_no):
         )
 
 
+async def _cleanup_review_tasks(keep_cycle=None):
+    """Cancel completed/obsolete AI review tasks so they cannot leak across cycles."""
+    pending=[]
+    for cid,tasks in list(CYCLE_REVIEW_TASKS.items()):
+        if keep_cycle is not None and cid==keep_cycle:
+            continue
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                pending.append(task)
+        CYCLE_REVIEW_TASKS.pop(cid,None)
+    if pending:
+        await asyncio.gather(*pending,return_exceptions=True)
+
+async def _finish_review_tasks(cycle_id):
+    """Release the current cycle's remaining review tasks after final selection."""
+    tasks=CYCLE_REVIEW_TASKS.pop(cycle_id,[])
+    pending=[task for task in tasks if not task.done()]
+    if pending:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending,return_exceptions=True)
+
 def select_cached_candidate(cycle_id):
     """Select a still-fresh AI-verified candidate without making a new network call."""
     now=time.time()
@@ -646,7 +670,10 @@ async def cycle_loop():
         BRAIN.start_cycle(int(cycle_id))
         STATE["cycle"]=int(cycle_id)
         STATE["last_cycle"]=next_boundary
-        CYCLE_CANDIDATES.pop(cycle_id-2,None)
+        await _cleanup_review_tasks()
+        for old_cycle in list(CYCLE_CANDIDATES):
+            if old_cycle < cycle_id-1:
+                CYCLE_CANDIDATES.pop(old_cycle,None)
 
         scan_targets=(next_boundary-180,next_boundary-120,next_boundary-60)
 
@@ -680,7 +707,13 @@ async def cycle_loop():
 
             # AI verification starts now and runs independently of the scheduler.
             task=asyncio.create_task(prepare_cycle_candidates(cycle_id,scan_no))
-            CYCLE_REVIEW_TASKS.setdefault(cycle_id,[]).append(task)
+            tasks=CYCLE_REVIEW_TASKS.setdefault(cycle_id,[])
+            tasks.append(task)
+            # Hard cap bookkeeping even if a future caller adds extra scans.
+            if len(tasks)>MAX_REVIEW_TASKS_PER_CYCLE:
+                old=tasks.pop(0)
+                if not old.done():
+                    old.cancel()
 
         final_target=next_boundary-30
         await asyncio.sleep(max(0,final_target-time.time()))
@@ -695,6 +728,7 @@ async def cycle_loop():
 
         candidate=select_cached_candidate(cycle_id)
         if not candidate:
+            await _finish_review_tasks(cycle_id)
             log.info(
                 "FINAL_NO_SIGNAL cycle=%s reason=no_fresh_ai_verified_candidate",
                 cycle_id
@@ -778,6 +812,7 @@ async def cycle_loop():
             f"{entry_age:.1f}" if entry_age is not None else "n/a",
             sent
         )
+        await _finish_review_tasks(cycle_id)
         asyncio.create_task(result_watch(key))
 
 async def market_worker():
