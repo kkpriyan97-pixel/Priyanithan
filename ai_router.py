@@ -247,7 +247,19 @@ async def _call_provider(
                     if status == 429:
                         # Stop hammering a provider that explicitly rate-limited us.
                         cooldown = retry_after if retry_after is not None else AI_PROVIDER_COOLDOWN
-                        _cooldown(name, min(max(cooldown, 5.0), 120.0))
+                        cooldown = min(max(cooldown, 5.0), 120.0)
+                        _cooldown(name, cooldown)
+                        log_msg = (
+                            f"AI_429 provider={name} retry_after="
+                            f"{retry_after if retry_after is not None else 'missing'} "
+                            f"cooldown={cooldown:.1f}s attempt={attempt+1}"
+                        )
+                        print(log_msg)
+                        # When the provider explicitly asks us to wait longer than
+                        # our bounded retry window, do not make another 429-causing
+                        # request. Move to fallback immediately.
+                        if retry_after is not None and retry_after > AI_RETRY_CAP_SECONDS:
+                            raise RuntimeError(f"{name} rate-limited; provider cooldown active")
 
                     if attempt >= AI_RETRY_LIMIT:
                         raise RuntimeError(f"{name} transient HTTP {status}")
