@@ -37,7 +37,9 @@ log=logging.getLogger("candice.learning")
 LEARNING_DAYS=15
 TARGET_SITES=10_000
 TARGET_DAILY=math.ceil(TARGET_SITES/LEARNING_DAYS)
-MAX_CONCURRENCY=max(4,int(os.getenv("LEARNING_MAX_CONCURRENCY","16")))
+MAX_CONCURRENCY=max(2,min(8,int(os.getenv("LEARNING_MAX_CONCURRENCY","6"))))
+SEARCH_CONCURRENCY=max(1,min(2,int(os.getenv("LEARNING_SEARCH_CONCURRENCY","2"))))
+REQUEST_GAP_SECONDS=max(0.05,float(os.getenv("LEARNING_REQUEST_GAP_SECONDS","0.20")))
 REQUEST_TIMEOUT=float(os.getenv("LEARNING_REQUEST_TIMEOUT","8"))
 RUN_INTERVAL_SECONDS=max(60,int(os.getenv("LEARNING_RUN_INTERVAL","120")))
 MAX_PAGE_BYTES=int(os.getenv("LEARNING_MAX_PAGE_BYTES","800000"))
@@ -379,6 +381,10 @@ class SelfLearningEngine:
             self.db.set_meta("started_at",self.started_at)
         self.model=ForwardCandleModel(self.db)
         self.robot_cache={}
+        self.http_gate=asyncio.Semaphore(MAX_CONCURRENCY)
+        self.search_gate=asyncio.Semaphore(SEARCH_CONCURRENCY)
+        self.request_rate_lock=asyncio.Lock()
+        self.next_request_at=0.0
         self.queue=asyncio.Queue()
         self.enqueued=set()
         self.last_market_ts={}
@@ -413,23 +419,36 @@ class SelfLearningEngine:
         self.enqueued.add(key)
         try:self.queue.put_nowait((u,language,origin,priority));self.metrics["discovered"]+=1
         except asyncio.QueueFull:pass
+    async def _pace_request(self):
+        """Keep research traffic sparse so it cannot compete with the live cycle."""
+        async with self.request_rate_lock:
+            now=time.monotonic()
+            wait=max(0.0,self.next_request_at-now)
+            self.next_request_at=max(now,self.next_request_at)+REQUEST_GAP_SECONDS
+        if wait:
+            await asyncio.sleep(wait)
+
     async def _robots_ok(self,url):
         d=_domain(url);now=time.time();cached=self.robot_cache.get(d)
         if cached and now-cached[0]<21600:
             rp=cached[1];return True if rp is None else rp.can_fetch(USER_AGENT,url)
         rp=RobotFileParser()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5,connect=3),headers={"User-Agent":USER_AGENT},follow_redirects=True) as c:
-                r=await c.get(f"https://{d}/robots.txt")
+            async with self.http_gate:
+                await self._pace_request()
+                async with httpx.AsyncClient(timeout=httpx.Timeout(5,connect=3),headers={"User-Agent":USER_AGENT},follow_redirects=True) as c:
+                    r=await c.get(f"https://{d}/robots.txt")
                 if r.status_code>=400:rp=None
                 else:rp.parse(r.text.splitlines())
         except Exception:rp=None
         self.robot_cache[d]=(now,rp)
         return True if rp is None else rp.can_fetch(USER_AGENT,url)
     async def _fetch(self,url):
-        async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT,connect=4),follow_redirects=True,
-                                     headers={"User-Agent":USER_AGENT,"Accept":"text/html,application/xhtml+xml"}) as c:
-            r=await c.get(url);r.raise_for_status()
+        async with self.http_gate:
+            await self._pace_request()
+            async with httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT,connect=4),follow_redirects=True,
+                                         headers={"User-Agent":USER_AGENT,"Accept":"text/html,application/xhtml+xml"}) as c:
+                r=await c.get(url);r.raise_for_status()
             ctype=r.headers.get("content-type","").lower()
             if "html" not in ctype:return "","",r.status_code,[]
             parser=PageParser();parser.feed(r.content[:MAX_PAGE_BYTES].decode(r.encoding or "utf-8","ignore"))
@@ -471,15 +490,17 @@ class SelfLearningEngine:
             self.metrics["errors"]+=1;log.debug("LEARNING_FETCH_FAILED url=%s error=%s",url,e)
     async def _search(self,query,language):
         self.metrics["searches"]+=1
-        endpoints=[
+        async with self.search_gate:
+            endpoints=[
             "https://html.duckduckgo.com/html/?q="+quote_plus(query),
             "https://www.google.com/search?q="+quote_plus(query)+"&num=20",
             "https://www.bing.com/search?q="+quote_plus(query),
         ]
-        for endpoint in endpoints:
-            try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(8,connect=4),headers={"User-Agent":USER_AGENT},follow_redirects=True) as c:
-                    r=await c.get(endpoint)
+            for endpoint in endpoints:
+                try:
+                    await self._pace_request()
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(8,connect=4),headers={"User-Agent":USER_AGENT},follow_redirects=True) as c:
+                        r=await c.get(endpoint)
                 if r.status_code>=400:continue
                 p=PageParser();p.feed(r.text)
                 found=0
@@ -490,9 +511,9 @@ class SelfLearningEngine:
                     if not d or d in SEARCH_HOSTS:continue
                     self._enqueue(target,language,"search");found+=1
                 if found:return found
-            except Exception as e:
-                self.metrics["errors"]+=1;log.debug("LEARNING_SEARCH_FAILED query=%s %s",query,e)
-        return 0
+                except Exception as e:
+                    self.metrics["errors"]+=1;log.debug("LEARNING_SEARCH_FAILED query=%s %s",query,e)
+            return 0
     def _queries(self):
         methods=list(METHOD_LIBRARY)
         # Query families intentionally emphasize pre-candle / forward-only research.
