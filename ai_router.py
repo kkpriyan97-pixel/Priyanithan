@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import random
 import time
@@ -28,6 +29,7 @@ import httpx
 
 from ai_engine import MarketSnapshot, build_ai_request, parse_ai_decision
 
+log = logging.getLogger("candice.ai")
 
 TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 AI_MAX_CONCURRENT = max(1, int(os.getenv("AI_MAX_CONCURRENT", "2")))
@@ -254,7 +256,7 @@ async def _call_provider(
                             f"{retry_after if retry_after is not None else 'missing'} "
                             f"cooldown={cooldown:.1f}s attempt={attempt+1}"
                         )
-                        print(log_msg)
+                        log.warning(log_msg)
                         # When the provider explicitly asks us to wait longer than
                         # our bounded retry window, do not make another 429-causing
                         # request. Move to fallback immediately.
