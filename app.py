@@ -3,7 +3,7 @@ from typing import Any
 import httpx
 from olymptrade_ws import OlympTradeClient
 from olymptrade_ws.olympconfig import parameters
-from brain_rules import BrainState,rank_signal_candidates
+from brain_rules import BrainState,rank_signal_candidates,CYCLE_SECONDS
 from candice_brain import analyze_asset
 from ai_engine import snapshot_from_asset
 from ai_router import analyze_with_fallback
@@ -251,7 +251,7 @@ async def _fetch_history(pair):
 
 
 async def refresh_history_batch(limit=24,force=False):
-    """Refresh a bounded rotating batch so one scan can never block the 5-minute scheduler."""
+    """Refresh a bounded rotating batch so one scan can never block the 3-minute scheduler."""
     global HISTORY_CURSOR
     assets=list(STATE["assets"])
     if not assets:
@@ -665,8 +665,8 @@ async def cycle_loop():
     """
     while True:
         now=time.time()
-        next_boundary=(int(now)//300+1)*300
-        cycle_id=next_boundary//300
+        next_boundary=(int(now)//CYCLE_SECONDS+1)*CYCLE_SECONDS
+        cycle_id=next_boundary//CYCLE_SECONDS
         BRAIN.start_cycle(int(cycle_id))
         STATE["cycle"]=int(cycle_id)
         STATE["last_cycle"]=next_boundary
@@ -675,7 +675,7 @@ async def cycle_loop():
             if old_cycle < cycle_id-1:
                 CYCLE_CANDIDATES.pop(old_cycle,None)
 
-        scan_targets=(next_boundary-180,next_boundary-120,next_boundary-60)
+        scan_targets=(next_boundary-120,next_boundary-90,next_boundary-60)
 
         for scan_no,target_ts in enumerate(scan_targets,1):
             await asyncio.sleep(max(0,target_ts-time.time()))
