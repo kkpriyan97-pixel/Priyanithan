@@ -492,28 +492,36 @@ class SelfLearningEngine:
         self.metrics["searches"]+=1
         async with self.search_gate:
             endpoints=[
-            "https://html.duckduckgo.com/html/?q="+quote_plus(query),
-            "https://www.google.com/search?q="+quote_plus(query)+"&num=20",
-            "https://www.bing.com/search?q="+quote_plus(query),
-        ]
+                "https://html.duckduckgo.com/html/?q="+quote_plus(query),
+                "https://www.google.com/search?q="+quote_plus(query)+"&num=20",
+                "https://www.bing.com/search?q="+quote_plus(query),
+            ]
             for endpoint in endpoints:
                 try:
                     await self._pace_request()
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(8,connect=4),headers={"User-Agent":USER_AGENT},follow_redirects=True) as c:
-                        r=await c.get(endpoint)
-                if r.status_code>=400:continue
-                p=PageParser();p.feed(r.text)
-                found=0
-                for href,label in p.links:
-                    target=_clean_url(_unwrap_search_href(href))
-                    if not target:continue
-                    d=_domain(target)
-                    if not d or d in SEARCH_HOSTS:continue
-                    self._enqueue(target,language,"search");found+=1
-                if found:return found
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(8,connect=4),headers={"User-Agent":USER_AGENT},follow_redirects=True) as client:
+                        r=await client.get(endpoint)
+                    if r.status_code>=400:
+                        continue
+                    p=PageParser()
+                    p.feed(r.text)
+                    found=0
+                    for href,label in p.links:
+                        target=_clean_url(_unwrap_search_href(href))
+                        if not target:
+                            continue
+                        d=_domain(target)
+                        if not d or d in SEARCH_HOSTS:
+                            continue
+                        self._enqueue(target,language,"search")
+                        found+=1
+                    if found:
+                        return found
                 except Exception as e:
-                    self.metrics["errors"]+=1;log.debug("LEARNING_SEARCH_FAILED query=%s %s",query,e)
+                    self.metrics["errors"]+=1
+                    log.debug("LEARNING_SEARCH_FAILED query=%s %s",query,e)
             return 0
+
     def _queries(self):
         methods=list(METHOD_LIBRARY)
         # Query families intentionally emphasize pre-candle / forward-only research.
