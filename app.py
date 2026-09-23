@@ -12,8 +12,14 @@ from self_learning import self_learning_loop, learning_status, record_demo_resul
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 log=logging.getLogger("candice")
 BRAIN=BrainState()
-STATE={"status":"starting","assets":[],"prices":{},"candles":{},"analyses":{},"read_only":True,"cycle":0,"last_cycle":None,"account_id":None,"account_group":"demo","feed_source":"authenticated_websocket","last_asset_sync":None,"last_tick":None}
+STATE={"status":"starting","assets":[],"prices":{},"candles":{},"analyses":{},"read_only":True,"cycle":0,"last_cycle":None,"account_id":None,"account_group":"demo","feed_source":"authenticated_websocket","last_asset_sync":None,"last_tick":None,"auto_trade_demo_enabled":False}
 CLIENT=None
+AUTO_TRADE_DEMO=os.getenv("AUTO_TRADE_DEMO","true").strip().lower() in {"1","true","yes","on"}
+try:
+    DEMO_TRADE_AMOUNT=max(0.01,float(os.getenv("DEMO_TRADE_AMOUNT","1")))
+except (TypeError,ValueError):
+    DEMO_TRADE_AMOUNT=1.0
+AUTO_TRADE_STATUS={}
 LOCK=asyncio.Lock()
 LIVE_BARS={}
 CANDLE_FETCH_SEMAPHORE=asyncio.Semaphore(16)
@@ -156,6 +162,61 @@ async def telegram(text,attempts=3):
             if attempt<attempts:
                 await asyncio.sleep(0.5*attempt)
     return False
+
+
+async def place_demo_order(s,key):
+    """Place the approved signal on the authenticated DEMO account at entry time."""
+    if not AUTO_TRADE_DEMO:
+        AUTO_TRADE_STATUS[key]={"status":"OFF"}
+        return False
+    client=CLIENT
+    if not client or not client.connection.is_connected:
+        AUTO_TRADE_STATUS[key]={"status":"FAILED","reason":"client_not_connected"}
+        log.error("DEMO_AUTO_TRADE_FAILED key=%s reason=client_not_connected",key)
+        return False
+    if str(getattr(client,"account_group",STATE.get("account_group",""))).lower()!="demo":
+        AUTO_TRADE_STATUS[key]={"status":"BLOCKED","reason":"non_demo_account"}
+        log.error("DEMO_AUTO_TRADE_BLOCKED key=%s group=%s",key,getattr(client,"account_group",None))
+        return False
+    account_id=getattr(client,"account_id",None) or STATE.get("account_id")
+    if account_id is None:
+        AUTO_TRADE_STATUS[key]={"status":"FAILED","reason":"demo_account_id_missing"}
+        log.error("DEMO_AUTO_TRADE_FAILED key=%s reason=demo_account_id_missing",key)
+        return False
+    lag=time.time()-float(s.scheduled_entry_ts)
+    if lag>5.0:
+        AUTO_TRADE_STATUS[key]={"status":"SKIPPED_LATE","lag":round(lag,3)}
+        log.warning("DEMO_AUTO_TRADE_SKIPPED key=%s lag=%.3f",key,lag)
+        return False
+    direction=str(s.direction).lower()
+    if direction not in {"up","down"}:
+        AUTO_TRADE_STATUS[key]={"status":"FAILED","reason":"invalid_direction"}
+        return False
+    try:
+        result=await asyncio.wait_for(
+            client.trade.place_order(
+                pair=s.pair,
+                amount=DEMO_TRADE_AMOUNT,
+                direction=direction,
+                duration=int(s.expiry_minutes)*60,
+                account_id=int(account_id),
+                group="demo",
+                category="digital",
+            ),
+            timeout=8.0,
+        )
+        if result and result.get("id"):
+            AUTO_TRADE_STATUS[key]={"status":"EXECUTED","order_id":result.get("id")}
+            log.info("DEMO_AUTO_TRADE_EXECUTED key=%s pair=%s direction=%s amount=%s duration=%ss account_id=%s order_id=%s",
+                     key,s.pair,direction,DEMO_TRADE_AMOUNT,int(s.expiry_minutes)*60,account_id,result.get("id"))
+            return True
+        AUTO_TRADE_STATUS[key]={"status":"FAILED","reason":"broker_rejected","response":result}
+        log.error("DEMO_AUTO_TRADE_REJECTED key=%s pair=%s response=%s",key,s.pair,result)
+        return False
+    except Exception as e:
+        AUTO_TRADE_STATUS[key]={"status":"FAILED","reason":str(e)}
+        log.exception("DEMO_AUTO_TRADE_EXCEPTION key=%s pair=%s error=%s",key,s.pair,e)
+        return False
 
 
 def reference_price_for(pair,candidate,now=None):
@@ -398,7 +459,7 @@ async def prepare_cycle_candidates(cycle_id,scan_no):
             for a in eligible
             if a["pair"] in STATE["analyses"]
         ]
-        raw=rank_signal_candidates(raw)[:4]
+        raw=rank_signal_candidates(raw)[:2]
         if not raw:
             log.info(
                 "AI_REVIEW_CACHE_EMPTY cycle=%s scan=%d reason=no_brain_candidates",
@@ -577,6 +638,9 @@ async def result_watch(key):
 
     s.entry_price=actual_entry
 
+    # Execute the approved signal on DEMO at the scheduled boundary.
+    await place_demo_order(s,key)
+
     expiry_close_ts=scheduled_entry_ts+s.expiry_minutes*60
     target_candle_start=scheduled_entry_ts+(s.expiry_minutes-1)*60
     await asyncio.sleep(max(0,expiry_close_ts-time.time())+1.0)
@@ -642,13 +706,15 @@ async def result_watch(key):
 
     label=f"{rec['display_name']} ({rec['pair']})"
     icon={"WIN":"🟢","LOSS":"🔴","TIE":"🟡"}[rec["result"]]
+    trade_state=AUTO_TRADE_STATUS.get(key,{}).get("status","NOT_EXECUTED")
+    trade_icon="🤖 DEMO AUTO-TRADE: EXECUTED" if trade_state=="EXECUTED" else f"🤖 DEMO AUTO-TRADE: {trade_state}"
     sent=await telegram(
         f"━━━━━━━━━━━━━━━━━━━━\n🎯 CANDICE AI • TRADE RESULT\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n📈 {label}\n\n"
         f"➡️ {rec['direction']}\n\n💰 Entry: {rec['entry_price']}\n"
         f"🏁 Exit: {rec['exit_price']}\n\n⏱️ Duration: {rec['expiry_minutes']} MIN\n"
         f"🔎 Verification: candle-closed\n\n{icon} {rec['result']}\n\n"
-        f"⚠️ RESULT ONLY — AUTO TRADE OFF\n━━━━━━━━━━━━━━━━━━━━"
+        f"{trade_icon}\n━━━━━━━━━━━━━━━━━━━━"
     )
     log.info(
         "RESULT_SENT pair=%s result=%s entry=%s exit=%s verification=candle-closed "
@@ -836,26 +902,24 @@ async def market_worker():
         client.register_callback(parameters.E_ASSET_PROFITABILITY_UPDATE,on_asset_update)
         try:
             STATE["status"]="connecting"
+            requested_account=os.getenv("OLYMPTRADE_DEMO_ACCOUNT_ID","").strip()
+            if requested_account:
+                try:
+                    client.account_id=int(requested_account)
+                except ValueError as exc:
+                    raise RuntimeError("INVALID_OLYMPTRADE_DEMO_ACCOUNT_ID") from exc
+                client.account_group="demo"
             await client.start()
+            await client.initialize_session()
             STATE["status"]="connected"
-            await asyncio.sleep(4)
 
-            # Read only the DEMO account identity from the authenticated session.
-            for m in client.get_cached_events(55):
-                d=m.get("d") if isinstance(m,dict) else None
-                if isinstance(d,list):
-                    for a in d:
-                        if isinstance(a,dict) and a.get("group")=="demo":
-                            client.account_id=a.get("account_id")
-                            client.account_group="demo"
-                            break
-                if client.account_id:
-                    break
-
+            # Bind only the DEMO account exposed by the authenticated session.
             STATE["account_id"]=client.account_id
             STATE["account_group"]="demo"
             if not client.account_id:
                 raise RuntimeError("DEMO_ACCOUNT_ID_NOT_FOUND_FROM_AUTHENTICATED_SESSION")
+            if str(client.account_group).lower()!="demo":
+                raise RuntimeError("NON_DEMO_ACCOUNT_BLOCKED")
 
             changed=await sync_account_assets(client,client.account_id)
             if not STATE["assets"]:
@@ -864,8 +928,9 @@ async def market_worker():
             # Background rotation seeds the full account universe without blocking the cycle scheduler.
             await refresh_candles()
 
-            STATE["status"]="live_account_read_only"
-            log.info("ACCOUNT_ASSETS_READY count=%d changed=%s source=%s",len(STATE["assets"]),changed,STATE["feed_source"])
+            STATE["auto_trade_demo_enabled"]=bool(AUTO_TRADE_DEMO and str(client.account_group).lower()=="demo")
+            STATE["status"]="live_demo_ready" if STATE["auto_trade_demo_enabled"] else "live_account_read_only"
+            log.info("ACCOUNT_ASSETS_READY count=%d changed=%s source=%s account_id=%s demo_auto_trade=%s amount=%s",len(STATE["assets"]),changed,STATE["feed_source"],STATE["account_id"],STATE["auto_trade_demo_enabled"],DEMO_TRADE_AMOUNT)
 
             subscribed=set()
             last_rescan=0.0
@@ -941,7 +1006,7 @@ async def market_worker():
 async def health(reader,writer):
     try:
         await reader.read(2048)
-        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":True,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals),"account_id":STATE["account_id"],"account_group":STATE["account_group"],"feed_source":STATE["feed_source"],"last_asset_sync":STATE["last_asset_sync"],"last_tick":STATE["last_tick"],"self_learning":learning_status()},ensure_ascii=False).encode()
+        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":not STATE.get("auto_trade_demo_enabled",False),"auto_trade_demo_enabled":STATE.get("auto_trade_demo_enabled",False),"demo_trade_amount":DEMO_TRADE_AMOUNT,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals),"account_id":STATE["account_id"],"account_group":STATE["account_group"],"feed_source":STATE["feed_source"],"last_asset_sync":STATE["last_asset_sync"],"last_tick":STATE["last_tick"],"self_learning":learning_status()},ensure_ascii=False).encode()
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"+body);await writer.drain()
     finally:writer.close()
 
