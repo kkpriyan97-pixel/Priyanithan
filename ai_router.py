@@ -37,7 +37,7 @@ AI_MIN_INTERVAL = max(0.05, float(os.getenv("AI_MIN_INTERVAL_SECONDS", "0.75")))
 AI_RETRY_LIMIT = max(0, int(os.getenv("AI_RETRY_LIMIT", "2")))
 AI_RETRY_CAP_SECONDS = max(1.0, float(os.getenv("AI_RETRY_CAP_SECONDS", "4")))
 AI_PROVIDER_COOLDOWN = max(5.0, float(os.getenv("AI_PROVIDER_COOLDOWN_SECONDS", "30")))
-AI_CACHE_TTL = max(5.0, float(os.getenv("AI_CACHE_TTL_SECONDS", "45")))
+AI_CACHE_TTL = max(5.0, float(os.getenv("AI_CACHE_TTL_SECONDS", "75")))
 
 _GATE = asyncio.Semaphore(AI_MAX_CONCURRENT)
 _RATE_LOCK = asyncio.Lock()
@@ -80,7 +80,7 @@ def _cfg(name: str):
 
 
 def _snapshot_key(snapshot: MarketSnapshot) -> str:
-    """Stable fingerprint that ignores wall-clock timestamp churn."""
+    """Stable fingerprint for one closed-candle snapshot; ignore live-tick price churn."""
     tail = []
     for c in (snapshot.candles or [])[-6:]:
         if not isinstance(c, dict):
@@ -98,7 +98,6 @@ def _snapshot_key(snapshot: MarketSnapshot) -> str:
             "display_name": snapshot.display_name,
             "mode": snapshot.mode,
             "profitability": snapshot.profitability,
-            "price": snapshot.price,
             "candles": tail,
         },
         sort_keys=True,
