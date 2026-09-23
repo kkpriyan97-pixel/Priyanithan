@@ -219,6 +219,16 @@ async def place_demo_order(s,key):
         return False
 
 
+async def auto_trade_at_entry(key):
+    """Wake at the scheduled boundary and submit the approved signal without verifier delay."""
+    s=BRAIN.active_signals.get(key)
+    if not s:
+        AUTO_TRADE_STATUS[key]={"status":"FAILED","reason":"active_signal_missing"}
+        return
+    await asyncio.sleep(max(0,float(s.scheduled_entry_ts)-time.time()))
+    await place_demo_order(s,key)
+
+
 def reference_price_for(pair,candidate,now=None):
     """Return the freshest non-empty reference without requiring a live tick subscription."""
     now=time.time() if now is None else float(now)
@@ -638,9 +648,6 @@ async def result_watch(key):
 
     s.entry_price=actual_entry
 
-    # Execute the approved signal on DEMO at the scheduled boundary.
-    await place_demo_order(s,key)
-
     expiry_close_ts=scheduled_entry_ts+s.expiry_minutes*60
     target_candle_start=scheduled_entry_ts+(s.expiry_minutes-1)*60
     await asyncio.sleep(max(0,expiry_close_ts-time.time())+1.0)
@@ -886,6 +893,8 @@ async def cycle_loop():
             sent
         )
         await _finish_review_tasks(cycle_id)
+        if AUTO_TRADE_DEMO:
+            asyncio.create_task(auto_trade_at_entry(key))
         asyncio.create_task(result_watch(key))
 
 async def market_worker():
