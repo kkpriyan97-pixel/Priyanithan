@@ -15,3 +15,5 @@ jobs:
           python-version: "3.11"
       - name: Compile Python files
         run: python -m py_compile *.py
+      - name: Run two-indicator brain smoke test
+        run: python brain_smoke_test.py
