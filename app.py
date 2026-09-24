@@ -69,9 +69,7 @@ def build_account_assets(raw):
         status=str(x.get("status") or x.get("state") or "").strip().lower()
         if unavailable or status in {"disabled","locked","inactive","unavailable","closed","off"}:
             continue
-        title=display_name(x)
-        if not title:
-            continue
+        title=display_name(x) or p
         v=x.get("profitability")
         if not isinstance(v,(int,float)):
             v=x.get("payout",x.get("profit",0))
