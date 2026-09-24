@@ -191,7 +191,10 @@ def _prompt(snapshot: MarketSnapshot) -> str:
         "OHLC/market evidence. Do not invent data. Return JSON only: direction "
         "UP/DOWN or empty, confidence 0-100, reason. This is DEMO read-only; "
         "never trade. The technical brain is authoritative for the final "
-        "direction; your job is verification only.\\n"
+        "direction. Verify ONLY the supplied Anchored VWAP and Volume Profile "
+        "features: AVWAP, POC, VAH, VAL and AVWAP slope. Do not introduce or "
+        "substitute EMA, RSI, MACD, ATR, stochastic, Supertrend or any other "
+        "indicator or strategy. Your job is verification only.\\n"
         + json.dumps(request, ensure_ascii=False, separators=(",", ":"))
     )
 
