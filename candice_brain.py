@@ -4,8 +4,7 @@ ONLY these two technical components generate live direction:
 1) Anchored VWAP
 2) Volume Profile (POC / VAH / VAL)
 
-No EMA, RSI, MACD, ATR, stochastic, Supertrend, or standalone candle-pattern
-strategy is used by the live brain. All decisions use fully closed 1-minute
+No legacy indicator or standalone candle-pattern strategy is used by the live brain. All decisions use fully closed 1-minute
 candles. The 3-minute scheduler is owned by app.py and is unchanged.
 """
 from __future__ import annotations
