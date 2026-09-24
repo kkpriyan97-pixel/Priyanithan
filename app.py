@@ -35,6 +35,7 @@ SCAN_SYNC_TIMEOUT=6.0
 FINAL_CACHE_MAX_AGE=75.0
 AI_REVIEW_TIMEOUT=24.0
 MAX_REVIEW_TASKS_PER_CYCLE=12
+BUILD_MARKER="NEXORA-M1-AVWAP-VP-2026-09-24"
 
 def pair_name(x):
     return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
@@ -373,6 +374,10 @@ async def refresh_candles():
     now=time.time()
     qualified=0
     stale=0
+    history_ready=0
+    history_short=0
+    tick_ready=0
+    no_price=0
 
     for a in assets:
         p=a["pair"]
@@ -387,7 +392,14 @@ async def refresh_candles():
             base=base[-120:]
             STATE["candles"][p]=base
 
+        if len(base)>=60:
+            history_ready+=1
+        else:
+            history_short+=1
+
         price,price_ts=STATE["prices"].get(p,(None,None))
+        if price is not None:
+            tick_ready+=1
         if price is None and base:
             last=base[-1]
             price=last.get("close",last.get("c"))
@@ -395,6 +407,8 @@ async def refresh_candles():
                 price_ts=float(last.get("time",last.get("t",now)))+60
             except Exception:
                 price_ts=now
+        if price is None:
+            no_price+=1
 
         try:
             record_market_snapshot(p, base, price, now)
@@ -416,8 +430,10 @@ async def refresh_candles():
 
     log.info(
         "LIVE_ANALYSIS_REFRESH source=current_account_state assets=%d qualified=%d "
-        "ticks=%d stale=%d closed_only=1",
-        len(assets),qualified,len(STATE["prices"]),stale
+        "history_ready=%d history_short=%d ticks=%d tick_ready=%d no_price=%d stale=%d "
+        "closed_only=1 build=%s",
+        len(assets),qualified,history_ready,history_short,len(STATE["prices"]),
+        tick_ready,no_price,stale,BUILD_MARKER
     )
 
 
@@ -1025,11 +1041,12 @@ async def market_worker():
 async def health(reader,writer):
     try:
         await reader.read(2048)
-        body=json.dumps({"service":"CANDICE-AI","status":STATE["status"],"read_only":not STATE.get("auto_trade_demo_enabled",False),"auto_trade_demo_enabled":STATE.get("auto_trade_demo_enabled",False),"demo_trade_amount":DEMO_TRADE_AMOUNT,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals),"account_id":STATE["account_id"],"account_group":STATE["account_group"],"feed_source":STATE["feed_source"],"last_asset_sync":STATE["last_asset_sync"],"last_tick":STATE["last_tick"],"self_learning":learning_status()},ensure_ascii=False).encode()
+        body=json.dumps({"service":"CANDICE-AI","build":BUILD_MARKER,"status":STATE["status"],"read_only":not STATE.get("auto_trade_demo_enabled",False),"auto_trade_demo_enabled":STATE.get("auto_trade_demo_enabled",False),"demo_trade_amount":DEMO_TRADE_AMOUNT,"asset_count":len(STATE["assets"]),"qualified":len(STATE["analyses"]),"cycle":STATE["cycle"],"active_results":len(BRAIN.active_signals),"account_id":STATE["account_id"],"account_group":STATE["account_group"],"feed_source":STATE["feed_source"],"last_asset_sync":STATE["last_asset_sync"],"last_tick":STATE["last_tick"],"self_learning":learning_status()},ensure_ascii=False).encode()
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"+body);await writer.drain()
     finally:writer.close()
 
 async def main():
+    log.info("CANDICE_BUILD_MARKER %s",BUILD_MARKER)
     port=int(os.getenv("PORT","10000"));server=await asyncio.start_server(health,"0.0.0.0",port)
     await asyncio.gather(market_worker(),cycle_loop(),self_learning_loop(),server.serve_forever())
 if __name__=="__main__":asyncio.run(main())
