@@ -430,20 +430,39 @@ async def _review_candidate(cycle_id,scan_no,x,eligible):
     closed_price=(cs[-1].get("close",cs[-1].get("c")) if cs else price)
     snap=snapshot_from_asset(asset,cs,closed_price,time.time(),technical_features=x.get("indicator_features",{}))
     try:
-        d=await asyncio.wait_for(analyze_with_fallback(snap),timeout=AI_REVIEW_TIMEOUT)
-        if not d or int(d.get("confidence",0))<90:
-            return None
-        ai_direction=str(d.get("direction","")).upper()
+        try:
+            d=await asyncio.wait_for(analyze_with_fallback(snap),timeout=AI_REVIEW_TIMEOUT)
+        except Exception as exc:
+            # The deterministic two-indicator brain remains live when AI is unavailable.
+            # AI is a verifier/conflict guard, never the source of direction.
+            log.warning(
+                "AI_REVIEW_BYPASS cycle=%s scan=%s pair=%s reason=%s",
+                cycle_id,scan_no,x["pair"],exc
+            )
+            x["ai_review_status"]="UNAVAILABLE_BYPASS"
+            x["ai_provider"]=None
+            return x
+
+        ai_direction=str(d.get("direction","")).upper() if d else ""
         brain_direction=str(x.get("direction","")).upper()
-        if ai_direction!=brain_direction:
+
+        if ai_direction and ai_direction!=brain_direction:
             log.info(
-                "AI_DIRECTION_MISMATCH cycle=%s scan=%d pair=%s brain=%s ai=%s; rejecting",
+                "AI_DIRECTION_MISMATCH cycle=%s scan=%s pair=%s brain=%s ai=%s; rejecting",
                 cycle_id,scan_no,x["pair"],brain_direction,ai_direction
             )
             return None
+
+        ai_conf=int(d.get("confidence",0)) if d else 0
+        if ai_direction==brain_direction and ai_conf<70:
+            log.info(
+                "AI_LOW_CONFIDENCE cycle=%s scan=%s pair=%s confidence=%s; bypassing soft verifier",
+                cycle_id,scan_no,x["pair"],ai_conf
+            )
+
         x["ai_review_candle_ts"]=x.get("entry_candle_ts")
         x.update({
-            "confidence":int(d["confidence"]),
+            "confidence":min(99,max(int(x.get("confidence",90)),ai_conf)) if d else int(x.get("confidence",90)),
             "reason":d.get("reason") or x["reason"],
             "ai_provider":d.get("provider"),
             "ai_direction":ai_direction,
