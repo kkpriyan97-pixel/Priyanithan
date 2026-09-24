@@ -238,23 +238,9 @@ class LearningDB:
           last_error_learning_at REAL,
           updated_at REAL NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS validated_knowledge(
-          knowledge_id TEXT PRIMARY KEY,
-          method_id TEXT NOT NULL,
-          version INTEGER NOT NULL,
-          status TEXT NOT NULL,
-          weight REAL NOT NULL,
-          entry_conditions_json TEXT NOT NULL,
-          no_trade_conditions_json TEXT NOT NULL,
-          error_filters_json TEXT NOT NULL,
-          human_accepted_at REAL NOT NULL,
-          created_at REAL NOT NULL,
-          UNIQUE(method_id,version)
-        );
         CREATE TABLE IF NOT EXISTS research_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,started_at REAL,finished_at REAL,discovered INTEGER,fetched INTEGER,evidence INTEGER,errors INTEGER);
         CREATE INDEX IF NOT EXISTS idx_evidence_method ON method_evidence(method_id);
         CREATE INDEX IF NOT EXISTS idx_forecast_pair ON candle_forecasts(pair);
-        CREATE INDEX IF NOT EXISTS idx_validated_method ON validated_knowledge(method_id,status,version);
         """)
         self.conn.commit()
     def meta(self,k,d=""):
@@ -370,50 +356,6 @@ class LearningDB:
         self.conn.commit()
         return True
 
-    def promote_validated_knowledge(self,method_id,entry_conditions,no_trade_conditions,error_filters,weight,created_at=None):
-        now=time.time() if created_at is None else float(created_at)
-        row=self.candidate(method_id)
-        if not row or str(row["status"])!="HUMAN_ACCEPTED":
-            raise ValueError("Validation requires Human ACCEPT after the 2-hour practice window")
-        if not row["last_error_learning_at"]:
-            raise ValueError("Validation requires error learning")
-        stats=self.demo_stats(method_id)
-        if stats["samples"]<1:
-            raise ValueError("Validation requires demo result data")
-        mid=str(method_id)
-        previous=self.conn.execute(
-            "SELECT COALESCE(MAX(version),0) v FROM validated_knowledge WHERE method_id=?",(mid,)
-        ).fetchone()
-        version=int(previous["v"] or 0)+1
-        knowledge_id=f"{mid}:v{version}"
-        bounded_weight=max(0.0,min(1.0,float(weight)))
-        self.conn.execute(
-            """INSERT INTO validated_knowledge(
-                 knowledge_id,method_id,version,status,weight,
-                 entry_conditions_json,no_trade_conditions_json,error_filters_json,
-                 human_accepted_at,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (
-                knowledge_id,mid,version,"VALIDATED",bounded_weight,
-                json.dumps(entry_conditions,ensure_ascii=False,sort_keys=True),
-                json.dumps(no_trade_conditions,ensure_ascii=False,sort_keys=True),
-                json.dumps(error_filters,ensure_ascii=False,sort_keys=True),
-                float(row["human_accepted_at"]),now,
-            ),
-        )
-        self.conn.execute(
-            "UPDATE strategy_candidates SET status='VALIDATED',updated_at=? WHERE method_id=?",
-            (now,mid),
-        )
-        self.conn.commit()
-        return knowledge_id
-
-    def latest_validated(self,method_id):
-        return self.conn.execute(
-            """SELECT * FROM validated_knowledge
-               WHERE method_id=? AND status='VALIDATED'
-               ORDER BY version DESC LIMIT 1""",(str(method_id),)
-        ).fetchone()
     def forecast_stats(self):
         r=self.conn.execute("""SELECT COUNT(*) n,SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) wins,
           SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) losses FROM candle_forecasts WHERE result IS NOT NULL""").fetchone()
@@ -532,7 +474,6 @@ class SelfLearningEngine:
                 "progress_pct":round(100*domains/TARGET_SITES,2),"daily_target":TARGET_DAILY,
                 "required_sites_per_hour":round(remaining/hours_left,1),"pages_scanned":self.db.pages_count(),
                 "queue_depth":self.queue.qsize(),"languages_seen":dict(sorted(self.lang_counts.items(),key=lambda x:-x[1])[:24]),
-                "validated_knowledge":int(self.db.conn.execute("SELECT COUNT(*) FROM validated_knowledge WHERE status='VALIDATED'").fetchone()[0]),
                 "strategy_candidates":int(self.db.conn.execute("SELECT COUNT(*) FROM strategy_candidates").fetchone()[0]),
                 "next_candle_model":self.db.forecast_stats(),"metrics":dict(self.metrics)}
     def _enqueue(self,url,language,origin,priority=0):
@@ -720,35 +661,33 @@ class SelfLearningEngine:
             stats=self.db.demo_stats(row["method_id"])
             web_ok=int(row["domains"])>=5 and float(row["avg_score"])>=.55 and int(row["clean_evidence"])>=5
             mid=str(row["method_id"])
-            if web_ok:
-                self.db.ensure_candidate(mid)
-                candidate=self.db.refresh_candidate_state(mid)
-                validated=self.db.latest_validated(mid)
-                status=str(candidate["status"]) if candidate else "DISCOVERED"
-            else:
-                validated=self.db.latest_validated(mid)
-                status="WATCH"
+            self.db.ensure_candidate(mid)
+            candidate=self.db.refresh_candidate_state(mid)
+            status=str(candidate["status"]) if candidate else ("DISCOVERED" if web_ok else "WATCH")
             methods.append({
                 "method_id":mid,
                 "independent_domains":int(row["domains"]),
                 "avg_evidence_score":round(float(row["avg_score"]),3),
                 "clean_evidence":int(row["clean_evidence"]),
                 "demo":stats,
-                "status":"VALIDATED" if validated else status,
-                "active_live_brain":bool(validated),
-                "validated_version":int(validated["version"]) if validated else 0,
+                "status":status,
+                "active_live_brain":False,
+                "validated_version":0,
             })
         fs=self.db.forecast_stats()
-        own= "WATCH" if fs["samples"]<100 else ("FORWARD_VALIDATED_CANDIDATE" if fs["accuracy"]>=55 else "REJECT_AND_RESEARCH")
+        own="WATCH" if fs["samples"]<100 else ("FORWARD_VALIDATED_CANDIDATE" if fs["accuracy"]>=55 else "REJECT_AND_RESEARCH")
         result={"program":{"days":LEARNING_DAYS,"target_sites":TARGET_SITES,"started_at":self.started_at,
                            "day":self.day(),"stage":self.stage()},
                 "rules":{"web_claims_are_not_proof":True,"forward_only_labels":True,"no_future_leakage":True,
-                         "minimum_independent_domains":5,"forecast_samples_for_candidate":100,"auto_trade":False},
+                         "minimum_independent_domains":5,"forecast_samples_for_candidate":100,"auto_trade":False,
+                         "live_brain_locked_to_two_indicators":True},
                 "next_candle_model":{"status":own,"stats":fs,"features":list(ForwardCandleModel.NAMES)},
                 "methods":methods,"status":self.status()}
         tmp=STATE_JSON+".tmp"
         with open(tmp,"w",encoding="utf-8") as f:json.dump(result,f,ensure_ascii=False,indent=2)
-        os.replace(tmp,STATE_JSON);return result
+        os.replace(tmp,STATE_JSON)
+        return result
+
     async def run_once(self):
         self.metrics["runs"]+=1;started=time.time()
         found=await self._discover()
@@ -790,9 +729,5 @@ def record_demo_result(method_id,result):LEARNING_ENGINE.record_demo_result(meth
 def start_demo_practice(method_id):return LEARNING_ENGINE.db.start_practice(method_id)
 def human_accept_candidate(method_id):return LEARNING_ENGINE.db.human_accept(method_id)
 def mark_error_learning(method_id):return LEARNING_ENGINE.db.mark_error_learning(method_id)
-def promote_validated_knowledge(method_id,entry_conditions,no_trade_conditions,error_filters,weight):
-    return LEARNING_ENGINE.db.promote_validated_knowledge(
-        method_id,entry_conditions,no_trade_conditions,error_filters,weight
-    )
 def record_market_snapshot(pair,candles,price=None,timestamp=None):LEARNING_ENGINE.record_market_snapshot(pair,candles,price,timestamp)
 async def self_learning_loop():await LEARNING_ENGINE.loop()
