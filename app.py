@@ -427,7 +427,8 @@ async def _review_candidate(cycle_id,scan_no,x,eligible):
     cs=STATE["candles"].get(x["pair"],[])
     price=STATE["prices"].get(x["pair"],(x.get("price"),None))[0]
     asset=next(a for a in eligible if a["pair"]==x["pair"])
-    snap=snapshot_from_asset(asset,cs,price,time.time(),technical_features=x.get("indicator_features",{}))
+    closed_price=(cs[-1].get("close",cs[-1].get("c")) if cs else price)
+    snap=snapshot_from_asset(asset,cs,closed_price,time.time(),technical_features=x.get("indicator_features",{}))
     try:
         d=await asyncio.wait_for(analyze_with_fallback(snap),timeout=AI_REVIEW_TIMEOUT)
         if not d or int(d.get("confidence",0))<90:
