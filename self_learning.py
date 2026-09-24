@@ -50,75 +50,37 @@ DEFAULT_LEARNING_START_UTC="2026-09-21T20:52:37+00:00"
 
 # 24 major language packs + language-agnostic Unicode/script detection.
 LANGUAGE_QUERIES={
-"en":["1 minute trading strategy next candle prediction","M1 scalping candlestick price action market structure",
-      "one minute breakout pullback retest EMA RSI VWAP","1 minute trading false signals volatility session filter"],
-"es":["estrategia trading 1 minuto siguiente vela predicción","scalping M1 velas acción del precio estructura mercado",
-      "ruptura retroceso retesteo EMA RSI VWAP 1 minuto","falsas señales volatilidad sesiones scalping"],
-"pt":["estratégia de trading 1 minuto previsão próxima vela","scalping M1 velas ação do preço estrutura de mercado",
-      "rompimento pullback reteste EMA RSI VWAP 1 minuto","sinais falsos volatilidade sessão scalping"],
-"fr":["stratégie trading 1 minute prédiction prochaine bougie","scalping M1 chandeliers action des prix structure marché",
-      "cassure pullback retest EMA RSI VWAP 1 minute","faux signaux volatilité session scalping"],
-"de":["1 Minuten Trading Strategie nächste Kerze Vorhersage","M1 Scalping Kerzen Preisaktion Marktstruktur",
-      "Ausbruch Pullback Retest EMA RSI VWAP 1 Minute","Fehlsignale Volatilität Sitzung Scalping"],
-"it":["strategia trading 1 minuto previsione prossima candela","scalping M1 candele price action struttura mercato",
-      "breakout pullback retest EMA RSI VWAP 1 minuto","falsi segnali volatilità sessione scalping"],
-"nl":["1 minuut trading strategie volgende candle voorspelling","M1 scalping candlesticks price action marktstructuur",
-      "breakout pullback retest EMA RSI VWAP 1 minuut","valse signalen volatiliteit sessie scalping"],
-"ru":["торговая стратегия 1 минута прогноз следующей свечи","скальпинг M1 свечи прайс экшен структура рынка",
-      "пробой откат ретест EMA RSI VWAP 1 минута","ложные сигналы волатильность сессия скальпинг"],
-"uk":["стратегія трейдингу 1 хвилина прогноз наступної свічки","скальпінг M1 свічки прайс екшен структура ринку",
-      "пробій відкат ретест EMA RSI VWAP 1 хвилина","хибні сигнали волатильність сесія"],
-"pl":["strategia trading 1 minuta prognoza następnej świecy","scalping M1 świece price action struktura rynku",
-      "wybicie pullback retest EMA RSI VWAP 1 minuta","fałszywe sygnały zmienność sesja"],
-"tr":["1 dakika işlem stratejisi sonraki mum tahmini","M1 scalping mum fiyat hareketi piyasa yapısı",
-      "kırılım geri çekilme retest EMA RSI VWAP 1 dakika","sahte sinyal volatilite seans"],
-"ar":["استراتيجية تداول دقيقة واحدة توقع الشمعة التالية","سكالبينغ M1 شموع حركة السعر هيكل السوق",
-      "اختراق تصحيح إعادة اختبار EMA RSI VWAP دقيقة واحدة","إشارات كاذبة تقلب جلسات"],
-"fa":["استراتژی معامله یک دقیقه پیش بینی کندل بعدی","اسکالپ M1 کندل پرایس اکشن ساختار بازار",
-      "بریک اوت پولبک ریتست EMA RSI VWAP یک دقیقه","سیگنال کاذب نوسان سشن"],
-"hi":["1 मिनट ट्रेडिंग रणनीति अगली कैंडल भविष्यवाणी","M1 स्कैल्पिंग कैंडल प्राइस एक्शन मार्केट स्ट्रक्चर",
-      "ब्रेकआउट पुलबैक रिटेस्ट EMA RSI VWAP 1 मिनट","फॉल्स सिग्नल वोलैटिलिटी सेशन"],
-"bn":["১ মিনিট ট্রেডিং কৌশল পরের ক্যান্ডেল পূর্বাভাস","M1 স্ক্যাল্পিং ক্যান্ডেল প্রাইস অ্যাকশন মার্কেট স্ট্রাকচার",
-      "ব্রেকআউট পুলব্যাক রিটেস্ট EMA RSI VWAP","ফলস সিগন্যাল ভোলাটিলিটি সেশন"],
-"ur":["ایک منٹ ٹریڈنگ حکمت عملی اگلی کینڈل پیشگوئی","M1 اسکیلپنگ کینڈل پرائس ایکشن مارکیٹ اسٹرکچر",
-      "بریک آؤٹ پل بیک ری ٹیسٹ EMA RSI VWAP","غلط سگنلز اتار چڑھاؤ سیشن"],
-"zh":["1分钟 交易策略 下一根K线预测","M1 交易 K线 价格行为 市场结构",
-      "突破 回踩 重测 EMA RSI VWAP 1分钟","虚假信号 波动率 交易时段"],
-"ja":["1分足 トレード 次のローソク足 予測","M1 スキャルピング ローソク足 プライスアクション 市場構造",
-      "ブレイクアウト 押し目 リテスト EMA RSI VWAP 1分足","ダマシ ボラティリティ セッション"],
-"ko":["1분봉 트레이딩 전략 다음 캔들 예측","M1 스캘핑 캔들 가격행동 시장구조",
-      "돌파 되돌림 리테스트 EMA RSI VWAP 1분","가짜 신호 변동성 세션"],
-"vi":["chiến lược giao dịch 1 phút dự đoán nến tiếp theo","scalping M1 nến hành động giá cấu trúc thị trường",
-      "breakout pullback retest EMA RSI VWAP 1 phút","tín hiệu giả biến động phiên"],
-"th":["กลยุทธ์เทรด 1 นาที คาดการณ์แท่งถัดไป","สเกลป์ M1 แท่งเทียน price action โครงสร้างตลาด",
-      "breakout pullback retest EMA RSI VWAP 1 นาที","สัญญาณหลอก ความผันผวน session"],
-"id":["strategi trading 1 menit prediksi candle berikutnya","scalping M1 candlestick price action struktur pasar",
-      "breakout pullback retest EMA RSI VWAP 1 menit","sinyal palsu volatilitas sesi"],
-"ms":["strategi dagangan 1 minit ramalan candle seterusnya","scalping M1 candlestick price action struktur pasaran",
-      "breakout pullback retest EMA RSI VWAP 1 minit","isyarat palsu volatiliti sesi"],
-"he":["אסטרטגיית מסחר דקה אחת חיזוי נר הבא","סקאלפינג M1 נרות price action מבנה שוק",
-      "פריצה pullback retest EMA RSI VWAP דקה","איתותים שגויים תנודתיות סשן"],
-"el":["στρατηγική trading 1 λεπτού πρόβλεψη επόμενου κεριού","M1 scalping κεριά price action δομή αγοράς",
-      "breakout pullback retest EMA RSI VWAP 1 λεπτό","ψευδή σήματα μεταβλητότητα συνεδρία"]}
+"en":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"es":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"pt":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"fr":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"de":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"it":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"nl":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"ru":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"uk":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"pl":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"tr":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"ar":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"fa":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"hi":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"bn":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"ur":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"zh":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"ja":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"ko":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"vi":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"th":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"id":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"ms":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"he":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"],
+"el":["1 minute anchored VWAP volume profile POC VAH VAL trading","M1 anchored VWAP volume profile backtest false signals"]
+}
 
 METHOD_LIBRARY={
-"trend_following":["trend following","trend-following","ema alignment","moving average alignment","adx","supertrend"],
-"pullback_retest":["pullback","retest","retest breakout","reteste","recoil","回踩","押し目"],
-"breakout":["breakout","range breakout","opening range","breakout retest","rupture","пробой","突破"],
-"rejection_reversal":["rejection","reversal","pin bar","engulfing","mean reversion","shooting star","hammer","反转","разворот"],
-"vwap_momentum":["vwap","volume weighted average price","momentum","volume spike","成交量","モメンタム"],
-"rsi_divergence":["rsi divergence","divergence rsi","divergencia rsi","дивергенция rsi","背离"],
-"bollinger_mean_reversion":["bollinger","bollinger bands","band touch","band reversal","布林带"],
-"market_structure":["market structure","higher high","lower low","hh hl","lh ll","support resistance","liquidity sweep","order block"],
-"microstructure":["order flow","footprint","market profile","volume profile","bid ask","delta","tape reading"],
-"volatility_regime":["atr","volatility","range expansion","range contraction","squeeze","volatility compression"],
-"session_timing":["london session","new york session","asian session","session open","opening range","market open"],
-"momentum_oscillator":["macd","stochastic","cci","mfi","obv","roc","rate of change"],
-"trend_indicators":["ichimoku","heikin ashi","parabolic sar","keltner channel","donchian channel"],
-"advanced_models":["machine learning","deep learning","random forest","xgboost","lstm","transformer","reinforcement learning","kalman filter","hidden markov","fourier","wavelet"],
-"pattern_recognition":["harmonic","chart pattern","triangle","flag","wedge","double top","double bottom","head and shoulders"],
-"risk_filtering":["risk management","position sizing","stop loss","take profit","no trade","filter","drawdown"],
-"statistical_validation":["backtest","walk forward","out of sample","out-of-sample","monte carlo","bootstrap","expectancy","sample size"]}
+"anchored_vwap":["anchored vwap","AVWAP","vwap anchor","anchored volume weighted average price"],
+"volume_profile":["volume profile","POC","point of control","VAH","value area high","VAL","value area low","HVN","LVN"]
+}
 
 ALL_TERMS=set(t.lower() for vs in METHOD_LIBRARY.values() for t in vs)
 
@@ -537,11 +499,10 @@ class SelfLearningEngine:
     def day(self):
         return min(LEARNING_DAYS,max(1,int(max(0,time.time()-self.started_at)//86400)+1))
     def stage(self):
-        stages=["M1 foundation + structure","candlesticks + next-candle behaviour","EMA/RSI/MACD/Stochastic",
-                "VWAP/ATR/volatility regimes","breakout + retest","pullback + continuation","reversal + divergence",
-                "support/resistance + liquidity","session + timing","false signals + no-trade filters",
-                "microstructure + volume","advanced indicator combinations","AI/ML + statistical methods",
-                "walk-forward/demo validation","own-strategy synthesis + final audit"]
+        stages=["AVWAP foundations","AVWAP anchoring methods","AVWAP slope and acceptance","AVWAP false-signal research",
+                "Volume Profile foundations","POC/VAH/VAL behaviour","HVN/LVN research","Volume Profile false signals",
+                "AVWAP + Volume Profile confluence","M1 regime and session effects","OTC/data-quality effects",
+                "costs/slippage/latency sensitivity","walk-forward and out-of-sample tests","demo validation","two-indicator final audit"]
         return stages[self.day()-1]
     def status(self):
         domains=self.db.source_count(); remaining=max(0,TARGET_SITES-domains)
@@ -734,6 +695,8 @@ class SelfLearningEngine:
     def synthesize(self):
         methods=[]
         for row in self.db.method_rows():
+            if str(row["method_id"]) not in METHOD_LIBRARY:
+                continue
             stats=self.db.demo_stats(row["method_id"])
             web_ok=int(row["domains"])>=5 and float(row["avg_score"])>=.55 and int(row["clean_evidence"])>=5
             mid=str(row["method_id"])
@@ -789,6 +752,8 @@ class SelfLearningEngine:
             await asyncio.sleep(RUN_INTERVAL_SECONDS)
     def record_demo_result(self,method_id,result):
         mid=str(method_id)
+        if mid not in METHOD_LIBRARY:
+            return
         self.db.add_demo(mid,result)
         row=self.db.candidate(mid)
         now=time.time()
