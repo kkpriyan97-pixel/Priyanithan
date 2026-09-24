@@ -193,8 +193,8 @@ def _prompt(snapshot: MarketSnapshot) -> str:
         "never trade. The technical brain is authoritative for the final "
         "direction. Verify ONLY the supplied Anchored VWAP and Volume Profile "
         "features: AVWAP, POC, VAH, VAL and AVWAP slope. Do not introduce or "
-        "substitute EMA, RSI, MACD, ATR, stochastic, Supertrend or any other "
-        "indicator or strategy. Your job is verification only.\\n"
+        "substitute any other indicator or strategy. Your job is verification "
+        "only.\\n"
         + json.dumps(request, ensure_ascii=False, separators=(",", ":"))
     )
 
