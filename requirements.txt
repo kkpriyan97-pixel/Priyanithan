@@ -1,2 +1,2 @@
-git+https://github.com/kkpriyan97-pixel/OlympTradeAPI.git
+git+https://github.com/kkpriyan97-pixel/OlympTradeAPI.git@b16c95ef393d8bde7f34919185d789efb3855e1e
 httpx>=0.28,<1
