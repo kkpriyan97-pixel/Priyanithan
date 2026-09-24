@@ -431,47 +431,66 @@ class LearningDB:
                               list(w.items()));self.conn.commit()
 
 class ForwardCandleModel:
-    """Online logistic model. Features are computed only from candles at t; label is candle t+1."""
-    NAMES=("bias","ret1","ret3","ret5","body","range","upper_wick","lower_wick","close_pos","ema_gap","rsi_gap","atr_ratio","range_ratio","streak")
-    def __init__(self,db):self.db=db;self.w={n:0.0 for n in self.NAMES};self.w.update(db.load_weights())
+    """Online logistic model restricted to AVWAP + Volume Profile features."""
+    NAMES=("bias","avwap_side","poc_side","vah_side","val_side","avwap_slope","profile_position")
+
+    def __init__(self,db):
+        self.db=db
+        self.w={n:0.0 for n in self.NAMES}
+        self.w.update(db.load_weights())
+
     @staticmethod
-    def _ema(vals,n):
-        if not vals:return 0.0
-        k=2/(n+1);e=vals[0]
-        for x in vals[1:]:e=x*k+e*(1-k)
-        return e
-    @staticmethod
-    def _rsi(vals,n=14):
-        if len(vals)<n+1:return 50.0
-        gains=[];losses=[]
-        for a,b in zip(vals[-n-1:-1],vals[-n:]):
-            d=b-a;gains.append(max(0,d));losses.append(max(0,-d))
-        ag=sum(gains)/n;al=sum(losses)/n
-        return 100 if al==0 else 100-(100/(1+ag/al))
+    def _indicators(cs):
+        from candice_brain import _aggregate_closed_15m, _anchored_vwap, _volume_profile
+        blocks=_aggregate_closed_15m(cs,time.time())
+        if not blocks:
+            return None
+        anchor=int(blocks[-1]["time"])
+        avwap,_=_anchored_vwap(cs,anchor)
+        prev_avwap,_=_anchored_vwap(cs[:-1],anchor)
+        vp=_volume_profile(cs)
+        if not vp or avwap<=0:
+            return None
+        px=float(cs[-1]["close"])
+        span=max(vp["range_high"]-vp["range_low"],1e-12)
+        return {
+            "avwap":avwap,
+            "poc":vp["poc"],
+            "vah":vp["vah"],
+            "val":vp["val"],
+            "slope":avwap-prev_avwap,
+            "position":(px-vp["range_low"])/span,
+        }
+
     @staticmethod
     def features(cs):
-        if len(cs)<20:return None
-        c=cs[-1];cl=[float(x["close"]) for x in cs];px=max(abs(c["close"]),1e-9)
-        rng=max(c["high"]-c["low"],1e-9);body=(c["close"]-c["open"])/rng
-        upper=(c["high"]-max(c["open"],c["close"]))/rng;lower=(min(c["open"],c["close"])-c["low"])/rng
-        close_pos=((c["close"]-c["low"])/rng)*2-1
-        ema9=ForwardCandleModel._ema(cl[-40:],9);ema21=ForwardCandleModel._ema(cl[-40:],21)
-        atr=sum(max(x["high"]-x["low"],abs(x["high"]-cs[i-1]["close"]),abs(x["low"]-cs[i-1]["close"])) for i,x in enumerate(cs[-14:],start=len(cs)-14) if i>0)/14
-        ret1=(cl[-1]/cl[-2]-1) if cl[-2] else 0;ret3=(cl[-1]/cl[-4]-1) if cl[-4] else 0;ret5=(cl[-1]/cl[-6]-1) if cl[-6] else 0
-        ranges=[max(x["high"]-x["low"],1e-9) for x in cs[-20:]]
-        med=sorted(ranges)[len(ranges)//2]
-        s=0
-        for i in range(len(cl)-1,0,-1):
-            if (cl[i]>cl[i-1])==(cl[-1]>cl[-2]):s+=1
-            else:break
-        return {"bias":1.0,"ret1":ret1*100,"ret3":ret3*100,"ret5":ret5*100,"body":body,"range":rng/px*100,
-                "upper_wick":upper,"lower_wick":lower,"close_pos":close_pos,"ema_gap":(ema9-ema21)/px*100,
-                "rsi_gap":(ForwardCandleModel._rsi(cl)-50)/50,"atr_ratio":atr/px*100,"range_ratio":rng/max(med,1e-9),"streak":min(s,6)/6}
+        if len(cs)<60:
+            return None
+        ind=ForwardCandleModel._indicators(cs[:-1] if len(cs)>60 else cs)
+        if not ind:
+            return None
+        px=float(cs[-1]["close"])
+        return {
+            "bias":1.0,
+            "avwap_side":1.0 if px>ind["avwap"] else -1.0,
+            "poc_side":1.0 if px>ind["poc"] else -1.0,
+            "vah_side":1.0 if px>ind["vah"] else -1.0,
+            "val_side":1.0 if px<ind["val"] else -1.0,
+            "avwap_slope":ind["slope"]/max(abs(px),1e-12)*100.0,
+            "profile_position":ind["position"]*2.0-1.0,
+        }
+
     def predict(self,features):
-        z=sum(self.w.get(k,0)*v for k,v in features.items());z=max(-8,min(8,z));p=1/(1+math.exp(-z));return ("UP" if p>=.5 else "DOWN",p)
+        z=sum(self.w.get(k,0)*v for k,v in features.items())
+        z=max(-8,min(8,z))
+        p=1/(1+math.exp(-z))
+        return ("UP" if p>=.5 else "DOWN",p)
+
     def update(self,features,label,lr=.04):
-        y=1.0 if label=="UP" else 0.0;d=y-self.predict(features)[1]
-        for k,v in features.items():self.w[k]=self.w.get(k,0)+lr*d*v
+        y=1.0 if label=="UP" else 0.0
+        d=y-self.predict(features)[1]
+        for k,v in features.items():
+            self.w[k]=self.w.get(k,0)+lr*d*v
         self.db.save_weights(self.w)
 
 class SelfLearningEngine:
@@ -587,9 +606,9 @@ class SelfLearningEngine:
                 if not target or _domain(target)!=d:continue
                 t=(target+" "+label).lower()
                 if any(x in t for x in ("/login","/signup","/register","/account","/checkout")):continue
-                if any(k in t for k in ("m1","1-minute","1minute","scalp","candle","candlestick","price-action",
-                                        "market-structure","breakout","pullback","retest","next-candle","forecast",
-                                        "ema","rsi","vwap","bollinger","atr","order-flow","volume-profile")):
+                if any(k in t for k in ("m1","1-minute","1minute","vwap","anchored-vwap","avwap","volume-profile",
+                                        "poc","point-of-control","vah","val","value-area","hvn","lvn",
+                                        "volume-at-price","next-candle","forecast")):
                     self._enqueue(target,detected,"internal");added+=1
         except Exception as e:
             self.metrics["errors"]+=1;log.debug("LEARNING_FETCH_FAILED url=%s error=%s",url,e)
@@ -635,7 +654,7 @@ class SelfLearningEngine:
         for lang,base in LANGUAGE_QUERIES.items():
             for q in base:
                 allq.append((q,lang))
-            for m in methods[0:10]:
+            for m in methods:
                 label=m.replace("_"," ")
                 allq.append((f"{q if base else ''} {label} next candle backtest",lang))
         # Deterministic rotation avoids repeating the same first pages forever.
@@ -659,7 +678,8 @@ class SelfLearningEngine:
                 t=float(c.get("time",c.get("t")));o=float(c.get("open",c.get("o")));h=float(c.get("high",c.get("h")))
                 lo=float(c.get("low",c.get("l")));cl=float(c.get("close",c.get("c")))
                 if t>20_000_000_000:t/=1000
-                out.append({"time":int(t//60)*60,"open":o,"high":h,"low":lo,"close":cl})
+                v=float(c.get("volume",c.get("v",1.0)) or 1.0)
+                out.append({"time":int(t//60)*60,"open":o,"high":h,"low":lo,"close":cl,"volume":v})
             except Exception:continue
         uniq={x["time"]:x for x in out};return [uniq[k] for k in sorted(uniq)]
     def record_market_snapshot(self,pair,candles,price=None,timestamp=None):
