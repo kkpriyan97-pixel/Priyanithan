@@ -7,7 +7,7 @@ from brain_rules import BrainState,rank_signal_candidates,CYCLE_SECONDS
 from candice_brain import analyze_asset
 from ai_engine import snapshot_from_asset
 from ai_router import analyze_with_fallback
-from self_learning import self_learning_loop, learning_status, record_demo_result, record_market_snapshot
+from self_learning import self_learning_loop, learning_status, record_market_snapshot
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 log=logging.getLogger("candice")
@@ -427,7 +427,7 @@ async def _review_candidate(cycle_id,scan_no,x,eligible):
     cs=STATE["candles"].get(x["pair"],[])
     price=STATE["prices"].get(x["pair"],(x.get("price"),None))[0]
     asset=next(a for a in eligible if a["pair"]==x["pair"])
-    snap=snapshot_from_asset(asset,cs,price,time.time())
+    snap=snapshot_from_asset(asset,cs,price,time.time(),technical_features=x.get("indicator_features",{}))
     try:
         d=await asyncio.wait_for(analyze_with_fallback(snap),timeout=AI_REVIEW_TIMEOUT)
         if not d or int(d.get("confidence",0))<90:
@@ -696,21 +696,6 @@ async def result_watch(key):
         log.exception("RESULT_FINALIZE_FAILED pair=%s key=%s",s.pair,key)
         return
 
-    # Feed demo outcomes into the isolated learning database. This does not
-    # modify live signal direction; it only builds evidence for future review.
-    method_id={
-        "TREND_FOLLOWING":"trend_following",
-        "PULLBACK":"pullback_retest",
-        "BREAKOUT":"breakout",
-        "MEAN_REVERSION":"rejection_reversal",
-    }.get(str(rec.get("strategy","")).upper())
-    if method_id:
-        record_demo_result(method_id,rec["result"])
-        log.info(
-            "SELF_LEARNING_DEMO_FEEDBACK pair=%s method=%s result=%s",
-            rec["pair"],method_id,rec["result"]
-        )
-
     label=f"{rec['display_name']} ({rec['pair']})"
     icon={"WIN":"🟢","LOSS":"🔴","TIE":"🟡"}[rec["result"]]
     trade_state=AUTO_TRADE_STATUS.get(key,{}).get("status","NOT_EXECUTED")
@@ -853,6 +838,11 @@ async def cycle_loop():
                 pattern=candidate.get("pattern",""),
                 trend_15m=candidate.get("trend_15m",""),
                 structure_1m=candidate.get("structure_1m",""),
+                avwap=candidate.get("avwap",0),
+                poc=candidate.get("poc",0),
+                vah=candidate.get("vah",0),
+                val=candidate.get("val",0),
+                avwap_slope=candidate.get("avwap_slope",0),
                 decision_candle_closed=candidate.get("decision_candle_closed",True),
             )
         except Exception as e:
