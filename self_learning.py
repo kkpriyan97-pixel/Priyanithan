@@ -627,7 +627,10 @@ class SelfLearningEngine:
         cs=self._market_normalize(candles)
         if len(cs)<25:return
         now=time.time() if timestamp is None else float(timestamp)
-        latest=cs[-1];ts=int(latest["time"])
+        # Learning labels are derived only from fully closed M1 candles.
+        closed=[x for x in cs if int(x["time"])+60 <= now-1]
+        if len(closed)<25:return
+        latest=closed[-1];ts=int(latest["time"])
         if self.last_market_ts.get(pair)==ts:return
         self.last_market_ts[pair]=ts
         # First close of a new candle settles the prediction made before it existed.
