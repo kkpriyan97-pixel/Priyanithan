@@ -8,27 +8,27 @@ def candles_up(n=120, start=1_000_000.0):
     out=[]
     for i in range(n):
         ts=start+i*60
-        o=100.0+i*0.10
-        c=o+0.07
+        base=(100.0+(i%5)*0.02) if i<100 else (100.0+(i-99)*0.45)
+        o=base
+        close=o+0.08
         out.append({
-            "time":ts,"open":o,"high":c+0.02,"low":o-0.02,
-            "close":c,"volume":100.0,
+            "time":ts,"open":o,"high":close+0.03,"low":o-0.03,
+            "close":close,"volume":100.0,
         })
     return out
-
 
 def candles_down(n=120, start=1_000_000.0):
     out=[]
     for i in range(n):
         ts=start+i*60
-        o=112.0-i*0.10
-        c=o-0.07
+        base=(110.0+(i%5)*0.02) if i<100 else (110.0-(i-99)*0.45)
+        o=base
+        close=o-0.08
         out.append({
-            "time":ts,"open":o,"high":o+0.02,"low":c-0.02,
-            "close":c,"volume":100.0,
+            "time":ts,"open":o,"high":o+0.03,"low":close-0.03,
+            "close":close,"volume":100.0,
         })
     return out
-
 
 def main():
     start=1_000_000.0
