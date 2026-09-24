@@ -200,13 +200,13 @@ def analyze_asset(asset,candles,price=None,now=None):
     val=profile["val"]
     slope=avwap-previous_avwap
 
-    # Two-stage confluence:
-    # Stage A = both AVWAP and POC agree, with AVWAP slope confirming.
-    # Stage B = being beyond VAH/VAL upgrades the setup to strongest acceptance.
-    # This avoids starving the 3-minute scheduler when price is trending inside
-    # the current value area while still keeping both indicators mandatory.
-    up_base=(p>avwap and p>poc and slope>0)
-    down_base=(p<avwap and p<poc and slope<0)
+    # Two-indicator confluence:
+    # Stage A requires both live components to agree on the side of price.
+    # AVWAP slope is a strength/quality modifier, not a hard gate; using it as
+    # a mandatory gate can suppress an otherwise valid AVWAP+POC alignment when
+    # the last closed candle changes the AVWAP by a tiny amount.
+    up_base=(p>avwap and p>poc)
+    down_base=(p<avwap and p<poc)
 
     up_strong=up_base and p>=vah
     down_strong=down_base and p<=val
@@ -218,11 +218,14 @@ def analyze_asset(asset,candles,price=None,now=None):
         return None
 
     direction="UP" if up else "DOWN"
+    slope_aligned=(slope>0) if direction=="UP" else (slope<0)
 
     # Rule score, not a statistical win probability.
     confluence_score=70
+    if slope_aligned:
+        confluence_score+=15
     if up_strong or down_strong:
-        confluence_score+=30
+        confluence_score+=15
 
     return {
         "pair":str(asset.get("pair","")),
@@ -232,8 +235,8 @@ def analyze_asset(asset,candles,price=None,now=None):
         "strategy":"AVWAP_VOLUME_PROFILE",
         "expiry_minutes":1,
         "pattern":"AVWAP_VALUE_ACCEPTANCE",
-        "trend_15m":"AVWAP_UP" if up else "AVWAP_DOWN",
-        "structure_1m":"ABOVE_AVWAP_POC_VAH" if up else "BELOW_AVWAP_POC_VAL",
+        "trend_15m":"AVWAP_BULLISH" if up else "AVWAP_BEARISH",
+        "structure_1m":"ABOVE_AVWAP_POC" if up else "BELOW_AVWAP_POC",
         "market_quality":round(confluence_score,2),
         "confluence_score":confluence_score,
         "value_area_acceptance":bool(up_strong or down_strong),
