@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -22,6 +22,7 @@ class MarketSnapshot:
     price: float | None
     timestamp: Any
     candles: list[dict[str, Any]]
+    technical_features: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ def snapshot_from_asset(
     candles: list[dict[str, Any]],
     price: float | None,
     timestamp: Any,
+    technical_features: dict[str, Any] | None = None,
 ) -> MarketSnapshot:
     return MarketSnapshot(
         display_name=str(asset.get("display_name") or asset.get("title") or "").strip(),
@@ -48,6 +50,7 @@ def snapshot_from_asset(
         price=price,
         timestamp=timestamp,
         candles=candles or [],
+        technical_features=dict(technical_features or {}),
     )
 
 
@@ -79,6 +82,7 @@ def build_ai_request(snapshot: MarketSnapshot) -> dict[str, Any]:
             "price": snapshot.price,
             "timestamp": snapshot.timestamp,
             "candles": snapshot.candles,
+            "technical_features": snapshot.technical_features,
         },
         "required_output": {
             "direction": "UP or DOWN",
