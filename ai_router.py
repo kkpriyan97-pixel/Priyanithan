@@ -99,6 +99,7 @@ def _snapshot_key(snapshot: MarketSnapshot) -> str:
             "mode": snapshot.mode,
             "profitability": snapshot.profitability,
             "candles": tail,
+            "technical_features": snapshot.technical_features,
         },
         sort_keys=True,
         separators=(",", ":"),
