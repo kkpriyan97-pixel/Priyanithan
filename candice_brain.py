@@ -185,7 +185,9 @@ def analyze_asset(asset,candles,price=None,now=None):
         return None
 
     last=cs[-1]
-    p=_f(price,last["close"])
+    # Direction is based strictly on the last fully closed 1-minute candle.
+    # The live tick remains available to app.py only for the scheduled entry price.
+    p=float(last["close"])
     anchor_ts=int(blocks_15m[-1]["time"])
 
     avwap,avwap_volume=_anchored_vwap(cs,anchor_ts)
