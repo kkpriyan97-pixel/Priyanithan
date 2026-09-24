@@ -461,8 +461,8 @@ async def _review_candidate(cycle_id,scan_no,x,eligible):
         x["ai_review_candle_ts"]=x.get("entry_candle_ts")
         x.update({
             "confidence":min(99,max(int(x.get("confidence",90)),ai_conf)) if d else int(x.get("confidence",90)),
-            "reason":d.get("reason") or x["reason"],
-            "ai_provider":d.get("provider"),
+            "reason":(d.get("reason") if d else "") or x["reason"],
+            "ai_provider":(d.get("provider") if d else None),
             "ai_direction":ai_direction,
             "decision_candle_closed":True,
             "reviewed_at":time.time(),
@@ -487,7 +487,9 @@ async def prepare_cycle_candidates(cycle_id,scan_no):
             for a in eligible
             if a["pair"] in STATE["analyses"]
         ]
-        raw=rank_signal_candidates(raw)[:2]
+        # Review several of the strongest technical candidates so one AI
+        # disagreement cannot starve an otherwise valid full-universe scan.
+        raw=rank_signal_candidates(raw)[:6]
         if not raw:
             log.info(
                 "AI_REVIEW_CACHE_EMPTY cycle=%s scan=%d reason=no_brain_candidates",
