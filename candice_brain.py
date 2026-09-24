@@ -200,34 +200,29 @@ def analyze_asset(asset,candles,price=None,now=None):
     val=profile["val"]
     slope=avwap-previous_avwap
 
-    # Strong acceptance: price must be on the same side of AVWAP and POC,
-    # and outside the corresponding Volume Profile value area, with AVWAP
-    # moving in the same direction. No other indicator is consulted.
-    up=(
-        p>avwap
-        and p>poc
-        and p>=vah
-        and slope>0
-    )
-    down=(
-        p<avwap
-        and p<poc
-        and p<=val
-        and slope<0
-    )
+    # Two-stage confluence:
+    # Stage A = both AVWAP and POC agree, with AVWAP slope confirming.
+    # Stage B = being beyond VAH/VAL upgrades the setup to strongest acceptance.
+    # This avoids starving the 3-minute scheduler when price is trending inside
+    # the current value area while still keeping both indicators mandatory.
+    up_base=(p>avwap and p>poc and slope>0)
+    down_base=(p<avwap and p<poc and slope<0)
+
+    up_strong=up_base and p>=vah
+    down_strong=down_base and p<=val
+
+    up=up_base
+    down=down_base
 
     if not (up or down):
         return None
 
     direction="UP" if up else "DOWN"
 
-    # Transparent confluence score from the two-indicator conditions.
-    # This is a rule score, not a statistical win probability.
-    confluence_score=0
-    confluence_score+=30 if (p>avwap if up else p<avwap) else 0
-    confluence_score+=30 if (p>poc if up else p<poc) else 0
-    confluence_score+=25 if (p>=vah if up else p<=val) else 0
-    confluence_score+=15 if (slope>0 if up else slope<0) else 0
+    # Rule score, not a statistical win probability.
+    confluence_score=70
+    if up_strong or down_strong:
+        confluence_score+=30
 
     return {
         "pair":str(asset.get("pair","")),
@@ -241,6 +236,7 @@ def analyze_asset(asset,candles,price=None,now=None):
         "structure_1m":"ABOVE_AVWAP_POC_VAH" if up else "BELOW_AVWAP_POC_VAL",
         "market_quality":round(confluence_score,2),
         "confluence_score":confluence_score,
+        "value_area_acceptance":bool(up_strong or down_strong),
         "reason":(
             f"AVWAP={avwap:.8f}; POC={poc:.8f}; VAH={vah:.8f}; VAL={val:.8f}; "
             f"AVWAP_slope={slope:.8f}; two-indicator confluence; closed-1m only."
