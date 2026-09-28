@@ -14,7 +14,7 @@ log=logging.getLogger("candice")
 BRAIN=BrainState()
 STATE={"status":"starting","assets":[],"prices":{},"candles":{},"analyses":{},"read_only":True,"cycle":0,"last_cycle":None,"account_id":None,"account_group":"demo","feed_source":"authenticated_websocket","last_asset_sync":None,"last_tick":None,"auto_trade_demo_enabled":False}
 CLIENT=None
-AUTO_TRADE_DEMO=os.getenv("AUTO_TRADE_DEMO","true").strip().lower() in {"1","true","yes","on"}
+AUTO_TRADE_DEMO=os.getenv("AUTO_TRADE_DEMO","false").strip().lower() in {"1","true","yes","on"}
 try:
     DEMO_TRADE_AMOUNT=max(0.01,float(os.getenv("DEMO_TRADE_AMOUNT","1")))
 except (TypeError,ValueError):
@@ -35,7 +35,7 @@ SCAN_SYNC_TIMEOUT=6.0
 FINAL_CACHE_MAX_AGE=75.0
 AI_REVIEW_TIMEOUT=24.0
 MAX_REVIEW_TASKS_PER_CYCLE=12
-BUILD_MARKER="NEXORA-M1-AVWAP-VP-2026-09-24"
+BUILD_MARKER="NEXORA-M1-AVWAP-VP-5M-2026-09-28"
 
 def pair_name(x):
     return str(x.get("pair") or x.get("p") or x.get("symbol") or x.get("instrument") or x.get("id") or "")
@@ -753,8 +753,8 @@ async def result_watch(key):
 
 async def cycle_loop():
     """
-    Deterministic 3-minute scheduler:
-      T-120, T-90, T-60 = full-universe analysis snapshots
+    Deterministic 5-minute scheduler:
+      T-240, T-180, T-120 = full-universe analysis snapshots
       T-30 = signal emission only; never block on candle/history/AI network work
     """
     while True:
@@ -769,7 +769,7 @@ async def cycle_loop():
             if old_cycle < cycle_id-1:
                 CYCLE_CANDIDATES.pop(old_cycle,None)
 
-        scan_targets=(next_boundary-120,next_boundary-90,next_boundary-60)
+        scan_targets=(next_boundary-240,next_boundary-180,next_boundary-120)
 
         for scan_no,target_ts in enumerate(scan_targets,1):
             await asyncio.sleep(max(0,target_ts-time.time()))
@@ -891,22 +891,22 @@ async def cycle_loop():
         key=f"{s.cycle_id}:{s.pair}:{s.entry_ts}"
         target_dt=time.strftime("%H:%M:%S",time.localtime(next_boundary))
         msg=(
-            "━━━━━━━━━━━━━━━━━━━━\\n"
-            "🎯 CANDICE AI • LIVE MARKET\\n"
-            "━━━━━━━━━━━━━━━━━━━━\\n\\n"
-            f"📊 ASSET: {s.display_name} ({s.pair})\\n"
-            f"➡️ DIRECTION: {s.direction}\\n\\n"
-            f"🕒 SIGNAL: {time.strftime('%H:%M:%S',time.localtime(ts))} UAE\\n"
-            f"🎯 TARGET: {target_dt} UAE\\n"
-            "⏳ SIGNAL COUNTDOWN: 00:30\\n\\n"
-            f"⏱️ EXPIRY: {s.expiry_minutes} MIN\\n"
-            f"💰 REFERENCE: {entry}\\n\\n"
-            f"📈 15M TREND: {s.trend_15m}\\n"
-            f"🕯️ 1M STRUCTURE: {s.structure_1m}\\n"
-            f"🧠 STRATEGY: {s.strategy}\\n"
-            f"🎯 CONFIDENCE: {s.confidence}%\\n"
-            "🟢 ACCOUNT: DEMO\\n\\n"
-            f"🧠 {s.reason}\\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🎯 CANDICE AI • LIVE MARKET\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 ASSET: {s.display_name} ({s.pair})\n"
+            f"➡️ DIRECTION: {s.direction}\n\n"
+            f"🕒 SIGNAL: {time.strftime('%H:%M:%S',time.localtime(ts))} UAE\n"
+            f"🎯 TARGET: {target_dt} UAE\n"
+            "⏳ SIGNAL COUNTDOWN: 00:30\n\n"
+            f"⏱️ EXPIRY: {s.expiry_minutes} MIN\n"
+            f"💰 REFERENCE: {entry}\n\n"
+            f"📈 15M TREND: {s.trend_15m}\n"
+            f"🕯️ 1M STRUCTURE: {s.structure_1m}\n"
+            f"🧠 STRATEGY: {s.strategy}\n"
+            f"🎯 CONFIDENCE: {s.confidence}%\n"
+            "🟢 ACCOUNT: DEMO\n\n"
+            f"🧠 {s.reason}\n"
             "━━━━━━━━━━━━━━━━━━━━"
         )
         sent=await telegram(msg,attempts=3)
