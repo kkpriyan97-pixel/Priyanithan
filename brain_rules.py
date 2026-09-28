@@ -1,7 +1,7 @@
 """Candice Brain state and cycle-safe signal ranking.
 
 Live direction is generated only by the AVWAP + Volume Profile technical brain.
-The 3-minute scheduler remains outside this module and is not altered here.
+The 5-minute scheduler remains outside this module and is protected from blocking work.
 """
 from __future__ import annotations
 from dataclasses import dataclass,field
@@ -10,7 +10,7 @@ from typing import Any
 
 COOLDOWN_SECONDS=900
 MIN_CONFIDENCE=90
-CYCLE_SECONDS=180
+CYCLE_SECONDS=300
 ALLOWED_STRATEGY="AVWAP_VOLUME_PROFILE"
 
 
