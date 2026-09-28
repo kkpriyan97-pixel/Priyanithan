@@ -69,7 +69,7 @@ def main():
         now=now,
     ) is None
 
-    assert CYCLE_SECONDS==180
+    assert CYCLE_SECONDS==300
     print("BRAIN_SMOKE_TEST_OK")
 
 
