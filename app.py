@@ -32,7 +32,7 @@ HISTORY_SEED_SEEN=set()
 CYCLE_CANDIDATES={}
 CYCLE_REVIEW_TASKS={}
 SCAN_SYNC_TIMEOUT=6.0
-FINAL_CACHE_MAX_AGE=75.0
+FINAL_CACHE_MAX_AGE=180.0
 AI_REVIEW_TIMEOUT=24.0
 MAX_REVIEW_TASKS_PER_CYCLE=12
 BUILD_MARKER="NEXORA-M1-AVWAP-VP-5M-2026-09-28"
@@ -561,7 +561,7 @@ async def _finish_review_tasks(cycle_id):
         await asyncio.gather(*pending,return_exceptions=True)
 
 def select_cached_candidate(cycle_id):
-    """Select a still-fresh AI-verified candidate without making a new network call."""
+    """Select a current-cycle AI-verified candidate without making a new network call."""
     now=time.time()
     candidates=[]
     current_by_pair={a["pair"]:a for a in STATE["assets"]}
